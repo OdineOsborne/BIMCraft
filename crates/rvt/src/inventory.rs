@@ -129,6 +129,12 @@ pub fn category_name(id: i64) -> Option<&'static str> {
     NAMES.binary_search_by_key(&id, |&(known, _)| known).ok().map(|i| NAMES[i].1)
 }
 
+/// The names this reader knows, for the test in [`crate::categories`] that every one of them has an identifier.
+#[cfg(test)]
+pub(crate) fn names_for_tests() -> &'static [(i64, &'static str)] {
+    NAMES
+}
+
 /// Sorted by id.
 const NAMES: &[(i64, &str)] = &[
     (-2_009_030, "Structural Connections"),

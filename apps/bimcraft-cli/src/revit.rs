@@ -45,6 +45,7 @@ pub fn open(s: &mut Session, path: &str) -> Result<Value, String> {
 /// it was saved to are in the file and shown here; nothing writes them into a project or an IFC file.
 #[cfg(feature = "rvt")]
 pub fn info(path: &str) -> Result<Value, String> {
+    use bimcraft_rvt::categories::category_identifier;
     use bimcraft_rvt::inventory::category_name;
     use bimcraft_rvt::{Limits, Revit};
     use serde_json::json;
@@ -60,7 +61,7 @@ pub fn info(path: &str) -> Result<Value, String> {
             let categories: Vec<Value> = inv
                 .counts()
                 .iter()
-                .map(|c| json!({"category": c.category, "name": category_name(c.category), "elements": c.elements, "placed": c.placed}))
+                .map(|c| json!({"category": c.category, "name": category_name(c.category), "identifier": category_identifier(c.category), "elements": c.elements, "placed": c.placed}))
                 .collect();
             json!({
                 "declared": inv.declared,

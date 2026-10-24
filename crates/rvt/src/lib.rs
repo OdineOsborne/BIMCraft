@@ -7,6 +7,7 @@
 
 pub mod atom;
 mod beams;
+pub mod categories;
 mod columns;
 mod container;
 pub mod curves;

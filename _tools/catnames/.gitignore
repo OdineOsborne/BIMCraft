@@ -1,0 +1,4 @@
+bin/
+obj/
+cats.tsv
+cats.err
