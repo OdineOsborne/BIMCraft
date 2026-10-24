@@ -16,7 +16,7 @@ Moved from the root `CLAUDE.md`, word for word: the root keeps the rules and the
   The import (`crates/rvt/src/import.rs`) reads a Revit file into a `bimcraft_core` model and says what it left out. `build` runs one
   survey of the file (`inventory::Survey`: the records of the categories it maps, the type records, the levels), then one reader per
   kind in this order, because each reads what the one before made: levels, walls, floors and ceilings, roofs, doors and windows
-  (hosted in the walls made), columns, rooms (their point found among the walls made). A reader takes the newest copy of a record
+  (hosted in the walls made), columns, beams, rooms (their point found among the walls made). A reader takes the newest copy of a record
   across the file's partitions, converts feet to millimetres (`mm`, `micron`), and builds elements the way a command would; it makes
   no rule of its own. `finish` runs `Model::check` and drops, with the rule's message, whatever fails it (a wall takes its doors along)
   until the model passes, so what comes back always checks. A reader never invents: what a record does not say, or the reader cannot
@@ -24,7 +24,9 @@ Moved from the root `CLAUDE.md`, word for word: the root keeps the rules and the
   takes is within `records::MAX_FEET` of zero, since the importer asks the model for geometry (a room's region) before the check.
   Wall sides follow the file's flip (set: the exterior is on the right, so start and end swap and an arc's sign changes); an opening's
   host is the nearest wall below its own id in its reference list, else above, and its hole is its box along an axis-parallel wall;
-  a column is its box's rectangle (a turned one: its symbol's size and the placement's angle); a floor, ceiling or roof is the loops
+  a column is its box's rectangle (a turned one: its symbol's size and the placement's angle); a beam is the bounded line in its
+  data, its section what the record box leaves once that line's own extent is taken out of it (the third extent is the check), its
+  line the top of the section; a floor, ceiling or roof is the loops
   of its `OST_SketchLines`; a roof by footprint only when flat, one by extrusion only where its box confirms it. The notes are part of
   the product: a change that leaves something out says so.
 

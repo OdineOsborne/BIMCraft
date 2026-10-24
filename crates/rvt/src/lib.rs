@@ -6,6 +6,7 @@
 //! templates, icons, help text) for the project.
 
 pub mod atom;
+mod beams;
 mod columns;
 mod container;
 pub mod curves;
