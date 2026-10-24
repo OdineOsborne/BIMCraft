@@ -26,6 +26,7 @@ mod objectstyles;
 mod orbit;
 mod paper;
 mod phasing;
+mod prices;
 mod properties;
 mod purge;
 pub mod recent;
@@ -536,6 +537,8 @@ pub struct BimApp {
     /// Manage > Object Styles, while open.
     object_styles_dialog: Option<objectstyles::ObjectStylesDialog>,
     options_dialog: Option<phasing::OptionsDialog>,
+    /// Manage > Price List, while open.
+    price_dialog: Option<prices::PriceDialog>,
     purge_dialog: Option<purge::PurgeDialog>,
     /// Manage > Select by ID and IDs of Selection, while open.
     select_by_id: Option<inquiry::SelectById>,
@@ -880,6 +883,7 @@ impl BimApp {
             line_weights_dialog: None,
             object_styles_dialog: None,
             options_dialog: None,
+            price_dialog: None,
             purge_dialog: None,
             select_by_id: None,
             ids_of_selection: None,
@@ -1218,6 +1222,7 @@ impl BimApp {
             || self.line_weights_dialog.is_some()
             || self.object_styles_dialog.is_some()
             || self.options_dialog.is_some()
+            || self.price_dialog.is_some()
             || self.purge_dialog.is_some()
             || self.select_by_id.is_some()
             || self.ids_of_selection.is_some()
@@ -1391,6 +1396,10 @@ impl BimApp {
             // What the selection hides comes back; with nothing of it hidden, the list of what the view hides.
             "PU" => {
                 self.open_purge();
+                return true;
+            }
+            "PL" => {
+                self.open_prices();
                 return true;
             }
             "LK" => {
@@ -2785,6 +2794,10 @@ impl BimApp {
             if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
                 self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
             }
+            let tip = "Price List (PL): a published price list as this project's data, so a bill of quantities has prices to work with; you say which column holds the code, the wording, the unit and the price";
+            if big_button(ui, Icon::Schedule, "Price List", self.price_dialog.is_some(), tip).clicked() {
+                self.open_prices();
+            }
             let tip =
                 "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type";
             if big_button(ui, Icon::Delete, "Purge Unused", self.purge_dialog.is_some(), tip).clicked() {
@@ -3599,6 +3612,7 @@ impl BimApp {
         self.line_weights_window(ctx);
         self.object_styles_window(ctx);
         self.options_window(ctx);
+        self.price_window(ctx);
         self.purge_window(ctx);
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);

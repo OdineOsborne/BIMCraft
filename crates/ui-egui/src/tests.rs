@@ -4873,6 +4873,7 @@ mod links;
 mod mep;
 mod objectstyles;
 mod planviews;
+mod prices;
 mod purge;
 mod revit;
 mod start;

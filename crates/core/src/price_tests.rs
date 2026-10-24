@@ -105,3 +105,68 @@ fn a_column_the_file_has_not_is_refused_naming_it() {
     let err = run(&mut s, "price_list", json!({"name": "L", "path": path, "code": "Articolo", "price": "Prezzo"})).expect_err("refused");
     assert!(err.contains("Articolo"), "{err}");
 }
+
+#[test]
+fn the_columns_of_a_file_come_back_with_the_role_each_heading_gives_away() {
+    let path = file(
+        "regionale.csv",
+        "ARTICOLO;DESCRIZIONE DEI LAVORI;U.M.;PREZZO UNITARIO\nA.01.010;Calcestruzzo C25/30;m3;142,50\nA.01.020;Acciaio B450C;kg;1,85\n",
+    );
+    let mut s = Session::new();
+    let out = run(&mut s, "price_columns", json!({"path": path})).expect("reads the headings");
+    assert_eq!(out["separator"], ";");
+    assert_eq!(out["columns"], json!(["ARTICOLO", "DESCRIZIONE DEI LAVORI", "U.M.", "PREZZO UNITARIO"]));
+    assert_eq!(out["row_count"], 2);
+    // The rows come back as the file spells them, for looking at before the list is read.
+    assert_eq!(out["rows"][0], json!(["A.01.010", "Calcestruzzo C25/30", "m3", "142,50"]));
+    // Every role is given away by its heading's own words, so the window proposes the whole mapping.
+    assert_eq!(out["guess"]["code"], "ARTICOLO");
+    assert_eq!(out["guess"]["description"], "DESCRIZIONE DEI LAVORI");
+    assert_eq!(out["guess"]["unit"], "U.M.");
+    assert_eq!(out["guess"]["price"], "PREZZO UNITARIO");
+    // It reads: the project is untouched and it is no undo step.
+    assert!(s.model.price_lists.is_empty());
+    assert!(s.history().is_empty(), "{:?}", s.history());
+}
+
+#[test]
+fn a_heading_that_gives_nothing_away_is_guessed_at_nothing_and_the_columns_still_come_back() {
+    let path = file("mute.csv", "A,B,C\n1,2,3\n");
+    let mut s = Session::new();
+    let out = run(&mut s, "price_columns", json!({"path": path})).expect("reads the headings");
+    assert_eq!(out["columns"], json!(["A", "B", "C"]));
+    assert_eq!(out["guess"], json!({}), "nothing is guessed at: the user picks");
+}
+
+#[test]
+fn short_words_are_not_looked_for_inside_a_heading() {
+    // `um` is a unit and `art` a code, but `consumo` and `partita` are neither: a word under four letters has to be the
+    // whole heading.
+    let path = file("parole.csv", "PARTITA;CONSUMO;PREZZO\nA,1,2\n");
+    let mut s = Session::new();
+    let out = run(&mut s, "price_columns", json!({"path": path})).expect("reads the headings");
+    assert_eq!(out["guess"], json!({"price": "PREZZO"}));
+}
+
+#[test]
+fn only_the_first_rows_come_back_however_long_the_file_is() {
+    let mut text = String::from("Codice,Prezzo\n");
+    for i in 0..50 {
+        text.push_str(&format!("C{i},1.0\n"));
+    }
+    let path = file("lungo.csv", &text);
+    let mut s = Session::new();
+    let out = run(&mut s, "price_columns", json!({"path": path})).expect("reads the headings");
+    assert_eq!(out["row_count"], 50);
+    assert_eq!(out["rows"].as_array().map(Vec::len), Some(6), "enough to look at, no more");
+}
+
+#[test]
+fn the_separator_may_be_the_callers_and_the_columns_follow_it() {
+    let path = file("punti.csv", "Codice,Descrizione;Prezzo\nA.1,Scavo,10.50\n");
+    let mut s = Session::new();
+    // A comma splits this heading into the most columns, so that is what it is read with; a caller who knows better says so.
+    assert_eq!(run(&mut s, "price_columns", json!({"path": path.clone()})).expect("read")["columns"].as_array().map(Vec::len), Some(2));
+    let out = run(&mut s, "price_columns", json!({"path": path, "separator": ";"})).expect("read");
+    assert_eq!(out["columns"], json!(["Codice,Descrizione", "Prezzo"]));
+}

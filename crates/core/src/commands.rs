@@ -71,13 +71,29 @@ pub static ALL: &[Command] = &[
          `copies`, `library`, `left_out`",
         insert_from,
     ),
+    other(
+        "price_columns",
+        "Price List Columns",
+        "{path, separator?} the column headings of a price-list file, its first rows, and which column each role looks \
+         like: what a window needs to offer a mapping before the list is read, and what `price_list` then reads it with. \
+         It changes nothing and is no undo step. `separator` as `price_list` takes it. Returns `separator`, `columns` as \
+         the file spells them, `rows` (up to 6, for looking at), `row_count`, and `guess` {code, description, unit, \
+         price}, which holds a role only where a heading's own words give it away",
+        price_columns,
+    ),
     edit(
         "price_list",
         "Price List",
-        // No shortcut yet: a Revit shortcut goes with the tool in the window (`SHORTCUTS` in `ui-egui`), and this
-        // command has no tool yet. `ks_lists_every_shortcut_and_every_one_it_lists_works` holds that line.
-        &[],
-        "{name, path, code, price, description?, unit?, separator?} a price list read from a text file, as a bill of          quantities prices work with: every row of the file becomes an item named by its article code. The column headings          are the caller's, so a price list of any form needs no code: `code` and `price` name the headings that hold the          article code and the unit price, and `description` and `unit` the ones that hold the wording and the unit of          measure where the file has them. Headings match ignoring case and surrounding space. `separator` is the one          character between columns; without it, whichever of `;`, `,` and a tab splits the heading row into the most          columns. A price may be written with a comma for its decimal point. The mapping is kept with the list, so the          same file reads the same way again. A row with no code, or whose price is no number, is left out and named, never          guessed. Replaces a list of the same `name`. Returns `name`, `items`, `left_out`",
+        &["PL"],
+        "{name, path, code, price, description?, unit?, separator?} a price list read from a text file, as a bill of \
+         quantities prices work with: every row of the file becomes an item named by its article code. The column headings \
+         are the caller's, so a price list of any form needs no code: `code` and `price` name the headings that hold the \
+         article code and the unit price, and `description` and `unit` the ones that hold the wording and the unit of \
+         measure where the file has them. Headings match ignoring case and surrounding space, and `price_columns` reads \
+         them first. `separator` is the one character between columns; without it, whichever of `;`, `,` and a tab splits \
+         the heading row into the most columns. A price may be written with a comma for its decimal point. The mapping is \
+         kept with the list, so the same file reads the same way again. A row with no code, or whose price is no number, \
+         is left out and named, never guessed. Replaces a list of the same `name`. Returns `name`, `items`, `left_out`",
         price_list,
     ),
     edit(
@@ -1700,6 +1716,80 @@ fn price_number(raw: &str) -> Option<f64> {
     normal.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
 }
 
+/// How many rows of a price list `price_columns` gives back, so a mapping can be looked at before the list is read.
+const PRICE_SAMPLE_ROWS: usize = 6;
+
+/// A price list's text. The path is the caller's, so its size is checked before anything is read.
+fn price_file(c: &str, path: &str) -> Result<String, String> {
+    let len = std::fs::metadata(path).map(|m| m.len()).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    if len > MAX_PRICE_FILE {
+        return Err(bad(c, format!("`{path}` holds {len} bytes; a price list is read up to {MAX_PRICE_FILE}")));
+    }
+    std::fs::read_to_string(path).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))
+}
+
+/// A row's cells, as the file spells them: the quotes and the space around each one off, nothing else.
+fn price_cells(line: &str, ch: char) -> Vec<String> {
+    line.split(ch).map(|v| price_text(v.trim().trim_matches('"'))).collect()
+}
+
+/// Which heading holds a role, where its own words give it away: what the window proposes and the user may change.
+/// The words are what a price list calls the role in the languages a project is written in here; a heading equal to one
+/// wins over a heading that merely holds it, and only a word of four letters or more is looked for inside a heading,
+/// because `um` lies inside `consumo`.
+fn price_guess(headings: &[String], words: &[&str]) -> Option<usize> {
+    let lower: Vec<String> = headings.iter().map(|h| h.trim().to_lowercase()).collect();
+    words
+        .iter()
+        .find_map(|w| lower.iter().position(|h| h == w))
+        .or_else(|| words.iter().filter(|w| w.chars().count() >= 4).find_map(|w| lower.iter().position(|h| h.contains(*w))))
+}
+
+/// What each role is called in a price list, in the languages a project is written in here. `tariffa` is a code: it is
+/// what the Tuscan price list heads its article column with.
+const PRICE_WORDS: [(&str, &[&str]); 4] = [
+    ("code", &["code", "codice", "articolo", "art.", "art", "tariffa", "codigo", "c\u{f3}digo", "referencia", "ref."]),
+    (
+        "description",
+        &[
+            "description",
+            "descrizione",
+            "descrizione dei lavori",
+            "denominazione",
+            "lavorazione",
+            "designazione",
+            "descri\u{e7}\u{e3}o",
+            "descripcion",
+            "descripci\u{f3}n",
+        ],
+    ),
+    ("unit", &["unit", "um", "u.m.", "unit\u{e0}", "unita", "unit\u{e0} di misura", "unidade", "unidad", "misura", "unit of measure"]),
+    ("price", &["price", "prezzo", "prezzo unitario", "importo", "unit price", "pre\u{e7}o", "precio", "costo", "cost"]),
+];
+
+/// `price_columns`: a price-list file's headings and first rows, read without touching the project.
+fn price_columns(_s: &mut Session, p: &Value) -> R {
+    let c = "price_columns";
+    let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
+    let separator = string(c, p, "separator")?.unwrap_or_default();
+    let text = price_file(c, &path)?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let heading = lines.next().ok_or_else(|| bad(c, format!("`{path}` has no heading row")))?;
+    let ch = price_separator(&separator, heading);
+    let columns = price_cells(heading, ch);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut row_count = 0usize;
+    for line in lines {
+        row_count += 1;
+        if rows.len() < PRICE_SAMPLE_ROWS {
+            rows.push(price_cells(line, ch));
+        }
+    }
+    let guess: BTreeMap<&str, &str> =
+        PRICE_WORDS.iter().filter_map(|(role, words)| price_guess(&columns, words).map(|at| (*role, columns[at].as_str()))).collect();
+    Ok(json!({"separator": ch.to_string(), "columns": columns, "rows": rows, "row_count": row_count, "guess": guess}))
+}
+
 fn price_list(s: &mut Session, p: &Value) -> R {
     let c = "price_list";
     let name = string(c, p, "name")?.ok_or_else(|| bad(c, "`name` is required"))?;
@@ -1712,19 +1802,16 @@ fn price_list(s: &mut Session, p: &Value) -> R {
     let unit_col = string(c, p, "unit")?.unwrap_or_default();
     let separator = string(c, p, "separator")?.unwrap_or_default();
 
-    let len = std::fs::metadata(&path).map(|m| m.len()).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
-    if len > MAX_PRICE_FILE {
-        return Err(bad(c, format!("`{path}` holds {len} bytes; a price list is read up to {MAX_PRICE_FILE}")));
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    let text = price_file(c, &path)?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let heading = lines.next().ok_or_else(|| bad(c, format!("`{path}` has no heading row")))?;
     let ch = price_separator(&separator, heading);
-    let headings: Vec<String> = heading.split(ch).map(|h| h.trim().trim_matches('"').to_lowercase()).collect();
+    let headings = price_cells(heading, ch);
     let column = |wanted: &str| -> Result<usize, String> {
+        let wanted_lower = wanted.trim().to_lowercase();
         headings
             .iter()
-            .position(|h| h == &wanted.trim().to_lowercase())
+            .position(|h| h.trim().to_lowercase() == wanted_lower)
             .ok_or_else(|| bad(c, format!("`{path}` has no column `{wanted}`; it has {}", headings.join(", "))))
     };
     let (code_at, price_at) = (column(&code_col)?, column(&price_col)?);
