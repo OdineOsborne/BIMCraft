@@ -134,6 +134,7 @@ fn the_fence_is_written_into_the_policy_documents() {
 }
 
 mod beams;
+mod beams_probe;
 mod columns;
 mod decoders;
 mod floors;
