@@ -32,6 +32,8 @@ pub mod paint;
 pub mod pdf;
 pub mod pen;
 pub mod phasing;
+#[cfg(test)]
+mod price_tests;
 pub mod render;
 pub mod runs;
 pub mod sample;

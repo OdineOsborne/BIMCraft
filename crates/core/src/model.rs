@@ -1519,6 +1519,52 @@ pub struct ProjectParameter {
 /// The most project parameters a project holds.
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
+/// How many price lists a project holds.
+pub const MAX_PRICE_LISTS: usize = 16;
+/// How many items one price list holds: a regional price list runs to some thousands.
+pub const MAX_PRICE_ITEMS: usize = 20_000;
+
+/// One line of a price list: what it is, what it is measured in, and what one of it costs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriceItem {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The unit it is priced by, as the list writes it (`m2`, `m3`, `kg`): text, never converted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    pub price: f64,
+}
+
+/// Which column of an imported file held what. Kept with the list, so the same file reads the same way again and
+/// another list's headings need no code: this is the mapping the person chose, and it is project data.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriceMapping {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unit: String,
+    pub price: String,
+    /// What separated the columns, as one character.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub separator: String,
+}
+
+/// A price list: its items by the code that names them, and the mapping it was read with.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriceList {
+    /// The file it was read from, for the record; reading it again is the person's to ask for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default)]
+    pub mapping: PriceMapping,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub items: BTreeMap<String, PriceItem>,
+}
+
 /// The categories project parameters are for.
 pub const PARAMETER_CATEGORIES: [&str; 24] = [
     "wall",
@@ -1606,6 +1652,9 @@ pub struct Model {
     /// Its sets of design options, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub option_sets: BTreeMap<String, OptionSet>,
+    /// Its price lists, by name: the lines a bill of quantities prices its work with.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub price_lists: BTreeMap<String, PriceList>,
     /// What its pens draw on paper (Manage > Line Weights), once set; until then, what a project in its units starts with
     /// ([`Model::line_weights`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1659,6 +1708,7 @@ impl Model {
             phase_filters: phasing::filters(language),
             phase_overrides: phasing::overrides(),
             option_sets: BTreeMap::new(),
+            price_lists: BTreeMap::new(),
             line_weights: None,
             object_styles: BTreeMap::new(),
             elements: Elements::new(),
@@ -3286,6 +3336,25 @@ impl Model {
         }
         if self.images.len() > MAX_IMAGES {
             return Err(format!("the project has {} pictures; it holds up to {MAX_IMAGES}", self.images.len()));
+        }
+        if self.price_lists.len() > MAX_PRICE_LISTS {
+            return Err(format!("the project has {} price lists; it holds up to {MAX_PRICE_LISTS}", self.price_lists.len()));
+        }
+        for (n, list) in &self.price_lists {
+            if n.trim().is_empty() {
+                return Err("a price list needs a name".into());
+            }
+            if list.items.len() > MAX_PRICE_ITEMS {
+                return Err(format!("price list `{n}` has {} items; one holds up to {MAX_PRICE_ITEMS}", list.items.len()));
+            }
+            for (code, item) in &list.items {
+                if code.trim().is_empty() {
+                    return Err(format!("an item of price list `{n}` has no code"));
+                }
+                if !item.price.is_finite() || item.price < 0.0 {
+                    return Err(format!("item `{code}` of price list `{n}` has no price a bill can use"));
+                }
+            }
         }
         for id in self.images.keys() {
             text(&format!("picture `{id}`"), "id", id)?;

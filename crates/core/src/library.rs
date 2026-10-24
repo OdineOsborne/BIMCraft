@@ -40,6 +40,10 @@ pub enum Kind {
     FamilyType,
     /// A family's parameter, named `family: parameter`.
     FamilyParameter,
+    /// A price list.
+    PriceList,
+    /// One line of a price list, named `list: code`.
+    PriceItem,
 }
 
 impl Kind {
@@ -59,11 +63,15 @@ impl Kind {
             Kind::DesignOption => "design option".into(),
             Kind::FamilyType => "family type".into(),
             Kind::FamilyParameter => "family parameter".into(),
+            Kind::PriceList => "price list".into(),
+            Kind::PriceItem => "price list item".into(),
         }
     }
 
     fn parse(s: &str) -> Option<Kind> {
         Some(match s {
+            "price-list" => Kind::PriceList,
+            "price-item" => Kind::PriceItem,
             "material" => Kind::Material,
             "picture" => Kind::Picture,
             "family" => Kind::Family,
@@ -97,6 +105,8 @@ impl fmt::Display for Kind {
             Kind::DesignOption => f.write_str("design-option"),
             Kind::FamilyType => f.write_str("family-type"),
             Kind::FamilyParameter => f.write_str("family-parameter"),
+            Kind::PriceList => f.write_str("price-list"),
+            Kind::PriceItem => f.write_str("price-item"),
         }
     }
 }
@@ -473,6 +483,10 @@ impl Model {
         let params: Vec<String> =
             self.families.iter().flat_map(|(f, fam)| fam.parameters.iter().map(move |p| format!("{f}: {}", p.name))).collect();
         add(Kind::FamilyParameter, &mut params.iter());
+        add(Kind::PriceList, &mut self.price_lists.keys());
+        let prices: Vec<String> =
+            self.price_lists.iter().flat_map(|(l, list)| list.items.keys().map(move |c| format!("{l}: {c}"))).collect();
+        add(Kind::PriceItem, &mut prices.iter());
         out
     }
 

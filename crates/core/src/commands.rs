@@ -72,6 +72,15 @@ pub static ALL: &[Command] = &[
         insert_from,
     ),
     edit(
+        "price_list",
+        "Price List",
+        // No shortcut yet: a Revit shortcut goes with the tool in the window (`SHORTCUTS` in `ui-egui`), and this
+        // command has no tool yet. `ks_lists_every_shortcut_and_every_one_it_lists_works` holds that line.
+        &[],
+        "{name, path, code, price, description?, unit?, separator?} a price list read from a text file, as a bill of          quantities prices work with: every row of the file becomes an item named by its article code. The column headings          are the caller's, so a price list of any form needs no code: `code` and `price` name the headings that hold the          article code and the unit price, and `description` and `unit` the ones that hold the wording and the unit of          measure where the file has them. Headings match ignoring case and surrounding space. `separator` is the one          character between columns; without it, whichever of `;`, `,` and a tab splits the heading row into the most          columns. A price may be written with a comma for its decimal point. The mapping is kept with the list, so the          same file reads the same way again. A row with no code, or whose price is no number, is left out and named, never          guessed. Replaces a list of the same `name`. Returns `name`, `items`, `left_out`",
+        price_list,
+    ),
+    edit(
         "link",
         "Link Model",
         &["LK"],
@@ -1663,6 +1672,107 @@ fn relink(s: &mut Session) -> Vec<Value> {
         }
     }
     failed
+}
+
+/// How big a price-list file is read: enough for any published price list, bounded because the path is hostile.
+const MAX_PRICE_FILE: u64 = 32 * 1024 * 1024;
+
+/// The character that splits the heading row into the most columns, of the three a price list is written with.
+fn price_separator(given: &str, heading: &str) -> char {
+    if let Some(ch) = given.chars().next() {
+        return ch;
+    }
+    [';', ',', char::from(9)].into_iter().max_by_key(|&ch| heading.split(ch).count()).unwrap_or(',')
+}
+
+/// Text from a price list, trimmed to what a name or a wording may hold.
+fn price_text(v: &str) -> String {
+    v.trim().chars().take(crate::model::MAX_TEXT).collect()
+}
+
+/// A price as a price list writes it: a comma stands for the decimal point where there is no point.
+fn price_number(raw: &str) -> Option<f64> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let normal = if t.contains('.') { t.replace(',', "") } else { t.replace(',', ".") };
+    normal.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+fn price_list(s: &mut Session, p: &Value) -> R {
+    let c = "price_list";
+    let name = string(c, p, "name")?.ok_or_else(|| bad(c, "`name` is required"))?;
+    let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
+    let want = |key: &str| -> Result<String, String> {
+        string(c, p, key)?.ok_or_else(|| bad(c, format!("`{key}` is required: the heading of the column that holds it")))
+    };
+    let (code_col, price_col) = (want("code")?, want("price")?);
+    let desc_col = string(c, p, "description")?.unwrap_or_default();
+    let unit_col = string(c, p, "unit")?.unwrap_or_default();
+    let separator = string(c, p, "separator")?.unwrap_or_default();
+
+    let len = std::fs::metadata(&path).map(|m| m.len()).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    if len > MAX_PRICE_FILE {
+        return Err(bad(c, format!("`{path}` holds {len} bytes; a price list is read up to {MAX_PRICE_FILE}")));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let heading = lines.next().ok_or_else(|| bad(c, format!("`{path}` has no heading row")))?;
+    let ch = price_separator(&separator, heading);
+    let headings: Vec<String> = heading.split(ch).map(|h| h.trim().trim_matches('"').to_lowercase()).collect();
+    let column = |wanted: &str| -> Result<usize, String> {
+        headings
+            .iter()
+            .position(|h| h == &wanted.trim().to_lowercase())
+            .ok_or_else(|| bad(c, format!("`{path}` has no column `{wanted}`; it has {}", headings.join(", "))))
+    };
+    let (code_at, price_at) = (column(&code_col)?, column(&price_col)?);
+    let desc_at = if desc_col.is_empty() { None } else { Some(column(&desc_col)?) };
+    let unit_at = if unit_col.is_empty() { None } else { Some(column(&unit_col)?) };
+
+    let mut items: BTreeMap<String, crate::model::PriceItem> = BTreeMap::new();
+    let mut left_out: Vec<String> = Vec::new();
+    for (n, line) in lines.enumerate() {
+        let cells: Vec<&str> = line.split(ch).collect();
+        let cell = |at: usize| cells.get(at).map_or("", |v| v.trim()).trim_matches('"').trim();
+        let code = cell(code_at);
+        let row = n + 2;
+        if code.is_empty() {
+            left_out.push(format!("row {row}: it has no code"));
+            continue;
+        }
+        if items.len() >= crate::model::MAX_PRICE_ITEMS {
+            return Err(bad(c, format!("`{path}` has more rows than a price list holds, which is {}", crate::model::MAX_PRICE_ITEMS)));
+        }
+        let Some(price) = price_number(cell(price_at)) else {
+            left_out.push(format!("row {row}, `{code}`: `{}` is no price", cell(price_at)));
+            continue;
+        };
+        items.insert(
+            price_text(code),
+            crate::model::PriceItem {
+                description: desc_at.map(|at| price_text(cell(at))).unwrap_or_default(),
+                unit: unit_at.map(|at| price_text(cell(at))).unwrap_or_default(),
+                price,
+            },
+        );
+    }
+
+    let list = crate::model::PriceList {
+        source: path,
+        mapping: crate::model::PriceMapping {
+            code: code_col,
+            description: desc_col,
+            unit: unit_col,
+            price: price_col,
+            separator: ch.to_string(),
+        },
+        items,
+    };
+    let count = list.items.len();
+    s.model_mut().price_lists.insert(name.clone(), list);
+    Ok(json!({"name": name, "items": count, "left_out": left_out}))
 }
 
 fn link_model(s: &mut Session, p: &Value) -> R {
