@@ -17,7 +17,7 @@ use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 use crate::inventory::{Inventory, Survey, Wants};
 use crate::records::{Record, TypeRecord};
 use crate::{Limits, Revit};
-use crate::{beams, columns, floors, openings, roofs, rooms, walls};
+use crate::{beams, columns, floors, footings, openings, roofs, rooms, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -198,9 +198,10 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 11] = [
+const CATEGORIES: [i64; 12] = [
     walls::OST_WALLS,
     beams::OST_STRUCTURAL_FRAMING,
+    footings::OST_STRUCTURAL_FOUNDATION,
     floors::OST_FLOORS,
     floors::OST_CEILINGS,
     floors::OST_SKETCH_LINES,
@@ -259,6 +260,7 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     openings::wanted(&facts, &mut wants.data);
     columns::wanted(&facts, &mut wants);
     beams::wanted(&facts, &mut wants);
+    footings::wanted(&facts, &mut wants);
     rooms::wanted(&facts, &mut wants);
     let gathered = revit.gather(release, &facts.tags, &facts.ids, &wants).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
@@ -267,6 +269,7 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     openings::import(&mut cx, &facts, &gathered);
     columns::import(&mut cx, &facts, &gathered);
     beams::import(&mut cx, &facts, &gathered);
+    footings::import(&mut cx, &facts, &gathered);
     rooms::import(&mut cx, &facts, &gathered);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))

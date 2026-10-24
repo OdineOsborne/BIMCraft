@@ -15,6 +15,9 @@ use crate::{Limits, Revit};
 use std::collections::BTreeMap;
 
 const OST_STRUCTURAL_FRAMING: i64 = -2_001_320;
+/// What this measures: the three structural categories the reader counts but has had no module for.
+const MEASURED: [(i64, &str); 3] =
+    [(OST_STRUCTURAL_FRAMING, "structural framing"), (-2_001_300, "structural foundations"), (-2_009_000, "structural rebar")];
 const END_TOLERANCE_FEET: f64 = 1e-6;
 const CLOSURE_TOLERANCE_FEET: f64 = 0.01;
 const MIN_PLAN_SHARE: f64 = 0.1;
@@ -72,85 +75,87 @@ fn how_many_structural_framing_elements_carry_a_bounded_line() {
         return;
     }
     for path in samples {
-        let mut revit = match Revit::open(&path, Limits::default()) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{}: cannot open: {e}", path.display());
-                continue;
-            }
-        };
-        let release = match revit.basic_file_info() {
-            Ok(i) => i.release,
-            Err(e) => {
-                eprintln!("{}: no release: {e}", path.display());
-                continue;
-            }
-        };
-        let survey = match revit.survey(&|c| c == OST_STRUCTURAL_FRAMING) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{} (Revit {release}): survey failed: {e}", path.display());
-                continue;
-            }
-        };
-        // The newest copy of each placed framing record, with its box.
-        let mut current: BTreeMap<u32, (u32, [f64; 6])> = BTreeMap::new();
-        for r in survey.records.iter().filter(|r| r.placed) {
-            match current.get(&r.id) {
-                Some((held, _)) if *held >= r.partition => {}
-                _ => {
-                    current.insert(r.id, (r.partition, r.bbox));
+        for (category, label) in MEASURED {
+            let mut revit = match Revit::open(&path, Limits::default()) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{}: cannot open: {e}", path.display());
+                    continue;
+                }
+            };
+            let release = match revit.basic_file_info() {
+                Ok(i) => i.release,
+                Err(e) => {
+                    eprintln!("{}: no release: {e}", path.display());
+                    continue;
+                }
+            };
+            let survey = match revit.survey(&|c| c == category) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} (Revit {release}): survey failed: {e}", path.display());
+                    continue;
+                }
+            };
+            // The newest copy of each placed framing record, with its box.
+            let mut current: BTreeMap<u32, (u32, [f64; 6])> = BTreeMap::new();
+            for r in survey.records.iter().filter(|r| r.placed) {
+                match current.get(&r.id) {
+                    Some((held, _)) if *held >= r.partition => {}
+                    _ => {
+                        current.insert(r.id, (r.partition, r.bbox));
+                    }
                 }
             }
-        }
-        if current.is_empty() {
-            eprintln!("{} (Revit {release}): no placed structural framing", path.display());
-            continue;
-        }
-        let mut wants = Wants::default();
-        wants.data.extend(current.keys().copied());
-        let gathered = match revit.gather(survey.release, &survey.tags, &survey.ids, &wants) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("{} (Revit {release}): gather failed: {e}", path.display());
+            if current.is_empty() {
+                eprintln!("{} (Revit {release}): no placed {label}", path.display());
                 continue;
             }
-        };
-        let (mut no_data, mut no_line, mut lines) = (0usize, 0usize, 0usize);
-        let (mut ok, mut outside, mut steep, mut no_closure) = (0usize, 0usize, 0usize, 0usize);
-        let mut sections: BTreeMap<(i64, i64), usize> = BTreeMap::new();
-        for (id, (_, bbox)) in &current {
-            let Some(copies) = gathered.data.get(id) else {
-                no_data += 1;
-                continue;
-            };
-            let Some((line, _)) = newest(copies, curves::first_line) else {
-                no_line += 1;
-                continue;
-            };
-            lines += 1;
-            match solve(*bbox, line.start(), line.end()) {
-                Ok((_, width, depth)) => {
-                    ok += 1;
-                    // millimetres, rounded, so equal sections group
-                    let mm = |feet: f64| (feet * 304.8).round() as i64;
-                    *sections.entry((mm(width), mm(depth))).or_default() += 1;
+            let mut wants = Wants::default();
+            wants.data.extend(current.keys().copied());
+            let gathered = match revit.gather(survey.release, &survey.tags, &survey.ids, &wants) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("{} (Revit {release}): gather failed: {e}", path.display());
+                    continue;
                 }
-                Err(Fail::Outside) => outside += 1,
-                Err(Fail::Steep) => steep += 1,
-                Err(Fail::Closure) => no_closure += 1,
+            };
+            let (mut no_data, mut no_line, mut lines) = (0usize, 0usize, 0usize);
+            let (mut ok, mut outside, mut steep, mut no_closure) = (0usize, 0usize, 0usize, 0usize);
+            let mut sections: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+            for (id, (_, bbox)) in &current {
+                let Some(copies) = gathered.data.get(id) else {
+                    no_data += 1;
+                    continue;
+                };
+                let Some((line, _)) = newest(copies, curves::first_line) else {
+                    no_line += 1;
+                    continue;
+                };
+                lines += 1;
+                match solve(*bbox, line.start(), line.end()) {
+                    Ok((_, width, depth)) => {
+                        ok += 1;
+                        // millimetres, rounded, so equal sections group
+                        let mm = |feet: f64| (feet * 304.8).round() as i64;
+                        *sections.entry((mm(width), mm(depth))).or_default() += 1;
+                    }
+                    Err(Fail::Outside) => outside += 1,
+                    Err(Fail::Steep) => steep += 1,
+                    Err(Fail::Closure) => no_closure += 1,
+                }
             }
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        eprintln!("\n=== {name} (Revit {release}) ===");
-        eprintln!("  placed structural framing: {}", current.len());
-        eprintln!("  with a bounded line:       {lines}   (no data {no_data}, no line {no_line})");
-        eprintln!("  the solve closes:          {ok}");
-        eprintln!("  it does not:               outside {outside}, too steep {steep}, no closure {no_closure}");
-        let mut by_count: Vec<_> = sections.iter().collect();
-        by_count.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        for ((w, d), n) in by_count.iter().take(8) {
-            eprintln!("     {n:>4} × {w} mm wide, {d} mm deep");
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            eprintln!("\n=== {name} (Revit {release}) : {label} ===");
+            eprintln!("  placed:              {}", current.len());
+            eprintln!("  with a bounded line:       {lines}   (no data {no_data}, no line {no_line})");
+            eprintln!("  the solve closes:          {ok}");
+            eprintln!("  it does not:               outside {outside}, too steep {steep}, no closure {no_closure}");
+            let mut by_count: Vec<_> = sections.iter().collect();
+            by_count.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+            for ((w, d), n) in by_count.iter().take(8) {
+                eprintln!("     {n:>4} × {w} mm wide, {d} mm deep");
+            }
         }
     }
 }

@@ -138,6 +138,7 @@ mod beams_probe;
 mod columns;
 mod decoders;
 mod floors;
+mod footings;
 mod import;
 mod inventory;
 mod metadata;
