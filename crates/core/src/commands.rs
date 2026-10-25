@@ -97,6 +97,18 @@ pub static ALL: &[Command] = &[
          quantities. `clear` takes the code off instead. Returns `parameter`, `code`, `elements`",
         price_code,
     ),
+    other(
+        "dxf",
+        "DXF",
+        "{path, scale?} what a DXF drawing holds, read and reported without changing the project: its `layers` and how \
+         many shapes are on each, the `shapes` in all, the `extent` it lies in (mm, south-west and north-east), the \
+         `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
+         `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
+         POLYLINE, ARC and CIRCLE, each on the layer it names; blocks, text, dimensions, hatches and splines are \
+         counted and named, never guessed at. A DWG is Autodesk's own format with no published specification: convert \
+         it to DXF first",
+        dxf_read,
+    ),
     edit(
         "price_list",
         "Price List",
@@ -1760,6 +1772,32 @@ fn price_number(raw: &str) -> Option<f64> {
     }
     let normal = if t.contains('.') { t.replace(',', "") } else { t.replace(',', ".") };
     normal.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// How big a DXF is read: the whole file is held while it is read, as a drawing of a building fits in memory.
+fn dxf_read(_s: &mut Session, p: &Value) -> R {
+    let c = "dxf";
+    let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
+    let scale = match p.get("scale") {
+        v if absent(v) => None,
+        Some(v) => Some(v.as_f64().ok_or_else(|| bad(c, format!("`scale` is millimetres to one of the file's units, not {v}")))?),
+        None => None,
+    };
+    let len = std::fs::metadata(&path).map(|m| m.len()).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    if len as usize > crate::dxf::MAX_BYTES {
+        return Err(bad(c, format!("`{path}` holds {len} bytes; a DXF is read up to {}", crate::dxf::MAX_BYTES)));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    let drawing = crate::dxf::read(&bytes, &crate::dxf::Options { scale }).map_err(|e| bad(c, format!("`{path}`: {e}")))?;
+    let layers: Vec<Value> = drawing.layers.iter().map(|l| json!({"name": l.name, "shapes": l.shapes.len()})).collect();
+    let extent = drawing.extent.map(|[lo, hi]| json!([[hundredth(lo.0), hundredth(lo.1)], [hundredth(hi.0), hundredth(hi.1)]]));
+    Ok(json!({
+        "scale": drawing.scale,
+        "shapes": drawing.shapes(),
+        "layers": layers,
+        "extent": extent,
+        "left_out": drawing.left_out,
+    }))
 }
 
 /// What the article code's parameter is called in a project that has none yet.

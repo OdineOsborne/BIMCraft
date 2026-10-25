@@ -10,6 +10,9 @@ pub mod cloud;
 mod commands;
 mod component_geometry;
 mod csg;
+pub mod dxf;
+#[cfg(test)]
+mod dxf_tests;
 pub mod engine;
 pub mod family;
 pub mod favorites;
