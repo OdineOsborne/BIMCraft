@@ -294,6 +294,49 @@ fn undo_and_redo_step_through_commands() {
 }
 
 #[test]
+fn a_wall_measures_one_face_of_itself_and_the_openings_come_out_of_the_net() {
+    let mut s = Session::new();
+    // One wall, 5 m long and 3 m high: 15 m² of face.
+    let wall = run(&mut s, "wall", json!({"points": [[0, 0], [5000, 0]], "height": 3000}))["ids"][0].as_u64().unwrap();
+    let bare = element(&mut s, wall);
+    assert_eq!((&bare["area_m2"], &bare["net_area_m2"]), (&json!(15.0), &json!(15.0)));
+    // A door 0,90 × 2,10 and a window 1,20 × 1,50 take 1,89 and 1,80 m² out of it, and nothing out of the gross.
+    run(&mut s, "type", json!({"category": "door", "name": "D 900", "width": 900, "height": 2100}));
+    run(&mut s, "type", json!({"category": "window", "name": "W 1200", "width": 1200, "height": 1500}));
+    run(&mut s, "door", json!({"wall": wall, "offset": 1000, "type": "D 900"}));
+    run(&mut s, "window", json!({"wall": wall, "offset": 3000, "type": "W 1200", "sill": 900}));
+    let e = element(&mut s, wall);
+    assert_eq!(e["area_m2"], 15.0, "the gross is the whole face");
+    assert_eq!(e["net_area_m2"], 11.31, "15 less 1,89 and 1,80");
+    // A wall of another type, with nothing in it, is all net: the openings follow their own wall.
+    let other = run(&mut s, "wall", json!({"points": [[0, 4000], [2000, 4000]], "height": 3000}))["ids"][0].as_u64().unwrap();
+    assert_eq!(element(&mut s, other)["net_area_m2"], 6.0);
+}
+
+#[test]
+fn a_wall_schedule_shows_both_areas_and_totals_the_net_one() {
+    let mut s = Session::new();
+    let wall = run(&mut s, "wall", json!({"points": [[0, 0], [5000, 0]], "height": 3000}))["ids"][0].as_u64().unwrap();
+    run(&mut s, "type", json!({"category": "door", "name": "D 900", "width": 900, "height": 2100}));
+    run(&mut s, "door", json!({"wall": wall, "offset": 1000, "type": "D 900"}));
+    let out = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Muri", "category": "walls", "fields": [
+            "Type",
+            "Area",
+            {"name": "Net Area", "total": true},
+        ]}),
+    );
+    assert_eq!(out["rows"][0][1], 15.0);
+    assert_eq!(out["rows"][0][2], 13.11, "the door is out of it");
+    assert_eq!(out["totals"][2], 13.11, "a bill of quantities is written on the net area");
+    // Both are offered to any schedule of walls, by name.
+    let available: Vec<String> = out["available"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(str::to_string)).collect();
+    assert!(available.contains(&"Net Area".to_string()) && available.contains(&"Area".to_string()), "{available:?}");
+}
+
+#[test]
 fn rooms_need_walls_around_them_and_follow_the_walls() {
     let mut s = Session::new();
     house(&mut s);

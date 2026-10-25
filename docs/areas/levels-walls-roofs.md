@@ -43,3 +43,18 @@ is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): 
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
+
+## What a wall measures
+
+A wall reports two areas of one of its faces (`element_json`, the `Area` and `Net Area` fields of its schedule): `area_m2`,
+its length by its height, and `net_area_m2`, that less the doors and windows it hosts, each counted as its type's width by
+its height (`Model::opening_area`). A bill of quantities is written on the net one, because nobody plasters a window. An
+opening whose size is not known — a family that does not build — takes nothing out, as it takes nothing out of the wall's
+picture either, and the net never goes below zero.
+
+A schedule asks every wall for that area, so it must not look through the project once per wall: it builds a
+`walls::Index` first, as the plan and the 3D view do, and reads each wall's openings from it
+(`commands::element_json_indexed`, `Model::opening_area_indexed`). Measured on the twenty-storey tower (9,521 elements), a
+wall schedule costs about 40 ms with the index and about 140 ms without it, and the gap grows with the square of the
+model. One element asked on its own (`element_json`, a tag, `inspect`) still looks the plain way, which for one element is
+the cheaper of the two.

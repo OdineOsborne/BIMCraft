@@ -60,6 +60,9 @@ In the window, Manage > Price List is also where a code is given: the project's 
 assigned to the selection (or taken off it). Select All Instances (SA) over a type is what makes that a whole type at
 once.
 
-What is still missing: a wall's **net** area (the openings are not taken out, which only `element_json` can do), and
-leaving the project as `IfcCostSchedule` with its `IfcCostItem`s and `IfcCostValue`s (ISO 16739), instead of the CSV a
-schedule already writes.
+The quantity a wall is priced by is its own: `Area` is one face of it and `Net Area` is that face less the doors and
+windows in it ([walls](levels-walls-roofs.md)), so `Net Area * Unit Price` is the amount of a wall priced by the square
+metre, and the openings are not paid for twice.
+
+What is still missing: leaving the project as `IfcCostSchedule` with its `IfcCostItem`s and `IfcCostValue`s (ISO 16739),
+instead of the CSV a schedule already writes.

@@ -1517,6 +1517,32 @@ pub struct ProjectParameter {
 }
 
 impl Model {
+    /// The area of the doors and windows wall `wall` hosts, in square millimetres: what its net area leaves out.
+    /// Each opening is its type's width by its height, which is what the wall's picture cuts away; an opening whose
+    /// size is not known (a family that does not build) takes nothing out, as it takes nothing out of the picture.
+    pub fn opening_area(&self, wall: impl Key) -> f64 {
+        let Some(id) = self.elements.id(wall) else { return 0.0 };
+        self.elements
+            .values()
+            .filter_map(|e| match e {
+                Element::Door(o) | Element::Window(o) if self.same(o.host, id) => self.opening_type(e).map(|t| t.width * t.height),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// The same, for a caller that already holds a walls index: a schedule, which would otherwise look through every
+    /// element of the project once for each of its walls. The index is built in one pass and holds the openings of each
+    /// host, so this is the openings of that wall and nothing else.
+    pub(crate) fn opening_area_indexed(&self, index: &crate::walls::Index, wall: Guid) -> f64 {
+        index
+            .openings(wall)
+            .iter()
+            .filter_map(|id| self.elements.get(*id))
+            .filter_map(|e| self.opening_type(e).map(|t| t.width * t.height))
+            .sum()
+    }
+
     /// The price list item of article `code`: the first list, by name, that holds it. A code in two lists is one
     /// article, so the first answer is the answer; nothing holds it twice under one name.
     pub fn price_item(&self, code: &str) -> Option<&PriceItem> {

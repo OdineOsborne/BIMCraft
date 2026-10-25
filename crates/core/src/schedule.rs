@@ -178,6 +178,8 @@ const TYPE: Own = ("Type", Kind::Text, From::Key("type"));
 const FAMILY: Own = ("Family", Kind::Text, From::Key("family"));
 const LEVEL: Own = ("Level", Kind::Text, From::Level);
 const AREA: Own = ("Area", Kind::Area, From::Key("area_m2"));
+/// A wall's area less the doors and windows in it: what a bill of quantities measures.
+const NET_AREA: Own = ("Net Area", Kind::Area, From::Key("net_area_m2"));
 const WIDTH: Own = ("Width", Kind::Length, From::Key("width"));
 const HEIGHT: Own = ("Height", Kind::Length, From::Key("height"));
 const LENGTH: Own = ("Length", Kind::Length, From::Key("length"));
@@ -231,7 +233,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
-    ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, AREA, NET_AREA, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "floor",
         5,
@@ -674,10 +676,18 @@ pub fn check_rules(m: &Model, cats: &[String], rules: &[Filter]) -> Result<(), S
 pub fn picks(m: &Model, cats: &[String], rules: &[Filter]) -> BTreeSet<Id> {
     let kinds: BTreeMap<&str, BTreeMap<String, Kind>> = cats.iter().map(|c| (c.as_str(), fields(m, c).into_iter().collect())).collect();
     let formulas = BTreeMap::new();
+    let index = crate::walls::Index::new(m);
     let mut out = BTreeSet::new();
     for (&id, e) in &m.elements {
         let Some(of) = kinds.get(e.category()) else { continue };
-        let mut row = Row { m, e, cat: e.category(), json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+        let mut row = Row {
+            m,
+            e,
+            cat: e.category(),
+            json: crate::commands::element_json_indexed(m, id, Some(&index)),
+            formulas: &formulas,
+            done: BTreeMap::new(),
+        };
         if rules.iter().all(|f| keeps(f, &row.get(&f.field), of.get(&f.field).copied(), m.units)) {
             out.insert(id);
         }
@@ -852,7 +862,13 @@ fn fine(x: f64) -> f64 {
 /// at each level it crosses, with its floor area there, its perimeter and the volume up to the next such level or its top.
 fn sources<'a>(m: &'a Model, cat: &str) -> Vec<(Id, &'a Element, Value)> {
     if cat != "massfloor" {
-        return m.elements.iter().filter(|(_, e)| e.category() == cat).map(|(id, e)| (*id, e, element_json(m, *id))).collect();
+        let index = crate::walls::Index::new(m);
+        return m
+            .elements
+            .iter()
+            .filter(|(_, e)| e.category() == cat)
+            .map(|(id, e)| (*id, e, crate::commands::element_json_indexed(m, *id, Some(&index))))
+            .collect();
     }
     let mut out = Vec::new();
     for (&id, e) in &m.elements {

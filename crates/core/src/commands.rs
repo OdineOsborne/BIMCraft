@@ -1285,6 +1285,13 @@ fn next_grid_name(m: &Model) -> String {
 
 /// An element as agents read it: its fields (what it points at by GUID) plus its `id`, its `guid` and derived values.
 pub fn element_json(m: &Model, id: Id) -> Value {
+    element_json_indexed(m, id, None)
+}
+
+/// `element_json`, for a caller that has already built a walls index. The one thing it is used for is a wall's
+/// openings, which a schedule would otherwise look for among every element of the project, once for each of its walls:
+/// on a twenty-storey tower that doubled the cost of a wall schedule.
+pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Index>) -> Value {
     let Some(e) = m.elements.get(id) else { return Value::Null };
     let mut extra = Map::new();
     extra.insert("id".into(), json!(id));
@@ -1303,9 +1310,20 @@ pub fn element_json(m: &Model, id: Id) -> Value {
     match e {
         Element::Wall(w) => {
             let axis = Axis::of(w);
-            extra.insert("length".into(), json!(hundredth(axis.length() * 1e4) / 1e4));
-            extra.insert("height".into(), json!(hundredth(m.top_z(w) - m.base_z(w))));
+            let length = hundredth(axis.length() * 1e4) / 1e4;
+            let height = hundredth(m.top_z(w) - m.base_z(w));
+            extra.insert("length".into(), json!(length));
+            extra.insert("height".into(), json!(height));
             extra.insert("thickness".into(), json!(m.thickness(w)));
+            // One face of the wall, and that face less the doors and windows it holds: what a wall is measured by. A
+            // bill of quantities is written on the net one, since nobody plasters a window.
+            let gross = length * height;
+            extra.insert("area_m2".into(), json!(m2(gross)));
+            let openings = match index {
+                Some(ix) => m.opening_area_indexed(ix, m.guid(id)),
+                None => m.opening_area(id),
+            };
+            extra.insert("net_area_m2".into(), json!(m2((gross - openings).max(0.0))));
             if let Some(r) = axis.radius() {
                 extra.insert("radius".into(), json!(hundredth(r)));
             }
