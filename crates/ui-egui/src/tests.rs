@@ -816,7 +816,7 @@ fn ks_lists_every_shortcut_and_every_one_it_lists_works() {
     }
     use crate::lang::Lang;
     for (_, name) in crate::shortcuts() {
-        for l in [Lang::Portuguese, Lang::Spanish] {
+        for l in [Lang::Portuguese, Lang::Spanish, Lang::Italian] {
             assert!(crate::lang::translated_in(l, name).is_some(), "{name} in {l:?}");
         }
     }
@@ -2312,7 +2312,9 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
     let english = |h: &Harness<BimApp>, l: Lang| -> Vec<String> {
         h.query_all(By::new())
             .filter_map(|n| n.accesskit_node().label().or_else(|| n.accesskit_node().value()))
-            .filter(|s| crate::lang::translated_in(l, s).is_some_and(|x| x != s))
+            // A word the table itself puts on screen is not English left behind: `Fine` is Italian for `End`, and
+            // `Scale` is the Italian plural of `Scala`.
+            .filter(|s| crate::lang::translated_in(l, s).is_some_and(|x| x != s) && !crate::lang::says(l, s))
             .collect()
     };
     let extra = r#"parameter {"name": "Finish Height", "kind": "length", "categories": ["wall"]}
@@ -2331,7 +2333,7 @@ mass {"boundary": [[1000, 1000], [3000, 1000], [3000, 2000], [1000, 2000]], "nam
         app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}\n{extra}"));
     // The probe finds what it looks for: in English, the same labels are all English.
     assert!(english(&h, Lang::Spanish).contains(&"Architecture".to_string()));
-    for l in [Lang::Portuguese, Lang::Spanish, Lang::Chinese] {
+    for l in [Lang::Portuguese, Lang::Spanish, Lang::Italian, Lang::Chinese] {
         // A machine has the fonts it has: a window is told it has one for Chinese.
         crate::lang::assume_chinese_font(&h.ctx);
         h.state_mut().lang = l;

@@ -6,7 +6,10 @@ use egui_kittest::kittest::NodeT;
 /// A price list on disk, written as an Italian published one is: a semicolon between the columns and a comma for the
 /// decimal point. Its path.
 fn price_file(name: &str, text: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("bimcraft-ui-price-{}", std::process::id()));
+    // Counted as well as named: the tests run side by side in one process, and two of them write a file of this name.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-ui-price-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();

@@ -45,7 +45,7 @@ pub static ALL: &[Command] = &[
     other(
         "new",
         "New",
-        "{name?, language?: en|pt|es} an empty project with Level 1 (0) and Level 2 (3000), named in its language (Nível 1, \
+        "{name?, language?: en|pt|es|it} an empty project with Level 1 (0) and Level 2 (3000), named in its language (Nível 1, \
          Nível 2 in Portuguese; Nivel 1, Nivel 2 in Spanish)",
         new,
     ),
@@ -802,9 +802,9 @@ pub static ALL: &[Command] = &[
         "language",
         "Project Language",
         &[],
-        "{code?: en|pt|es} the language the project's drawings speak (a stair's UP, a title block's SCALE, a schedule's \
+        "{code?: en|pt|es|it} the language the project's drawings speak (a stair's UP, a title block's SCALE, a schedule's \
          headings) and new names come in (levels, sections, elevations, sheets, rooms, schedules): English, Brazilian \
-         Portuguese or Spanish. What's already named stays named",
+         Portuguese, Spanish or Italian. What's already named stays named",
         language,
     ),
     other("inspect", "Inspect", "{} levels, element counts, types, warnings and undo history", inspect),
@@ -1813,7 +1813,8 @@ fn price_code(s: &mut Session, p: &Value) -> R {
 
     let parameter = match string(c, p, "parameter")? {
         Some(n) => n.trim().to_string(),
-        None => s.model.code_parameter.clone().unwrap_or_else(|| ARTICLE_CODE.to_string()),
+        // A name the core gives, so it comes in the project's own language, as a level's and a schedule's do.
+        None => s.model.code_parameter.clone().unwrap_or_else(|| s.model.language.word(ARTICLE_CODE).to_string()),
     };
     if let Some(was) = s.model.parameters.get(&parameter)
         && !matches!(was.kind, ParameterKind::Text)

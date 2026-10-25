@@ -6,9 +6,13 @@ use crate::engine::Session;
 use crate::library::Kind;
 use crate::model::{MAX_PRICE_ITEMS, Model};
 
-/// A file of `text` in a folder of this test's own, and its path.
+/// A file of `text` in a folder of this call's own, and its path. The folder is counted as well as named, because the
+/// tests run side by side in one process and two of them write a file of the same name: one would read what the other
+/// was still writing.
 fn file(name: &str, text: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("bimcraft-price-{}-{name}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-price-{}-{n}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();

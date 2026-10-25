@@ -9,6 +9,7 @@
 //! this table's: a row it lacks shows in English. The window draws hanzi with a font the system has (`font.rs`).
 
 mod font;
+mod it;
 mod zh;
 
 use std::cell::Cell;
@@ -24,11 +25,12 @@ pub enum Lang {
     English,
     Portuguese,
     Spanish,
+    Italian,
     Chinese,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 4] = [Lang::English, Lang::Portuguese, Lang::Spanish, Lang::Chinese];
+    pub const ALL: [Lang; 5] = [Lang::English, Lang::Portuguese, Lang::Spanish, Lang::Italian, Lang::Chinese];
 
     /// The project language that goes with it, which new projects are named in: Chinese has none, so English.
     pub fn project(self) -> Language {
@@ -36,10 +38,11 @@ impl Lang {
             Lang::English | Lang::Chinese => Language::English,
             Lang::Portuguese => Language::Portuguese,
             Lang::Spanish => Language::Spanish,
+            Lang::Italian => Language::Italian,
         }
     }
 
-    /// Its code in the settings file: en, pt, es, zh.
+    /// Its code in the settings file: en, pt, es, it, zh.
     pub fn code(self) -> &'static str {
         match self {
             Lang::Chinese => "zh",
@@ -75,6 +78,7 @@ impl From<Language> for Lang {
             Language::English => Lang::English,
             Language::Portuguese => Lang::Portuguese,
             Language::Spanish => Lang::Spanish,
+            Language::Italian => Lang::Italian,
         }
     }
 }
@@ -154,9 +158,80 @@ pub fn translated(language: Language, english: &str) -> Option<&'static str> {
     if language == Language::English {
         return None;
     }
+    // Italian is a table of its own (`it.rs`), as Chinese is: a word it lacks shows in the core's Italian, or in
+    // English. Portuguese and Spanish are the second and third columns of `WORDS`.
+    let column = match language {
+        Language::Portuguese => 1,
+        Language::Spanish => 2,
+        _ => return it::translated(english).or_else(|| language.translated(english)),
+    };
     // ponytail: a linear scan, a few hundred a frame; a map built once if it ever shows in a profile.
-    WORDS.iter().find(|w| w[0] == english).map(|&w| language.of(w)).or_else(|| language.translated(english))
+    WORDS.iter().find(|w| w[0] == english).map(|w| w[column]).or_else(|| language.translated(english))
 }
+
+/// Whether `text` is already a word of `lang`: one this table, or a category's name, puts on screen. A language has
+/// homographs with English — `Fine` is Italian for `End` and English for a detail level, `Scale` is Italian for stairs —
+/// and what the window shows is the one the table wrote, not the English of the same spelling. Only a probe that looks
+/// for English left in a translated window needs this.
+#[cfg(test)]
+pub(crate) fn says(lang: Lang, text: &str) -> bool {
+    let categories = |several: bool| {
+        crate::lang::CATEGORY_KEYS.iter().any(|c| match lang {
+            Lang::Italian => it::category(c, several) == Some(text),
+            _ => category(c, several) == text,
+        })
+    };
+    let in_table = match lang {
+        Lang::Chinese => zh::WORDS.iter().chain(zh::CORE).any(|w| w[1] == text),
+        Lang::Italian => it::WORDS.iter().any(|w| w[1] == text),
+        Lang::Portuguese => WORDS.iter().any(|w| w[1] == text),
+        Lang::Spanish => WORDS.iter().any(|w| w[2] == text),
+        Lang::English => false,
+    };
+    in_table || categories(false) || categories(true)
+}
+
+/// The categories `category` knows a name for.
+#[cfg(test)]
+const CATEGORY_KEYS: &[&str] = &[
+    "wall",
+    "door",
+    "window",
+    "floor",
+    "room",
+    "level",
+    "grid",
+    "dimension",
+    "tag",
+    "section",
+    "elevation",
+    "sheet",
+    "viewport",
+    "column",
+    "component",
+    "stair",
+    "roof",
+    "ceiling",
+    "mass",
+    "massfloor",
+    "ramp",
+    "railing",
+    "beam",
+    "structuralcolumn",
+    "footing",
+    "pipe",
+    "conduit",
+    "cabletray",
+    "wire",
+    "cable",
+    "downconductor",
+    "groundconductor",
+    "text",
+    "spot",
+    "schedule",
+    "view3d",
+    "link",
+];
 
 /// `template` translated, its `{}`s filled with `args` in order.
 pub fn tf(template: &str, args: &[&str]) -> String {
@@ -167,6 +242,11 @@ pub fn tf(template: &str, args: &[&str]) -> String {
 pub fn category(category: &str, several: bool) -> String {
     if get() == Lang::Chinese {
         return zh::category(category).unwrap_or(category).to_string();
+    }
+    if get() == Lang::Italian
+        && let Some(word) = it::category(category, several)
+    {
+        return word.to_string();
     }
     let (one, many) = match category {
         "wall" => (["Wall", "Parede", "Muro"], ["Walls", "Paredes", "Muros"]),
@@ -223,7 +303,13 @@ pub fn category(category: &str, several: bool) -> String {
         "link" => (["Linked Model", "Modelo vinculado", "Modelo vinculado"], ["Linked Models", "Modelos vinculados", "Modelos vinculados"]),
         other => return other.to_string(),
     };
-    get().project().of(if several { many } else { one }).to_string()
+    let pick = |w: [&'static str; 3]| match get() {
+        Lang::Portuguese => w[1],
+        Lang::Spanish => w[2],
+        // Italian is above, and a category it lacks shows as this English does.
+        _ => w[0],
+    };
+    pick(if several { many } else { one }).to_string()
 }
 
 /// The interface's words in English, Brazilian Portuguese and Spanish; the core's words (schedule
