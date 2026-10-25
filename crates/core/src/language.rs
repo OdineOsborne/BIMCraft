@@ -199,6 +199,8 @@ const WORDS: &[[&str; 4]] = &[
     ["Riser Height", "Altura do espelho", "Altura de contrahuella", "Altezza alzata"],
     ["Tread", "Piso", "Huella", "Pedata"],
     ["Total", "Total", "Total", "Totale"],
+    // What an exported bill of quantities is called, and the parameter that carries a price list's article code.
+    ["Bill of Quantities", "Orçamento", "Presupuesto", "Computo metrico"],
     // The parameter that carries a price list's article code.
     ["Article Code", "Código do artigo", "Código de artículo", "Codice articolo"],
     ["Yes", "Sim", "Sí", "Sì"],

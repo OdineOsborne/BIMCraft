@@ -195,6 +195,8 @@ const PHASE_CREATED: Own = ("Phase Created", Kind::Text, From::Param);
 const PHASE_DEMOLISHED: Own = ("Phase Demolished", Kind::Text, From::Param);
 const DESIGN_OPTION: Own = ("Design Option", Kind::Text, From::Param);
 const VOLUME: Own = ("Volume", Kind::Number, From::Key("volume_m3"));
+/// A wall's volume less the doors and windows in it: what a bill of quantities measures masonry by.
+const NET_VOLUME: Own = ("Net Volume", Kind::Number, From::Key("net_volume_m3"));
 
 /// Each category's own fields, and how many of them, from the first, its schedule shows unless it
 /// chooses.
@@ -233,7 +235,26 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
-    ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, AREA, NET_AREA, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "wall",
+        6,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            LENGTH,
+            HEIGHT,
+            THICKNESS,
+            AREA,
+            NET_AREA,
+            VOLUME,
+            NET_VOLUME,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
     (
         "floor",
         5,

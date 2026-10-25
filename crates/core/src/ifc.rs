@@ -54,6 +54,10 @@ const SYSTEMS: u64 = 45;
 const SYSTEM_MEMBERS: u64 = 46;
 const LOFTED: u64 = 47;
 const LOFTED_DEFINES: u64 = 48;
+const COST_SCHEDULE: u64 = 50;
+const COST_ITEM: u64 = 51;
+const COST_PRICES: u64 = 52;
+const COST_LISTED: u64 = 53;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
@@ -456,6 +460,87 @@ impl Step {
     }
 }
 
+/// The bill of quantities (ISO 16739): one `IfcCostSchedule` for the project, an `IfcCostItem` for each article code
+/// its elements carry, the item's unit price as an `IfcCostValue`, and the elements it prices assigned to it. A project
+/// whose elements carry no code writes none of this.
+///
+/// **The quantity an item carries follows the price list's own unit**, because only the list knows what its price is
+/// for: `m2` is the elements' area (a wall's net of its openings), `m3` their volume, `m` their length, and anything
+/// else — or a unit no element can answer — their count, which is always true. A code the price list no longer holds is
+/// written with its count and no price, so an element priced by a code that has gone is not quietly dropped.
+fn cost(w: &mut Step, m: &Model, products: &BTreeMap<Id, u64>) {
+    let mut by_code: BTreeMap<&str, Vec<(Id, u64)>> = BTreeMap::new();
+    for (&id, &ent) in products {
+        let Some(e) = m.elements.get(id) else { continue };
+        if let Some(code) = m.article_code(e) {
+            by_code.entry(code).or_default().push((id, ent));
+        }
+    }
+    if by_code.is_empty() {
+        return;
+    }
+    let index = crate::walls::Index::new(m);
+    let schedule = w.add(format!(
+        "IFCCOSTSCHEDULE({},$,{},$,$,$,.PRICEDBILLOFQUANTITIES.,$,$,$)",
+        w.guid(COST_SCHEDULE, 0),
+        s(m.language.word("Bill of Quantities"))
+    ));
+    let mut items = Vec::new();
+    for (code, elements) in by_code {
+        let key = code_key(code);
+        let item = m.price_item(code);
+        let values = match item {
+            // `Unit cost` is what IFC calls a price for one of something; the money is the project's.
+            Some(i) => format!("(#{})", w.add(format!("IFCCOSTVALUE($,$,IFCMONETARYMEASURE({}),$,$,$,'Unit cost',$,$,$)", real(i.price)))),
+            None => "$".to_string(),
+        };
+        let unit = item.map(|i| i.unit.trim().to_lowercase()).unwrap_or_default();
+        let json = |id: Id| crate::commands::element_json_indexed(m, id, Some(&index));
+        let sum = |key: &str| elements.iter().map(|(id, _)| json(*id).get(key).and_then(Value::as_f64).unwrap_or(0.0)).sum::<f64>();
+        let quantity = match unit.as_str() {
+            "m2" | "mq" | "m\u{b2}" => {
+                let area = elements
+                    .iter()
+                    .map(|(id, _)| {
+                        let j = json(*id);
+                        let net = j.get("net_area_m2").and_then(Value::as_f64);
+                        net.or_else(|| j.get("area_m2").and_then(Value::as_f64)).unwrap_or(0.0)
+                    })
+                    .sum::<f64>();
+                format!("IFCQUANTITYAREA('Area',$,$,{},$)", real(area))
+            }
+            "m3" | "mc" | "m\u{b3}" => {
+                let volume = elements
+                    .iter()
+                    .map(|(id, _)| {
+                        let j = json(*id);
+                        let net = j.get("net_volume_m3").and_then(Value::as_f64);
+                        net.or_else(|| j.get("volume_m3").and_then(Value::as_f64)).unwrap_or(0.0)
+                    })
+                    .sum::<f64>();
+                format!("IFCQUANTITYVOLUME('Volume',$,$,{},$)", real(volume))
+            }
+            // Lengths are millimetres in this file, as every other length in it is.
+            "m" | "ml" => format!("IFCQUANTITYLENGTH('Length',$,$,{},$)", real(sum("length"))),
+            _ => format!("IFCQUANTITYCOUNT('Count',$,$,{},$)", real(elements.len() as f64)),
+        };
+        let quantity = w.add(quantity);
+        let name = item.map(|i| i.description.trim()).filter(|d| !d.is_empty()).unwrap_or(code);
+        let ent =
+            w.add(format!("IFCCOSTITEM({},$,{},$,$,{},.NOTDEFINED.,{values},(#{quantity}))", w.guid(COST_ITEM, key), s(name), s(code)));
+        let priced: Vec<u64> = elements.iter().map(|(_, ent)| *ent).collect();
+        w.add(format!("IFCRELASSIGNSTOCONTROL({},$,$,$,({}),$,#{ent})", w.guid(COST_PRICES, key), refs(&priced)));
+        items.push(ent);
+    }
+    w.add(format!("IFCRELASSIGNSTOCONTROL({},$,$,$,({}),$,#{schedule})", w.guid(COST_LISTED, 0), refs(&items)));
+}
+
+/// A number of an article code, for the GlobalIds of what it writes: the same code gives the same one, so a file written
+/// again names the same cost item.
+fn code_key(code: &str) -> u64 {
+    code.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x1000_0000_01b3))
+}
+
 pub fn export(m: &Model) -> String {
     let own = m.elements.with_guids().map(|(id, g, _)| (id, g)).collect();
     let mut w = Step { out: String::new(), next: 0, uid: m.uid, own, world: 0, z: 0, context: 0, body: 0, materials: BTreeMap::new() };
@@ -473,6 +558,12 @@ pub fn export(m: &Model) -> String {
         "IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.)",
     ]
     .map(|u| w.add(u));
+    let mut units = units.to_vec();
+    // The money a bill of quantities is written in, where the project has a price list to price one with.
+    if !m.price_lists.is_empty() {
+        let money = w.add(format!("IFCMONETARYUNIT({})", s(m.currency())));
+        units.push(money);
+    }
     let units = w.add(format!("IFCUNITASSIGNMENT(({}))", refs(&units)));
     let project = w.add(format!("IFCPROJECT({},$,{},$,$,$,$,(#{ctx}),#{units})", w.guid(PROJECT, 0), s(&m.name)));
     let site_at = w.place(None, (0.0, 0.0, 0.0), None);
@@ -1080,6 +1171,7 @@ pub fn export(m: &Model) -> String {
             w.define(ent, PARAMETERS, &props, (PROPERTIES, DEFINES), id);
         }
     }
+    cost(&mut w, m, &products);
     // Each element's phase and design option, in a property set of its own. The first phase is no value in a
     // model; here an element holding another value names it as its `Phase Created` (said to be implied), for
     // another tool to read. A door or a window holds only what it says: one with no phase follows its wall.

@@ -1543,6 +1543,12 @@ impl Model {
             .sum()
     }
 
+    /// What this project's money is: the currency of the first price list, by name, that says one, and EUR where
+    /// none does. A project prices in one currency; a list of another is the user's to keep apart.
+    pub fn currency(&self) -> &str {
+        self.price_lists.values().map(|l| l.currency.trim()).find(|c| !c.is_empty()).unwrap_or("EUR")
+    }
+
     /// The price list item of article `code`: the first list, by name, that holds it. A code in two lists is one
     /// article, so the first answer is the answer; nothing holds it twice under one name.
     pub fn price_item(&self, code: &str) -> Option<&PriceItem> {
@@ -1606,6 +1612,10 @@ pub struct PriceMapping {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PriceList {
+    /// What its prices are in, as ISO 4217 writes it (EUR, CHF, GBP): what an exported bill of quantities says its
+    /// money is. Empty is EUR, which is what a list that does not say is read as.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub currency: String,
     /// The file it was read from, for the record; reading it again is the person's to ask for.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
@@ -3398,6 +3408,10 @@ impl Model {
         for (n, list) in &self.price_lists {
             if n.trim().is_empty() {
                 return Err("a price list needs a name".into());
+            }
+            let currency = list.currency.trim();
+            if !currency.is_empty() && !(currency.len() == 3 && currency.chars().all(|c| c.is_ascii_alphabetic())) {
+                return Err(format!("price list `{n}`: `{currency}` is no currency; it is three letters, as ISO 4217 writes one (EUR)"));
             }
             if list.items.len() > MAX_PRICE_ITEMS {
                 return Err(format!("price list `{n}` has {} items; one holds up to {MAX_PRICE_ITEMS}", list.items.len()));

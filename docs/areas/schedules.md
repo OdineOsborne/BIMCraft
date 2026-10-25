@@ -64,5 +64,20 @@ The quantity a wall is priced by is its own: `Area` is one face of it and `Net A
 windows in it ([walls](levels-walls-roofs.md)), so `Net Area * Unit Price` is the amount of a wall priced by the square
 metre, and the openings are not paid for twice.
 
-What is still missing: leaving the project as `IfcCostSchedule` with its `IfcCostItem`s and `IfcCostValue`s (ISO 16739),
-instead of the CSV a schedule already writes.
+## The bill of quantities in IFC
+
+The project leaves as a bill of quantities as well as a model (`ifc::cost`, ISO 16739): one `IfcCostSchedule`, of
+`PredefinedType` `.PRICEDBILLOFQUANTITIES.` and named in the project's language (Computo metrico), with an `IfcCostItem`
+for each article code the elements carry — the code as its `Identification`, the price list's wording as its `Name`, the
+unit price as an `IfcCostValue` of category `Unit cost` — and the elements it prices assigned to it by
+`IfcRelAssignsToControl`, the items in turn assigned to the schedule. The money is an `IfcMonetaryUnit` in the project's
+units, from the price list's `currency` (EUR unless it says otherwise). The code also goes out on each element, in the
+`Project Parameters` property set, so a reader can tell where a price came from without the cost items.
+
+**The quantity an item carries follows the price list's own unit**, because only the list knows what its price is for:
+`m2`, `mq` or `m²` is the elements' area (a wall's net of its openings), `m3`, `mc` or `m³` their volume (likewise net),
+`m` or `ml` their length, and anything else their count — which is always true, so a unit this does not know costs
+nothing. A code the price list no longer holds is written with its count and no price, rather than dropped.
+
+A project whose elements carry no code writes none of this. `ci/ifc-coverage.txt` prices its beams from `ci/prices.csv`,
+so IfcOpenShell checks the cost entities against the EXPRESS rules on every run of CI.

@@ -514,6 +514,7 @@ const WORDS: &[[&str; 3]] = &[
     ["Browse…", "Procurar…", "Examinar…"],
     ["Read Columns", "Ler colunas", "Leer columnas"],
     ["Separator:", "Separador:", "Separador:"],
+    ["Currency:", "Moeda:", "Moneda:"],
     ["Semicolon", "Ponto e vírgula", "Punto y coma"],
     ["Comma", "Vírgula", "Coma"],
     ["Tab", "Tabulação", "Tabulación"],

@@ -47,6 +47,8 @@ pub struct PriceDialog {
     pub(crate) row_count: usize,
     /// The column each role is on, in `ROLES`' order; empty where none.
     pub(crate) roles: [String; 4],
+    /// What its prices are in, as ISO 4217 writes it: three letters, EUR unless the user says otherwise.
+    pub(crate) currency: String,
     /// What is typed in the search over the project's items, and the item picked out of it.
     pub(crate) search: String,
     pub(crate) picked: String,
@@ -65,6 +67,7 @@ impl PriceDialog {
             rows: Vec::new(),
             row_count: 0,
             roles: Default::default(),
+            currency: "EUR".to_string(),
             search: String::new(),
             picked: String::new(),
             error: String::new(),
@@ -180,6 +183,9 @@ impl BimApp {
                 ui.end_row();
                 let label = ui.label(t("Name:"));
                 ui.add_sized([380.0, 22.0], TextEdit::singleline(&mut d.name)).labelled_by(label.id);
+                ui.end_row();
+                let label = ui.label(t("Currency:"));
+                ui.add_sized([80.0, 22.0], TextEdit::singleline(&mut d.currency).char_limit(3)).labelled_by(label.id);
                 ui.end_row();
             });
             ui.add_space(6.0);
@@ -339,7 +345,7 @@ impl BimApp {
     /// what the core refused is said inside the window, which stays open on the mapping that was refused.
     fn price_import(&mut self) {
         let Some(d) = &self.price_dialog else { return };
-        let mut params = json!({"name": d.name.trim(), "path": d.path.trim(), "separator": d.separator});
+        let mut params = json!({"name": d.name.trim(), "path": d.path.trim(), "separator": d.separator, "currency": d.currency.trim()});
         for ((_, role, _), col) in ROLES.iter().zip(&d.roles) {
             if !col.is_empty() {
                 params[*role] = json!(col);

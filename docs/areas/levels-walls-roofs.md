@@ -52,6 +52,9 @@ its height (`Model::opening_area`). A bill of quantities is written on the net o
 opening whose size is not known — a family that does not build — takes nothing out, as it takes nothing out of the wall's
 picture either, and the net never goes below zero.
 
+The same two as a volume, which is how masonry is billed: `volume_m3` is the gross area through the wall's thickness
+and `net_volume_m3` the net one, the fields `Volume` and `Net Volume`.
+
 A schedule asks every wall for that area, so it must not look through the project once per wall: it builds a
 `walls::Index` first, as the plan and the 3D view do, and reads each wall's openings from it
 (`commands::element_json_indexed`, `Model::opening_area_indexed`). Measured on the twenty-storey tower (9,521 elements), a

@@ -209,6 +209,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Browse…", "浏览…"],
     ["Read Columns", "读取列"],
     ["Separator:", "分隔符："],
+    ["Currency:", "货币："],
     ["Semicolon", "分号"],
     ["Comma", "逗号"],
     ["Tab", "制表符"],

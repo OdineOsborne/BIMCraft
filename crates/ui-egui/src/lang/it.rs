@@ -65,6 +65,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Browse…", "Sfoglia…"],
     ["Read Columns", "Leggi le colonne"],
     ["Separator:", "Separatore:"],
+    ["Currency:", "Valuta:"],
     ["Semicolon", "Punto e virgola"],
     ["Comma", "Virgola"],
     ["Tab", "Tabulazione"],

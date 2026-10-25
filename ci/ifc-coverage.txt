@@ -23,3 +23,7 @@ phase {"now": "Stage 2"}
 option {"set": "Entrance", "options": ["Glass", "Brick"]}
 option {"now": "Entrance: Brick"}
 wall {"points": [[0,-5000],[6000,-5000]]}
+# A bill of quantities: a price list, its code on the beams, and the IfcCostSchedule, IfcCostItem, IfcCostValue and
+# quantity they leave as. The money is the list's.
+price_list {"name": "Price List", "path": "ci/prices.csv", "code": "Code", "description": "Description", "unit": "Unit", "price": "Price", "currency": "EUR"}
+price_code {"code": "S.01.010", "categories": ["beams"]}

@@ -101,7 +101,7 @@ pub static ALL: &[Command] = &[
         "price_list",
         "Price List",
         &["PL"],
-        "{name, path, code, price, description?, unit?, separator?} a price list read from a text file, as a bill of \
+        "{name, path, code, price, description?, unit?, separator?, currency?} a price list read from a text file, as a bill of \
          quantities prices work with: every row of the file becomes an item named by its article code. The column headings \
          are the caller's, so a price list of any form needs no code: `code` and `price` name the headings that hold the \
          article code and the unit price, and `description` and `unit` the ones that hold the wording and the unit of \
@@ -109,7 +109,9 @@ pub static ALL: &[Command] = &[
          them first. `separator` is the one character between columns; without it, whichever of `;`, `,` and a tab splits \
          the heading row into the most columns. A price may be written with a comma for its decimal point. The mapping is \
          kept with the list, so the same file reads the same way again. A row with no code, or whose price is no number, \
-         is left out and named, never guessed. Replaces a list of the same `name`. Returns `name`, `items`, `left_out`",
+         is left out and named, never guessed. `currency` is what its prices are in, three letters as ISO 4217 writes \
+         them (EUR, the default, CHF, GBP): what an exported bill of quantities says its money is. Replaces a list of \
+         the same `name`. Returns `name`, `items`, `left_out`",
         price_list,
     ),
     edit(
@@ -1172,6 +1174,11 @@ pub fn m2(mm2: f64) -> f64 {
     (mm2 / 1e4).round() / 100.0
 }
 
+/// mm³ as m³, to the hundredth.
+pub fn m3(mm3: f64) -> f64 {
+    (mm3 / 1e7).round() / 100.0
+}
+
 /// A stair's or a ramp's runs, each from its foot to its top, and where its last one ends.
 fn runs(extra: &mut Map<String, Value>, l: &stairs::Layout) {
     let runs: Vec<[P2; 2]> = l.runs.iter().map(|r| [micron(r.start), micron(r.end())]).collect();
@@ -1323,7 +1330,12 @@ pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Inde
                 Some(ix) => m.opening_area_indexed(ix, m.guid(id)),
                 None => m.opening_area(id),
             };
-            extra.insert("net_area_m2".into(), json!(m2((gross - openings).max(0.0))));
+            let net = (gross - openings).max(0.0);
+            extra.insert("net_area_m2".into(), json!(m2(net)));
+            // And the same as a volume, which is how masonry is billed: the wall's own thickness through both.
+            let thickness = m.thickness(w);
+            extra.insert("volume_m3".into(), json!(m3(gross * thickness)));
+            extra.insert("net_volume_m3".into(), json!(m3(net * thickness)));
             if let Some(r) = axis.radius() {
                 extra.insert("radius".into(), json!(hundredth(r)));
             }
@@ -1940,6 +1952,7 @@ fn price_list(s: &mut Session, p: &Value) -> R {
     let desc_col = string(c, p, "description")?.unwrap_or_default();
     let unit_col = string(c, p, "unit")?.unwrap_or_default();
     let separator = string(c, p, "separator")?.unwrap_or_default();
+    let currency = string(c, p, "currency")?.map(|v| v.trim().to_uppercase()).unwrap_or_default();
 
     let text = price_file(c, &path)?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -1986,6 +1999,7 @@ fn price_list(s: &mut Session, p: &Value) -> R {
     }
 
     let list = crate::model::PriceList {
+        currency,
         source: path,
         mapping: crate::model::PriceMapping {
             code: code_col,

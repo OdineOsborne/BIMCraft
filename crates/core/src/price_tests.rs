@@ -321,3 +321,84 @@ fn the_code_parameter_is_the_users_to_name_and_a_parameter_that_holds_numbers_is
     let err = run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"], "parameter": "Peso"})).expect_err("refused");
     assert!(err.contains("text"), "{err}");
 }
+
+/// The project of `site`, with the code `B.02.100` on its two `Muratura 250` walls, exported as IFC.
+fn priced_ifc(unit: &str, currency: &str) -> String {
+    let path = file("ifc.csv", &format!("Codice;Descrizione;UM;Prezzo\nB.02.100;Muratura in blocchi di laterizio;{unit};89,40\n"));
+    let mut s = Session::new();
+    s.script(
+        "type {\"category\": \"wall\", \"name\": \"Muratura 250\", \"thickness\": 250}\n         wall {\"points\": [[0,0],[5000,0]], \"type\": \"Muratura 250\", \"height\": 3000}\n         wall {\"points\": [[0,4000],[4000,4000]], \"type\": \"Muratura 250\", \"height\": 3000}",
+    )
+    .expect("the walls are built");
+    let mut p = json!({"name": "Prezzario", "path": path, "code": "Codice", "description": "Descrizione", "unit": "UM", "price": "Prezzo"});
+    if !currency.is_empty() {
+        p["currency"] = json!(currency);
+    }
+    run(&mut s, "price_list", p).expect("the price list comes in");
+    run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"]})).expect("the code is given");
+    crate::ifc::export(&s.model)
+}
+
+#[test]
+fn a_priced_project_leaves_as_a_bill_of_quantities() {
+    let f = priced_ifc("m2", "");
+    assert!(f.contains("IFCCOSTSCHEDULE(") && f.contains(".PRICEDBILLOFQUANTITIES."), "a schedule of costs");
+    // The item is named by the price list's wording and identified by the article code.
+    assert!(f.contains("IFCCOSTITEM(") && f.contains("'Muratura in blocchi di laterizio'") && f.contains("'B.02.100'"), "{f}");
+    assert!(f.contains("IFCCOSTVALUE($,$,IFCMONETARYMEASURE(89.4),$,$,$,'Unit cost',$,$,$)"), "the unit price");
+    // 5 m and 4 m of wall, 3 m high: 27 m² in all, and the money the file is written in.
+    assert!(f.contains("IFCQUANTITYAREA('Area',$,$,27.,$)"), "{}", lines(&f, "IFCQUANTITY"));
+    assert!(f.contains("IFCMONETARYUNIT('EUR')"), "a bill says what its money is");
+    // The elements it prices are assigned to it, and it to the schedule.
+    let assigns: Vec<&str> = f.lines().filter(|l| l.contains("IFCRELASSIGNSTOCONTROL(")).collect();
+    assert_eq!(assigns.len(), 2, "{assigns:?}");
+}
+
+#[test]
+fn the_quantity_an_item_carries_follows_the_price_lists_own_unit() {
+    // 5 × 3 × 0,25 and 4 × 3 × 0,25 is 6,75 m³.
+    let f = priced_ifc("m3", "");
+    assert!(f.contains("IFCQUANTITYVOLUME('Volume',$,$,6.75,$)"), "{}", lines(&f, "IFCQUANTITY"));
+    let f = priced_ifc("m", "");
+    assert!(f.contains("IFCQUANTITYLENGTH('Length',$,$,9000.,$)"), "{}", lines(&f, "IFCQUANTITY"));
+    // A unit no element can answer is a count, which is always true.
+    let f = priced_ifc("cad", "");
+    assert!(f.contains("IFCQUANTITYCOUNT('Count',$,$,2.,$)"), "{}", lines(&f, "IFCQUANTITY"));
+}
+
+#[test]
+fn the_money_is_the_price_lists_and_a_currency_that_is_no_currency_is_refused() {
+    let f = priced_ifc("m2", "chf");
+    assert!(f.contains("IFCMONETARYUNIT('CHF')"), "upper case, as ISO 4217 writes it");
+    let path = file("valuta.csv", "Codice;Prezzo\nA.1;10\n");
+    let mut s = Session::new();
+    let err = run(&mut s, "price_list", json!({"name": "L", "path": path, "code": "Codice", "price": "Prezzo", "currency": "euro"}))
+        .expect_err("refused");
+    assert!(err.contains("no currency"), "{err}");
+    assert!(s.model.price_lists.is_empty(), "nothing was left behind");
+}
+
+#[test]
+fn a_project_whose_elements_carry_no_code_writes_no_bill() {
+    let (s, _) = site();
+    let f = crate::ifc::export(&s.model);
+    assert!(!f.contains("IFCCOSTSCHEDULE("), "a price list alone is not a bill: nothing carries a code");
+    assert!(f.contains("IFCMONETARYUNIT("), "the money is still said, since the project has a price list");
+}
+
+#[test]
+fn a_wall_says_its_volume_as_well_as_its_area_both_net_of_its_openings() {
+    let mut s = Session::new();
+    let made = run(&mut s, "wall", json!({"points": [[0, 0], [5000, 0]], "height": 3000})).expect("a wall");
+    let wall = made["ids"][0].as_u64().expect("its id");
+    run(&mut s, "type", json!({"category": "door", "name": "D 900", "width": 900, "height": 2100})).expect("a door type");
+    run(&mut s, "door", json!({"wall": wall, "offset": 1000, "type": "D 900"})).expect("a door");
+    let e = crate::commands::element_json(&s.model, wall);
+    // A wall 200 mm thick: 15 m² gross is 3 m³, and 13,11 m² net is 2,62 m³.
+    assert_eq!((e["volume_m3"].as_f64(), e["net_volume_m3"].as_f64()), (Some(3.0), Some(2.62)));
+}
+
+/// The lines of `f` that hold `what`, for an assertion to say what it found instead.
+fn lines(f: &str, what: &str) -> String {
+    f.lines().filter(|l| l.contains(what)).collect::<Vec<_>>().join("\n")
+}
