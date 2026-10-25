@@ -82,6 +82,22 @@ pub static ALL: &[Command] = &[
         price_columns,
     ),
     edit(
+        "price_code",
+        "Article Code",
+        &[],
+        "{code, ids?: [id, …], filter?, categories?: [category, …], rules?: [{field, op, value}, …], parameter?, clear?: \
+         true} the article code of a price list's item written on elements, which is what joins an element to its price: a \
+         schedule of their category then has `Price Description`, `Price Unit` and `Unit Price` among its fields, and the \
+         amount is a calculated field over the quantity the price is for (`Volume m3 * Unit Price`). The elements are the \
+         ones `ids` names, the ones the view filter `filter` picks out, or the ones of `categories` that `rules` keep (the \
+         rules of a schedule and of a view filter), so a code is given to a whole type, a whole level or a whole phase at \
+         once, and given again when the model changes. The code is the value of a project parameter, `parameter` (the \
+         project's own once one is set, else `Article Code`), which is made, and widened to their categories, where the \
+         project hasn't it. A code no price list holds is refused, so a typo is not a silent hole in the bill of \
+         quantities. `clear` takes the code off instead. Returns `parameter`, `code`, `elements`",
+        price_code,
+    ),
+    edit(
         "price_list",
         "Price List",
         &["PL"],
@@ -1714,6 +1730,110 @@ fn price_number(raw: &str) -> Option<f64> {
     }
     let normal = if t.contains('.') { t.replace(',', "") } else { t.replace(',', ".") };
     normal.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// What the article code's parameter is called in a project that has none yet.
+const ARTICLE_CODE: &str = "Article Code";
+
+/// `price_code`: the article code written on elements, which is what joins them to a price list's item.
+fn price_code(s: &mut Session, p: &Value) -> R {
+    let c = "price_code";
+    let clear = flag(c, p, "clear")?;
+    let code = string(c, p, "code")?.map(|v| v.trim().to_string()).unwrap_or_default();
+    if code.is_empty() && !clear {
+        return Err(bad(c, "`code` is required: the article code of a price list's item, or `clear` to take one off"));
+    }
+    if !clear && s.model.price_item(&code).is_none() {
+        let lists: Vec<&str> = s.model.price_lists.keys().map(String::as_str).collect();
+        return Err(bad(
+            c,
+            match lists.is_empty() {
+                true => format!("`{code}` is in no price list: the project has none, so read one with `price_list`"),
+                false => format!("`{code}` is in no price list; the project has {}", lists.join(", ")),
+            },
+        ));
+    }
+
+    // The elements: the ones named, the ones a view filter picks out, or the ones the categories and rules keep.
+    let named = !absent(p.get("ids")) || !absent(p.get("id"));
+    let filter = string(c, p, "filter")?;
+    let ids: Vec<Id> = if named {
+        ids_param(c, &s.model, p)?
+    } else if let Some(name) = &filter {
+        let f = s.model.view_filters.get(name).ok_or_else(|| {
+            let names: Vec<&str> = s.model.view_filters.keys().map(String::as_str).collect();
+            bad(c, format!("there's no view filter `{name}`; there are: {}", names.join(", ")))
+        })?;
+        f.matching(&s.model).into_iter().collect()
+    } else {
+        let cats: Vec<String> = match p.get("categories") {
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 32 => a
+                .iter()
+                .map(|v| {
+                    let given = v.as_str().ok_or_else(|| bad(c, format!("`categories`: {v} is not a category")))?;
+                    let name = category(given);
+                    match schedule::categories().contains(&name.as_str()) {
+                        true => Ok(name),
+                        false => Err(bad(c, format!("`{given}` isn't a category; there are: {}", schedule::categories().join(", ")))),
+                    }
+                })
+                .collect::<Result<_, _>>()?,
+            _ => return Err(bad(c, "the elements are `ids`, a view filter's `filter`, or `categories` with `rules`")),
+        };
+        let rules: Vec<schedule::Filter> = match p.get("rules") {
+            v if absent(v) => Vec::new(),
+            Some(Value::Array(a)) if a.len() <= schedule::MAX_FIELDS => a
+                .iter()
+                .map(|r| serde_json::from_value(r.clone()).map_err(|e| bad(c, format!("rule {r}: {e}"))))
+                .collect::<Result<_, _>>()?,
+            Some(v) => return Err(bad(c, format!("`rules` is [{{field, op, value}}, …] (up to {}), not {v}", schedule::MAX_FIELDS))),
+            None => Vec::new(),
+        };
+        schedule::check_rules(&s.model, &cats, &rules).map_err(|e| bad(c, e))?;
+        schedule::picks(&s.model, &cats, &rules).into_iter().collect()
+    };
+
+    let parameter = match string(c, p, "parameter")? {
+        Some(n) => n.trim().to_string(),
+        None => s.model.code_parameter.clone().unwrap_or_else(|| ARTICLE_CODE.to_string()),
+    };
+    if let Some(was) = s.model.parameters.get(&parameter)
+        && !matches!(was.kind, ParameterKind::Text)
+    {
+        return Err(bad(c, format!("parameter `{parameter}` doesn't hold text; an article code is text")));
+    }
+    // The categories reached, which the parameter is widened to: an element of a category that holds no parameters
+    // carries no code, and is said rather than passed over.
+    let mut cats: Vec<String> = ids.iter().filter_map(|id| s.model.elements.get(*id)).map(|e| e.category().to_string()).collect();
+    cats.sort();
+    cats.dedup();
+    if let Some(k) = cats.iter().find(|k| !PARAMETER_CATEGORIES.contains(&k.as_str())) {
+        return Err(bad(c, format!("a {k} holds no parameters of the project's, so it carries no article code")));
+    }
+
+    let m = s.model_mut();
+    let mut param = m.parameters.get(&parameter).cloned().unwrap_or(ProjectParameter { kind: ParameterKind::Text, categories: Vec::new() });
+    param.categories.extend(cats);
+    param.categories.sort();
+    param.categories.dedup();
+    if !param.categories.is_empty() {
+        m.parameters.insert(parameter.clone(), param);
+    }
+    let mut done = 0usize;
+    for id in &ids {
+        let Some(params) = m.elements.get_mut(*id).and_then(Element::params_mut) else { continue };
+        match clear {
+            true => done += usize::from(params.remove(&parameter).is_some()),
+            false => {
+                params.insert(parameter.clone(), json!(code));
+                done += 1;
+            }
+        }
+    }
+    if m.parameters.contains_key(&parameter) {
+        m.code_parameter = Some(parameter.clone());
+    }
+    Ok(json!({"parameter": parameter, "code": code, "elements": done}))
 }
 
 /// How many rows of a price list `price_columns` gives back, so a mapping can be looked at before the list is read.

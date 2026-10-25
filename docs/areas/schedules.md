@@ -34,7 +34,32 @@ to one of those words winning over a heading that merely holds it — and change
 (PL, `crates/ui-egui/src/prices.rs`) offers: the file, a drop-down for each role filled from the file's own headings, the
 separator, the first rows to look at, and the lists the project already holds. Nothing in the window reads a file itself.
 
-What is still missing is the join: an element does not yet find its price item by itself, so a schedule's calculated field
-is where a price meets a quantity. Giving an element its article code (a project parameter on the type, or a filter per
-item) is the next step, and `IfcCostSchedule` with its `IfcCostItem`s is how a finished bill of quantities should leave
-the project.
+## The article code, and a bill of quantities
+
+An element is joined to its price by the **article code it carries**, not by a rule worked out again at every reading:
+`price_code` writes the code on the elements as the value of a project parameter, `Model::code_parameter` holds which
+parameter that is, and `Model::article_code` reads it. So the price is a fact about the element — it shows in the
+Properties palette, it is a column of a schedule, it goes out in IFC with the other parameters, and a wall that is priced
+wrongly is answered for by looking at the wall.
+
+What the rules do is **give the code to many elements at once**: `price_code` takes the elements from `ids`, from a view
+filter by name, or from `categories` with the same `rules` a schedule and a view filter use (`schedule::picks`). Nothing
+new was invented for picking elements out, and the window where those rules are written is the one that was already
+there. Running it again after a model comes in from Revit prices what came in. A code no price list holds is refused, so a
+typo is not a silent hole in the bill.
+
+Where a price reaches a category (`Model::prices_reach`: the project has a list, and the code's parameter is for that
+category) a schedule gains three fields from the price list (`schedule::PRICE_FIELDS`): `Price Description`, `Price Unit`
+and `Unit Price`, read through the code the element carries. There is deliberately **no amount field**: which quantity a
+price is for is the price list's business, so the amount is a calculated field the user writes over the quantity they
+mean — `Length * Height / 1000000 * Unit Price` for a wall priced by the square metre. An element with no code, or with a
+code no list holds, has no value in those fields, so its amount comes to nothing instead of counting as zero: a hole in
+the bill is visible.
+
+In the window, Manage > Price List is also where a code is given: the project's items under a search, the picked one
+assigned to the selection (or taken off it). Select All Instances (SA) over a type is what makes that a whole type at
+once.
+
+What is still missing: a wall's **net** area (the openings are not taken out, which only `element_json` can do), and
+leaving the project as `IfcCostSchedule` with its `IfcCostItem`s and `IfcCostValue`s (ISO 16739), instead of the CSV a
+schedule already writes.

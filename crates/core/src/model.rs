@@ -1516,6 +1516,30 @@ pub struct ProjectParameter {
     pub categories: Vec<String>,
 }
 
+impl Model {
+    /// The price list item of article `code`: the first list, by name, that holds it. A code in two lists is one
+    /// article, so the first answer is the answer; nothing holds it twice under one name.
+    pub fn price_item(&self, code: &str) -> Option<&PriceItem> {
+        self.price_lists.values().find_map(|l| l.items.get(code))
+    }
+
+    /// The article code element `e` carries: its value of the project's code parameter, where the project has one, that
+    /// parameter is for `e`'s category, and `e` holds a value of it. This is the join to a price list.
+    pub fn article_code<'a>(&self, e: &'a Element) -> Option<&'a str> {
+        let name = self.code_parameter.as_deref()?;
+        let cat = e.category();
+        self.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == cat))?;
+        e.params().and_then(|ps| ps.get(name)).and_then(serde_json::Value::as_str).map(str::trim).filter(|v| !v.is_empty())
+    }
+
+    /// Whether a price reaches the elements of category `cat`: the project has a price list, and the article code's
+    /// parameter is for that category. Where it doesn't, the price fields are not among the category's fields at all.
+    pub fn prices_reach(&self, cat: &str) -> bool {
+        !self.price_lists.is_empty()
+            && self.code_parameter.as_deref().and_then(|n| self.parameters.get(n)).is_some_and(|p| p.categories.iter().any(|c| c == cat))
+    }
+}
+
 /// The most project parameters a project holds.
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
@@ -1655,6 +1679,10 @@ pub struct Model {
     /// Its price lists, by name: the lines a bill of quantities prices its work with.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub price_lists: BTreeMap<String, PriceList>,
+    /// The project parameter that carries an element's article code, which is what joins it to a price list's
+    /// item: `price_code` sets it. A project without one prices nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_parameter: Option<String>,
     /// What its pens draw on paper (Manage > Line Weights), once set; until then, what a project in its units starts with
     /// ([`Model::line_weights`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1709,6 +1737,7 @@ impl Model {
             phase_overrides: phasing::overrides(),
             option_sets: BTreeMap::new(),
             price_lists: BTreeMap::new(),
+            code_parameter: None,
             line_weights: None,
             object_styles: BTreeMap::new(),
             elements: Elements::new(),
@@ -3394,6 +3423,9 @@ impl Model {
             if let Some(c) = p.categories.iter().find(|c| !PARAMETER_CATEGORIES.contains(&c.as_str())) {
                 return Err(format!("{who}: `{c}` isn't a category it can be for; there are {}", PARAMETER_CATEGORIES.join(", ")));
             }
+            if crate::schedule::price_field(n) {
+                return Err(format!("{who}: a price list gives an element a `{n}` of its own; name it otherwise"));
+            }
             if let Some(c) = p.categories.iter().find(|c| crate::schedule::own_field(c, n)) {
                 return Err(format!("{who}: {c}s have a `{n}` of their own; name it otherwise"));
             }
@@ -3401,6 +3433,13 @@ impl Model {
                 && let Some((f, _)) = self.families.iter().find(|(_, f)| f.parameters.iter().any(|q| q.name == *n))
             {
                 return Err(format!("{who}: family `{f}` has a parameter of that name; name it otherwise"));
+            }
+        }
+        if let Some(n) = &self.code_parameter {
+            let who = format!("the article code's parameter `{n}`");
+            let p = self.parameters.get(n).ok_or_else(|| format!("{who} isn't a project parameter; make it with `parameter`"))?;
+            if !matches!(p.kind, ParameterKind::Text) {
+                return Err(format!("{who} doesn't hold text; an article code is text"));
             }
         }
         graphics::check_project(self)?;

@@ -170,3 +170,150 @@ fn the_separator_may_be_the_callers_and_the_columns_follow_it() {
     let out = run(&mut s, "price_columns", json!({"path": path, "separator": ";"})).expect("read");
     assert_eq!(out["columns"], json!(["Codice,Descrizione", "Prezzo"]));
 }
+
+/// A project with two wall types, three walls, and a price list of two articles.
+fn site() -> (Session, String) {
+    let path = file(
+        "muri.csv",
+        "Codice;Descrizione;UM;Prezzo\n         B.02.100;Muratura in blocchi di laterizio;m2;89,40\n         B.02.200;Parete in cartongesso;m2;34,10\n",
+    );
+    let mut s = Session::new();
+    s.script(
+        "type {\"category\": \"wall\", \"name\": \"Muratura 250\", \"thickness\": 250}\n         type {\"category\": \"wall\", \"name\": \"Cartongesso 100\", \"thickness\": 100}\n         wall {\"points\": [[0,0],[5000,0]], \"type\": \"Muratura 250\", \"height\": 3000}\n         wall {\"points\": [[0,0],[4000,0]], \"type\": \"Muratura 250\", \"height\": 3000}\n         wall {\"points\": [[0,2000],[6000,2000]], \"type\": \"Cartongesso 100\", \"height\": 3000}",
+    )
+    .expect("the site is built");
+    run(
+        &mut s,
+        "price_list",
+        json!({"name": "Prezzario", "path": path, "code": "Codice", "description": "Descrizione", "unit": "UM", "price": "Prezzo"}),
+    )
+    .expect("the price list comes in");
+    (s, "Prezzario".to_string())
+}
+
+/// The walls of type `name`.
+fn walls_of(s: &Session, name: &str) -> Vec<crate::model::Id> {
+    s.model.elements.iter().filter(|(_, e)| matches!(e, crate::model::Element::Wall(w) if w.type_name == name)).map(|(id, _)| *id).collect()
+}
+
+#[test]
+fn a_code_given_to_a_filter_reaches_the_walls_it_picks_and_no_others() {
+    let (mut s, _) = site();
+    let out = run(
+        &mut s,
+        "price_code",
+        json!({"code": "B.02.100", "categories": ["walls"], "rules": [{"field": "Type", "op": "contains", "value": "Muratura"}]}),
+    )
+    .expect("the code is given");
+    assert_eq!(out["elements"], 2, "the two walls of that type, and not the third");
+    assert_eq!(out["parameter"], "Article Code");
+
+    // The parameter was made for the category it reached, and the project knows it is the one that carries the code.
+    let param = &s.model.parameters["Article Code"];
+    assert_eq!(param.categories, vec!["wall".to_string()]);
+    assert_eq!(s.model.code_parameter.as_deref(), Some("Article Code"));
+    assert!(s.model.library_in_step(), "the parameter is a library entry like any other");
+
+    for id in walls_of(&s, "Muratura 250") {
+        let e = s.model.elements.get(id).expect("the wall");
+        assert_eq!(s.model.article_code(e), Some("B.02.100"));
+    }
+    for id in walls_of(&s, "Cartongesso 100") {
+        let e = s.model.elements.get(id).expect("the wall");
+        assert_eq!(s.model.article_code(e), None, "nothing the filter passed over was touched");
+    }
+}
+
+#[test]
+fn a_schedule_prices_what_carries_a_code_and_leaves_the_rest_empty() {
+    let (mut s, _) = site();
+    run(
+        &mut s,
+        "price_code",
+        json!({"code": "B.02.100", "categories": ["walls"], "rules": [{"field": "Type", "op": "contains", "value": "Muratura"}]}),
+    )
+    .expect("the code is given");
+    // A bill of quantities, as a user writes one: the quantity the price is for, the unit price, and the amount.
+    let out = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Computo", "category": "walls", "fields": [
+            "Article Code",
+            "Price Description",
+            "Price Unit",
+            {"name": "Quantita", "formula": "Length * Height / 1000000", "kind": "number", "total": true},
+            "Unit Price",
+            {"name": "Importo", "formula": "Length * Height / 1000000 * Unit Price", "kind": "number", "total": true},
+        ]}),
+    )
+    .expect("the schedule is made");
+
+    let rows = out["rows"].as_array().expect("rows").clone();
+    assert_eq!(rows.len(), 3);
+    // 5 m by 3 m at 89,40 €/m² is 1341,00; 4 by 3 is 1072,80; the cartongesso wall carries no code, so no price.
+    let priced: Vec<f64> = rows.iter().filter_map(|r| r[5].as_f64()).collect();
+    assert_eq!(priced, vec![1341.0, 1072.8]);
+    let empty = rows.iter().find(|r| r[0].is_null()).expect("the wall with no code");
+    assert!(empty[4].is_null() && empty[5].is_null(), "no code, no price and no amount: a hole in the bill is visible");
+    // The total is of what is priced, not of what is drawn.
+    assert_eq!(out["totals"][5], 2413.8);
+    let priced_row = rows.iter().find(|r| r[0] == "B.02.100").expect("a row with the code");
+    assert_eq!(priced_row[1], "Muratura in blocchi di laterizio", "the wording comes from the price list");
+    assert_eq!(priced_row[2], "m2");
+}
+
+#[test]
+fn a_code_no_price_list_holds_is_refused_so_a_typo_is_no_silent_hole() {
+    let (mut s, _) = site();
+    let err = run(&mut s, "price_code", json!({"code": "B.02.1OO", "categories": ["walls"]})).expect_err("refused");
+    assert!(err.contains("B.02.1OO") && err.contains("Prezzario"), "{err}");
+    assert!(s.model.code_parameter.is_none(), "nothing was left behind");
+    assert!(s.model.parameters.is_empty());
+}
+
+#[test]
+fn the_price_fields_are_offered_only_where_a_price_reaches() {
+    let (mut s, _) = site();
+    let offered = |s: &Session| crate::schedule::fields(&s.model, "wall").into_iter().any(|(n, _)| n == "Unit Price");
+    assert!(!offered(&s), "a price list alone prices nothing: nothing carries a code yet");
+    run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"]})).expect("the code is given");
+    assert!(offered(&s));
+    // A category the code's parameter is not for has no price fields, so no column that is always empty.
+    assert!(!crate::schedule::fields(&s.model, "floor").into_iter().any(|(n, _)| n == "Unit Price"));
+}
+
+#[test]
+fn clearing_a_code_takes_the_price_off_again() {
+    let (mut s, _) = site();
+    run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"]})).expect("given");
+    let out = run(&mut s, "price_code", json!({"clear": true, "categories": ["walls"]})).expect("cleared");
+    assert_eq!(out["elements"], 3);
+    let id = walls_of(&s, "Muratura 250")[0];
+    assert_eq!(s.model.article_code(s.model.elements.get(id).expect("the wall")), None);
+    assert_eq!(crate::schedule::field_text(&s.model, id, "Unit Price"), None);
+}
+
+#[test]
+fn a_code_follows_a_view_filter_so_the_rules_are_made_where_they_already_are() {
+    let (mut s, _) = site();
+    run(
+        &mut s,
+        "filter",
+        json!({"name": "Muri portanti", "categories": ["walls"], "rules": [{"field": "Thickness", "op": "greater-or-equal", "value": 200}]}),
+    )
+    .expect("the filter is made");
+    let out = run(&mut s, "price_code", json!({"code": "B.02.100", "filter": "Muri portanti"})).expect("the code is given");
+    assert_eq!(out["elements"], 2);
+    let err = run(&mut s, "price_code", json!({"code": "B.02.100", "filter": "Muri esterni"})).expect_err("refused");
+    assert!(err.contains("Muri portanti"), "it names the filters there are: {err}");
+}
+
+#[test]
+fn the_code_parameter_is_the_users_to_name_and_a_parameter_that_holds_numbers_is_refused() {
+    let (mut s, _) = site();
+    run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"], "parameter": "Codice articolo"})).expect("given");
+    assert_eq!(s.model.code_parameter.as_deref(), Some("Codice articolo"));
+    run(&mut s, "parameter", json!({"name": "Peso", "kind": "number", "categories": ["walls"]})).expect("a number parameter");
+    let err = run(&mut s, "price_code", json!({"code": "B.02.100", "categories": ["walls"], "parameter": "Peso"})).expect_err("refused");
+    assert!(err.contains("text"), "{err}");
+}

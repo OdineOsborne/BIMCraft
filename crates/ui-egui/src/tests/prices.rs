@@ -104,3 +104,60 @@ fn a_file_that_cannot_be_read_is_said_inside_the_window_which_stays_open() {
     press(&mut h, "Close");
     assert!(h.state().price_dialog.is_none());
 }
+
+/// The window with `REGIONAL` already read into it, under the name `Prezzario`.
+fn with_a_price_list() -> Harness<'static, BimApp> {
+    let path = price_file("assegna.csv", "ARTICOLO;DESCRIZIONE;U.M.;PREZZO\nB.02.100;Muratura;m2;89,40\nB.02.200;Cartongesso;m2;34,10\n");
+    let mut h = app(BOX);
+    shortcut(&mut h, "PL");
+    fill(&mut h, "File:", &path);
+    press(&mut h, "Read Columns");
+    fill(&mut h, "Name:", "Prezzario");
+    press(&mut h, "Import");
+    h
+}
+
+#[test]
+fn the_window_writes_the_picked_items_code_on_the_selection() {
+    let mut h = with_a_price_list();
+    // A wall of the box, picked on the plan as a user picks one.
+    click(&mut h, P2(4000.0, 0.0));
+    let wall = *h.state().selection.first().expect("a wall is selected");
+    shortcut(&mut h, "PL");
+    assert!(h.query_by_label("1 selected").is_some());
+    // Nothing is assigned until an item is picked.
+    assert!(h.get_by_label("Assign to Selection").accesskit_node().is_disabled());
+    press(&mut h, "B.02.100   Muratura   m2   89.40");
+    press(&mut h, "Assign to Selection");
+    let app = h.state();
+    let e = app.session.model.elements.get(wall).expect("the wall");
+    assert_eq!(app.session.model.article_code(e), Some("B.02.100"));
+    assert_eq!(app.session.model.code_parameter.as_deref(), Some("Article Code"));
+    assert!(app.status.text.contains("B.02.100"), "{}", app.status.text);
+    assert!(app.price_dialog.is_some(), "it stays open: a project is priced item by item");
+
+    // The schedule of its category now has the price fields, and the window says what the selection carries.
+    let fields = bimcraft_core::schedule::fields(&h.state().session.model, "wall");
+    assert!(fields.iter().any(|(n, _)| n == "Unit Price"), "{fields:?}");
+    assert!(h.query_by_label("carrying B.02.100").is_some());
+
+    // And takes it off again.
+    press(&mut h, "Clear from Selection");
+    let app = h.state();
+    assert_eq!(app.session.model.article_code(app.session.model.elements.get(wall).expect("the wall")), None);
+    assert!(app.status.text.contains("came off"), "{}", app.status.text);
+}
+
+#[test]
+fn the_search_narrows_the_items_and_with_nothing_selected_nothing_can_be_assigned() {
+    let mut h = with_a_price_list();
+    shortcut(&mut h, "PL");
+    assert!(h.query_by_label("0 selected").is_some());
+    assert!(h.get_by_label("Assign to Selection").accesskit_node().is_disabled(), "nothing is selected");
+    assert!(h.query_by_label("B.02.200   Cartongesso   m2   34.10").is_some());
+    fill(&mut h, "Search:", "muratura");
+    assert!(h.query_by_label("B.02.200   Cartongesso   m2   34.10").is_none(), "the search narrows the list");
+    assert!(h.query_by_label("B.02.100   Muratura   m2   89.40").is_some());
+    fill(&mut h, "Search:", "zzz");
+    assert!(h.query_by_label("No item of that name.").is_some());
+}

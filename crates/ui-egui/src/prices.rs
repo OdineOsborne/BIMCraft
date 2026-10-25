@@ -2,7 +2,12 @@
 //! window picks a file, says which column holds the article code, the wording, the unit and the unit price, and reads the
 //! rows under that mapping.
 //!
-//! Nothing here reads a file: two commands do, and this module only shows what they say. `price_columns` gives back a
+//! The window is also where an element is given the article code that joins it to an item: pick the item, select the
+//! elements, assign. The rules that pick out many elements at once live where they already are — a view filter, or
+//! `price_code`'s own `categories` and `rules` — and the code is written on the elements either way, so a schedule
+//! shows where each price came from.
+//!
+//! Nothing here reads a file: three commands do, and this module only shows what they say. `price_columns` gives back a
 //! file's headings, its first rows and which column each role looks like, so the mapping is **picked from the file**
 //! instead of typed; `price_list` then reads the rows under the mapping the user settled on. So a price list of any form
 //! — another region's, another language's, a semicolon or a tab between its columns — needs no code written for it.
@@ -23,6 +28,9 @@ const ROLES: [(&str, &str, bool); 4] =
 /// What the window offers as the character between columns, as the core takes it.
 const SEPARATORS: [(&str, &str); 3] = [("Semicolon", ";"), ("Comma", ","), ("Tab", "\t")];
 
+/// How many items the list under the search shows: enough to pick from, never a whole regional price list.
+const SHOWN: usize = 200;
+
 /// How much of a cell the rows being looked at show: enough to tell a column by, not enough to push the window wide.
 const CELL: usize = 44;
 
@@ -39,6 +47,9 @@ pub struct PriceDialog {
     pub(crate) row_count: usize,
     /// The column each role is on, in `ROLES`' order; empty where none.
     pub(crate) roles: [String; 4],
+    /// What is typed in the search over the project's items, and the item picked out of it.
+    pub(crate) search: String,
+    pub(crate) picked: String,
     /// Why the file could not be read, or the list not made: said inside the window, because a status box in the view's
     /// corner can lie over the buttons of a modal.
     pub(crate) error: String,
@@ -54,6 +65,8 @@ impl PriceDialog {
             rows: Vec::new(),
             row_count: 0,
             roles: Default::default(),
+            search: String::new(),
+            picked: String::new(),
             error: String::new(),
         }
     }
@@ -125,8 +138,29 @@ impl BimApp {
     pub(crate) fn price_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.price_dialog.take() else { return };
         let (mut close, mut browse, mut reread, mut import) = (false, false, false, false);
+        let (mut assign, mut take_off) = (false, false);
         let columns = d.columns.clone();
         let lists: Vec<(String, usize)> = self.session.model.price_lists.iter().map(|(name, l)| (name.clone(), l.items.len())).collect();
+        let needle = d.search.trim().to_lowercase();
+        let items: Vec<(String, String)> = self
+            .session
+            .model
+            .price_lists
+            .values()
+            .flat_map(|l| l.items.iter())
+            .filter(|(code, i)| {
+                needle.is_empty() || code.to_lowercase().contains(&needle) || i.description.to_lowercase().contains(&needle)
+            })
+            .take(SHOWN)
+            .map(|(code, i)| (code.clone(), format!("{code}   {}   {}   {:.2}", short(&i.description), i.unit, i.price)))
+            .collect();
+        let model = &self.session.model;
+        let mut carried: Vec<&str> =
+            self.selection.iter().filter_map(|id| model.elements.get(*id)).filter_map(|e| model.article_code(e)).collect();
+        carried.sort_unstable();
+        carried.dedup();
+        let carried = carried.join(", ");
+        let selected = self.selection.len();
         let r = Modal::new(UiId::new("price-list")).show(ctx, |ui| {
             ui.set_width(640.0);
             ui.label(RichText::new(t("Price List")).heading());
@@ -207,6 +241,41 @@ impl BimApp {
             for (name, items) in &lists {
                 ui.label(tf("{}: {} items", &[name, &items.to_string()]));
             }
+            ui.add_space(10.0);
+            ui.label(RichText::new(t("Article Code")).strong());
+            ui.label(
+                RichText::new(t("The code of the item that prices an element, written on the elements you have selected. A schedule of \
+                     their category then has the wording, the unit and the unit price among its fields."))
+                .color(pal().muted),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let label = ui.label(t("Search:"));
+                ui.add_sized([220.0, 22.0], TextEdit::singleline(&mut d.search)).labelled_by(label.id);
+                ui.label(RichText::new(tf("{} selected", &[&selected.to_string()])).color(pal().muted));
+                if !carried.is_empty() {
+                    ui.label(RichText::new(tf("carrying {}", &[&carried])).color(pal().muted));
+                }
+            });
+            ui.add_space(4.0);
+            ScrollArea::vertical().id_salt("price-items").max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
+                if items.is_empty() {
+                    // Nothing to pick from at all is not the same as nothing by that name, and the way out of the two is not
+                    // the same either.
+                    let why = if lists.is_empty() { "Read a price list first." } else { "No item of that name." };
+                    ui.label(RichText::new(t(why)).color(pal().muted));
+                }
+                for (code, line) in &items {
+                    if ui.selectable_label(&d.picked == code, line).clicked() {
+                        d.picked = code.clone();
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                assign = ui.add_enabled(selected > 0 && !d.picked.is_empty(), Button::new(t("Assign to Selection"))).clicked();
+                take_off = ui.add_enabled(selected > 0 && !carried.is_empty(), Button::new(t("Clear from Selection"))).clicked();
+            });
             if !d.error.is_empty() {
                 ui.add_space(6.0);
                 ui.label(RichText::new(&d.error).color(pal().error));
@@ -231,8 +300,38 @@ impl BimApp {
             self.price_import();
             return;
         }
+        if assign || take_off {
+            self.price_assign(take_off);
+            return;
+        }
         if closing {
             self.price_dialog = None;
+        }
+    }
+
+    /// Assign to Selection, and Clear from Selection: the picked item's code written on the elements selected, or taken
+    /// off them. The window stays open, since a project is priced item by item.
+    fn price_assign(&mut self, clear: bool) {
+        let Some(d) = &self.price_dialog else { return };
+        let code = d.picked.clone();
+        if self.selection.is_empty() || (code.is_empty() && !clear) {
+            return;
+        }
+        let ids: Vec<Value> = self.selection.iter().map(|id| json!(id)).collect();
+        let params = if clear { json!({"clear": true, "ids": ids}) } else { json!({"code": code, "ids": ids}) };
+        match self.run("price_code", params) {
+            Some(reply) => {
+                let n = reply["elements"].as_u64().unwrap_or(0).to_string();
+                let text = if clear { tf("The code came off {} elements.", &[&n]) } else { tf("{} elements carry {}.", &[&n, &code]) };
+                self.status = crate::Status { text, error: false };
+            }
+            None => {
+                let why = std::mem::take(&mut self.status.text);
+                self.status = crate::Status::default();
+                if let Some(d) = &mut self.price_dialog {
+                    d.error = why;
+                }
+            }
         }
     }
 

@@ -442,6 +442,16 @@ fn own(cat: &str) -> (usize, &'static [Own]) {
     OWN.iter().find(|(c, _, _)| *c == cat).map_or((0, &[][..]), |(_, n, f)| (*n, *f))
 }
 
+/// What a price list gives an element that carries an article code: the item's wording and its unit as the list writes
+/// them, and its unit price. There is no amount here: which quantity a price is for is the price list's business, so an
+/// amount is a calculated field over `Unit Price` and the quantity the user means (`Volume * Unit Price`).
+pub const PRICE_FIELDS: [(&str, Kind); 3] = [("Price Description", Kind::Text), ("Price Unit", Kind::Text), ("Unit Price", Kind::Number)];
+
+/// Whether `name` is one of the price fields: a project parameter may not take their names.
+pub fn price_field(name: &str) -> bool {
+    PRICE_FIELDS.iter().any(|(n, _)| *n == name)
+}
+
 /// Whether `name` is one of category `cat`'s own fields.
 pub fn own_field(cat: &str, name: &str) -> bool {
     own(cat).1.iter().any(|(n, _, _)| *n == name)
@@ -467,6 +477,11 @@ pub fn fields(m: &Model, cat: &str) -> Vec<(String, Kind)> {
                 ParameterKind::YesNo => Kind::YesNo,
             },
         );
+    }
+    if m.prices_reach(cat) {
+        for (n, k) in PRICE_FIELDS {
+            add(n, k);
+        }
     }
     if cat == "component" {
         for p in m.families.values().flat_map(|f| &f.parameters) {
@@ -800,6 +815,17 @@ impl Row<'_> {
                 // Unset, a yes or no is no, as the palette shows it.
                 None if p.kind == ParameterKind::YesNo => Value::Bool(false),
                 None => Value::Null,
+            };
+        }
+        if price_field(name) && m.prices_reach(cat) {
+            // No code, or a code no list holds: no value, so an element that was never priced leaves the column empty
+            // and an amount over it comes to nothing, instead of counting as zero.
+            let item = m.article_code(self.e).and_then(|code| m.price_item(code));
+            return match (item, name) {
+                (Some(i), "Price Description") if !i.description.is_empty() => Value::String(i.description.clone()),
+                (Some(i), "Price Unit") if !i.unit.is_empty() => Value::String(i.unit.clone()),
+                (Some(i), "Unit Price") => serde_json::json!(i.price),
+                _ => Value::Null,
             };
         }
         if let Some((family, _)) = self.e.family()
