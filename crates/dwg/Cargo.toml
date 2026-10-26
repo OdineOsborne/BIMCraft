@@ -1,0 +1,18 @@
+[package]
+name = "bimcraft-dwg"
+description = "BIMCraft's DWG bridge: turns a DWG into DXF bytes with the acadrust crate (MPL-2.0, used unmodified)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# MPL-2.0, a file-level copyleft: used as an unmodified dependency, so BIMCraft's own files stay MIT OR Apache-2.0
+# (NOTICE says so, and docs/areas/cad-drawings.md says why DWG needs it at all). Rayon is left out: a conversion runs
+# on the thread that asked for it, so a window keeps its own threads.
+acadrust = { version = "0.6", default-features = false }
+
+[dev-dependencies]
+bimcraft-core = { workspace = true }

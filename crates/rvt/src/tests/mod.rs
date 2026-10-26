@@ -61,7 +61,8 @@ fn only_the_command_line_and_the_desktop_take_the_reader_and_only_through_a_defa
         assert!(dev.is_empty() || dev.contains("features = [\"testing\"]"), "{manifest}: {dev}");
         let dep = normal.lines().find(|l| l.starts_with("bimcraft-rvt")).unwrap_or_else(|| panic!("{manifest} has no bimcraft-rvt"));
         assert!(dep.contains("optional = true"), "{manifest}: the reader is an optional dependency, `{dep}`");
-        assert!(text.contains("default = [\"rvt\"]"), "{manifest}: the `rvt` feature is on by default");
+        let default = normal.lines().find(|l| l.starts_with("default = [")).unwrap_or_else(|| panic!("{manifest} has no default features"));
+        assert!(default.contains("\"rvt\""), "{manifest}: the `rvt` feature is on by default, `{default}`");
         assert!(text.contains("rvt = [\"dep:bimcraft-rvt\"]"), "{manifest}: the `rvt` feature turns the reader on and nothing else");
     }
 }
@@ -81,8 +82,11 @@ fn the_crate_is_apache_only_and_carries_the_licence_and_the_notice_apache_asks_f
 
 #[test]
 fn every_package_says_apache_and_ships_the_notice_that_a_build_with_the_reader_owes() {
-    // The root NOTICE is what the packages carry; it must say what the crate's does.
-    assert_eq!(read("NOTICE"), read("crates/rvt/NOTICE"), "the root NOTICE is a copy of the crate's");
+    // The root NOTICE is what the packages carry, so it must say everything word for word that this crate's does. It
+    // may say more — another dependency's licence asks for its own attribution there (the DWG bridge's, MPL-2.0) — but
+    // never less, which is what this holds.
+    let (root, crates) = (read("NOTICE"), read("crates/rvt/NOTICE"));
+    assert!(root.contains(crates.trim_end()), "the root NOTICE does not carry the crate's word for word");
     for (file, wants) in [
         ("packaging/linux/nfpm.yaml", "license: Apache-2.0"),
         ("packaging/linux/arch-package.sh", "license=('Apache-2.0')"),

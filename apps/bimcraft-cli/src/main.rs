@@ -31,12 +31,23 @@ fn print(out: &mut impl Write, v: &Value) -> Result<(), String> {
     writeln!(out, "{v}").map_err(|e| format!("stdout: {e}"))
 }
 
+/// Hands the session what turns a DWG into DXF, where this build has it: the dependency lives in `bimcraft-dwg` and
+/// nothing of it reaches the core (`Session::dwg`).
+fn attach_dwg(s: &mut Session) {
+    #[cfg(feature = "dwg")]
+    {
+        s.dwg = Some(std::sync::Arc::new(|bytes: &[u8]| bimcraft_dwg::to_dxf(bytes, &bimcraft_dwg::Limits::default())));
+    }
+    let _ = s;
+}
+
 fn print_pretty(out: &mut impl Write, v: &Value) -> Result<(), String> {
     writeln!(out, "{}", serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| format!("stdout: {e}"))
 }
 
 fn cli(args: &[String], out: &mut impl Write) -> Result<(), String> {
     let mut s = Session::new();
+    attach_dwg(&mut s);
     match args {
         [cmd, rest @ ..] if cmd == "run" => {
             let mut rest = rest.iter();

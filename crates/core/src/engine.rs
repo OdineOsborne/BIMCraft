@@ -64,6 +64,12 @@ impl Step {
 /// The commands that copy what stands: a copy is made in the session's phase and isn't taken down with its original.
 const COPIES: [&str; 3] = ["copy", "mirror", "rotate"];
 
+/// Turns a DWG into the bytes of a DXF, and says what the drawing lost on the way. DWG has no published
+/// specification, so BIMCraft reads one only through a dependency, which `bimcraft-dwg` holds on its own: the core
+/// never depends on it, as it never depends on the Revit reader, and an application that has one hands it over here.
+/// A session without one reads no DWG and says so.
+pub type Dwg = Arc<dyn Fn(&[u8]) -> Result<(Vec<u8>, Vec<String>), String> + Send + Sync>;
+
 pub struct Session {
     pub model: Arc<Model>,
     /// Where the model was opened from or last saved to.
@@ -76,6 +82,8 @@ pub struct Session {
     redo: Vec<(Step, Arc<Model>)>,
     /// How many times the project was replaced, so a transaction knows its history went with it.
     resets: usize,
+    /// What turns a DWG into DXF, where this build has it.
+    pub dwg: Option<Dwg>,
 }
 
 impl Default for Session {
@@ -108,6 +116,7 @@ impl Session {
             undo: Vec::new(),
             redo: Vec::new(),
             resets: 0,
+            dwg: None,
         }
     }
 

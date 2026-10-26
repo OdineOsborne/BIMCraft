@@ -142,3 +142,35 @@ fn a_polyline_of_more_points_than_one_holds_is_left_out_whole() {
     assert_eq!(d.shapes(), 0, "half a drawing is worse than none of it");
     assert_eq!(d.left_out, ["1 LWPOLYLINE"]);
 }
+
+#[test]
+fn a_session_without_a_converter_says_what_a_dwg_is_and_stops() {
+    let dir = std::env::temp_dir().join(format!("bimcraft-dwg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("piano.dwg");
+    std::fs::write(&path, b"AC1032\0\0\0\0\0\0").unwrap();
+    let mut s = crate::engine::Session::new();
+    let err = s.execute("dxf", &serde_json::json!({"path": path.to_string_lossy()})).expect_err("refused");
+    assert!(err.contains("is a DWG") && err.contains("convert"), "{err}");
+}
+
+#[test]
+fn a_session_with_one_reads_a_dwg_wherever_it_reads_a_dxf() {
+    let dir = std::env::temp_dir().join(format!("bimcraft-dwg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("convertito.dwg");
+    std::fs::write(&path, b"AC1032\0\0\0\0\0\0").unwrap();
+    let mut s = crate::engine::Session::new();
+    // What the applications hand over, here a stand-in: the core knows only bytes in, bytes out.
+    s.dwg = Some(std::sync::Arc::new(|bytes: &[u8]| {
+        assert!(crate::dxf::is_dwg(bytes), "it is given the DWG's own bytes");
+        Ok((
+            b"0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nMURI\n10\n0\n20\n0\n11\n1000\n21\n0\n0\nENDSEC\n0\nEOF\n".to_vec(),
+            vec!["3 PROXY left out".into()],
+        ))
+    }));
+    let out = s.execute("dxf", &serde_json::json!({"path": path.to_string_lossy()})).expect("it reads");
+    assert_eq!(out["shapes"], 1, "the DXF it was turned into");
+    assert_eq!(out["layers"][0]["name"], "MURI");
+    assert_eq!(out["converted"], serde_json::json!(["3 PROXY left out"]), "what the DWG reader said it could not read");
+}

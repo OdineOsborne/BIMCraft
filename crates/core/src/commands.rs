@@ -100,13 +100,13 @@ pub static ALL: &[Command] = &[
     other(
         "dxf",
         "DXF",
-        "{path, scale?} what a DXF drawing holds, read and reported without changing the project: its `layers` and how \
+        "{path, scale?} what a drawing holds, read and reported without changing the project: its `layers` and how \
          many shapes are on each, the `shapes` in all, the `extent` it lies in (mm, south-west and north-east), the \
          `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
          `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
          POLYLINE, ARC and CIRCLE, each on the layer it names; blocks, text, dimensions, hatches and splines are \
-         counted and named, never guessed at. A DWG is Autodesk's own format with no published specification: convert \
-         it to DXF first",
+         counted and named, never guessed at. A DWG is turned into DXF first, by the dependency `bimcraft-dwg` holds \
+         (Autodesk publishes no specification for it), and `converted` is what that reader said it could not read",
         dxf_read,
     ),
     edit(
@@ -130,7 +130,8 @@ pub static ALL: &[Command] = &[
         "underlay",
         "Link CAD",
         &[],
-        "{path, name?, level?, at?: [x, y], angle?: degrees, scale?, hidden?: [layer, …]} a CAD drawing (.dxf) shown \
+        "{path, name?, level?, at?: [x, y], angle?: degrees, scale?, hidden?: [layer, …]} a CAD drawing (.dxf or \
+         .dwg) shown \
          under a level's plan, as Revit's Link CAD: a survey or a consultant's drawing to trace over and snap to, which \
          nothing of the project is and no command can edit. It stands with the drawing's own origin at `at` (default \
          [0, 0]) turned `angle` about it, on `level` (the lowest unless given), and draws every layer but those `hidden` \
@@ -1780,11 +1781,7 @@ fn read_drawing(s: &Session, path: &str, scale: Option<f64>) -> Result<Arc<crate
         (Some(project), true) => project.parent().map_or(at.clone(), |dir| dir.join(&at)),
         _ => at,
     };
-    let len = std::fs::metadata(&full).map(|m| m.len()).map_err(|e| format!("cannot read `{path}`: {e}"))?;
-    if len as usize > crate::dxf::MAX_BYTES {
-        return Err(format!("`{path}` holds {len} bytes; a DXF is read up to {}", crate::dxf::MAX_BYTES));
-    }
-    let bytes = std::fs::read(&full).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    let (bytes, _converted) = drawing_bytes(s, &full.to_string_lossy())?;
     crate::dxf::read(&bytes, &crate::dxf::Options { scale }).map(Arc::new).map_err(|e| format!("`{path}`: {e}"))
 }
 
@@ -1875,7 +1872,27 @@ fn price_number(raw: &str) -> Option<f64> {
 }
 
 /// How big a DXF is read: the whole file is held while it is read, as a drawing of a building fits in memory.
-fn dxf_read(_s: &mut Session, p: &Value) -> R {
+/// The bytes of the drawing at `path`, a DXF as they are or a DWG turned into one, and what a DWG lost on the way.
+/// A DWG needs what only an application has (`Session::dwg`): a build without it says what the file is and stops.
+fn drawing_bytes(s: &Session, path: &str) -> Result<(Vec<u8>, Vec<String>), String> {
+    let len = std::fs::metadata(path).map(|m| m.len()).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    if len as usize > crate::dxf::MAX_BYTES {
+        return Err(format!("`{path}` holds {len} bytes; a drawing is read up to {}", crate::dxf::MAX_BYTES));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    if !crate::dxf::is_dwg(&bytes) {
+        return Ok((bytes, Vec::new()));
+    }
+    match &s.dwg {
+        Some(convert) => convert(&bytes).map_err(|e| format!("`{path}`: {e}")),
+        None => Err(format!(
+            "`{path}` is a DWG, and this build of BIMCraft was made without DWG support (`--no-default-features`): \
+             build with the default `dwg` feature, or convert the file to DXF first"
+        )),
+    }
+}
+
+fn dxf_read(s: &mut Session, p: &Value) -> R {
     let c = "dxf";
     let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
     let scale = match p.get("scale") {
@@ -1883,11 +1900,7 @@ fn dxf_read(_s: &mut Session, p: &Value) -> R {
         Some(v) => Some(v.as_f64().ok_or_else(|| bad(c, format!("`scale` is millimetres to one of the file's units, not {v}")))?),
         None => None,
     };
-    let len = std::fs::metadata(&path).map(|m| m.len()).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
-    if len as usize > crate::dxf::MAX_BYTES {
-        return Err(bad(c, format!("`{path}` holds {len} bytes; a DXF is read up to {}", crate::dxf::MAX_BYTES)));
-    }
-    let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("cannot read `{path}`: {e}")))?;
+    let (bytes, converted) = drawing_bytes(s, &path).map_err(|e| bad(c, e))?;
     let drawing = crate::dxf::read(&bytes, &crate::dxf::Options { scale }).map_err(|e| bad(c, format!("`{path}`: {e}")))?;
     let layers: Vec<Value> = drawing.layers.iter().map(|l| json!({"name": l.name, "shapes": l.shapes.len()})).collect();
     let extent = drawing.extent.map(|[lo, hi]| json!([[hundredth(lo.0), hundredth(lo.1)], [hundredth(hi.0), hundredth(hi.1)]]));
@@ -1897,6 +1910,7 @@ fn dxf_read(_s: &mut Session, p: &Value) -> R {
         "layers": layers,
         "extent": extent,
         "left_out": drawing.left_out,
+        "converted": converted,
     }))
 }
 

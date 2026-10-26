@@ -6,11 +6,23 @@ drawing. `crates/core/src/dxf.rs` reads it: `dxf::read(bytes, &Options)` gives a
 many shapes are on each, the box it lies in, the unit it was read in and what was left out — which is what to run on a
 file before deciding what to do with it.
 
-**Why DXF and not DWG.** DXF is the format Autodesk publishes a specification for, so it is read here under the rule
-that formats come from public specifications. DWG is Autodesk's own and has none: a DWG is refused by name, saying to
-convert it (that conversion, and whether it ever happens inside BIMCraft, is a decision of its own — the Revit reader's
-fence in [docs/rvt-provenance.md](../rvt-provenance.md) is what such a thing would have to live under). LibreDWG, the
-open reader, is GPL-3 and cannot be linked into this project.
+**Why DXF is read here and DWG is not.** DXF is the format Autodesk publishes a specification for, so it is read under
+the rule that formats come from public specifications. DWG is Autodesk's own and has none, so BIMCraft does not read one
+itself: `crates/dwg` turns a DWG into DXF bytes and this reader reads those. That crate holds the one dependency that
+can do it, `acadrust` (MPL-2.0, used unmodified: it covers its own files, so BIMCraft's stay MIT OR Apache-2.0 —
+`NOTICE`), and nothing of its types leaves that crate, so what reads a drawing is still one reader. LibreDWG, the other
+open reader, is GPL-3 and could not be used this way.
+
+The dependency decodes what a file claims, and a file may be damaged or hostile, so it is guarded from the outside: a
+DWG past `Limits::dwg` is refused before the decoder is handed anything, the DXF it writes is cut off at `Limits::dxf`
+while it is written, and the whole of it runs inside `catch_unwind`. What that does not bound, and the crate says so, is
+a small file that declares a huge table inside itself: capping that needs the decode to run where an operating system
+can limit its memory.
+
+The applications hand the converter to the session (`Session::dwg`), as the desktop hands it the Revit reader: the core
+never depends on `bimcraft-dwg`, and a build made `--no-default-features` refuses a DWG by name instead of converting
+it. So `dxf` and `underlay` take a `.dwg` wherever they take a `.dxf`, and `converted` is what the DWG reader said it
+could not read.
 
 **What it reads.** `LINE`, `LWPOLYLINE`, `POLYLINE` with the `VERTEX` entities that follow it to its `SEQEND`, `ARC` and
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).

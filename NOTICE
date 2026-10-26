@@ -50,3 +50,24 @@ Third-party dependencies
   memchr   Unlicense OR MIT   byte search
 
 See each dependency's own licence for its terms.
+
+==============================================================================
+BIMCraft's DWG bridge (bimcraft-dwg)
+==============================================================================
+
+DWG is Autodesk's own format and has no published specification, so BIMCraft
+does not read one itself: crates/dwg turns a DWG into DXF bytes, which
+BIMCraft's own DXF reader then reads. The turning is done by
+
+    acadrust, https://github.com/hakanaktt/acadrust
+    Mozilla Public License 2.0
+
+used as an unmodified dependency. The MPL covers its own files, not the work
+that depends on them, so BIMCraft's own files stay MIT OR Apache-2.0; anyone
+who modifies acadrust's files must publish those files under the MPL. The
+source of the version used is on crates.io and in the repository above.
+
+A build without DWG support is `--no-default-features` (the `dwg` feature of
+the two applications), and then a DWG is refused by name, saying so.
+
+  acadrust  MPL-2.0  turns a DWG into DXF

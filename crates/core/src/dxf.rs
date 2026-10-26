@@ -132,6 +132,13 @@ impl Entity {
     }
 }
 
+/// Whether `bytes` are a DWG: `AC10` and two digits, the version code Autodesk writes first. A DWG is not read here —
+/// it has no published specification — but it is told apart, so that what can convert one is asked, and what cannot
+/// says what the file is.
+pub fn is_dwg(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"AC10") && bytes.get(4..6).is_some_and(|v| v.iter().all(u8::is_ascii_digit))
+}
+
 /// The drawing `bytes` holds, or why it is not one.
 pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
     if let Some(scale) = o.scale

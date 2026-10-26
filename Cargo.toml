@@ -25,6 +25,8 @@ bimcraft-ui-egui = { path = "crates/ui-egui" }
 bimcraft-update = { path = "crates/update" }
 # The Revit reader: Apache-2.0 only, so the command line and the desktop take it through an optional feature.
 bimcraft-rvt = { path = "crates/rvt" }
+# The DWG bridge: it holds the MPL-2.0 dependency, so the core and the library never carry it.
+bimcraft-dwg = { path = "crates/dwg" }
 egui = "0.36"
 eframe = "0.36"
 egui_kittest = "0.36"
