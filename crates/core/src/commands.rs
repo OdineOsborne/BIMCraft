@@ -127,6 +127,20 @@ pub static ALL: &[Command] = &[
         price_list,
     ),
     edit(
+        "underlay",
+        "Link CAD",
+        &[],
+        "{path, name?, level?, at?: [x, y], angle?: degrees, scale?, hidden?: [layer, …]} a CAD drawing (.dxf) shown \
+         under a level's plan, as Revit's Link CAD: a survey or a consultant's drawing to trace over and snap to, which \
+         nothing of the project is and no command can edit. It stands with the drawing's own origin at `at` (default \
+         [0, 0]) turned `angle` about it, on `level` (the lowest unless given), and draws every layer but those `hidden` \
+         names. `scale` is millimetres to one of the file's units; without it the file's own `$INSUNITS` says, else \
+         millimetres. The file is read now and again by `reload`, and the path is kept as given: a relative one is \
+         relative to this project's file, so the project carries the path and never the drawing. `name` defaults to the \
+         file's. Returns `id`, `name`, `shapes`, `layers`, `left_out`, `scale`",
+        underlay_cad,
+    ),
+    edit(
         "link",
         "Link Model",
         &["LK"],
@@ -1505,6 +1519,13 @@ pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Inde
             extra.insert("loaded".into(), json!(m.loaded.contains_key(&l.path)));
             extra.insert("elements".into(), json!(m.loaded.get(&l.path).map(|o| o.elements.len())));
         }
+        Element::Underlay(u) => {
+            let drawing = m.drawings.get(&u.path);
+            extra.insert("loaded".into(), json!(drawing.is_some()));
+            extra.insert("shapes".into(), json!(drawing.map(|d| d.shapes())));
+            extra.insert("layers".into(), json!(drawing.map(|d| d.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>())));
+            extra.insert("level".into(), json!(u.level));
+        }
         Element::Level(_) | Element::Grid(_) | Element::Schedule(_) | Element::View3D(_) | Element::PlanView(_) => {}
     }
     let mut v = serde_json::to_value(e).unwrap_or_default();
@@ -1563,6 +1584,10 @@ fn with_links(s: &mut Session, mut reply: Value) -> Value {
     let failed = relink(s);
     if !failed.is_empty() {
         reply["links_not_loaded"] = json!(failed);
+    }
+    let failed = redraw(s);
+    if !failed.is_empty() {
+        reply["drawings_not_loaded"] = json!(failed);
     }
     reply
 }
@@ -1741,6 +1766,81 @@ fn relink(s: &mut Session) -> Vec<Value> {
             }
             Err(error) => {
                 Arc::make_mut(&mut s.model).loaded.remove(&path);
+                failed.push(json!({"name": name, "error": error}));
+            }
+        }
+    }
+    failed
+}
+
+/// The drawing at `path`, read as a link's project is: a relative path is relative to this project's file.
+fn read_drawing(s: &Session, path: &str, scale: Option<f64>) -> Result<Arc<crate::dxf::Drawing>, String> {
+    let at = PathBuf::from(path);
+    let full = match (&s.path, at.is_relative()) {
+        (Some(project), true) => project.parent().map_or(at.clone(), |dir| dir.join(&at)),
+        _ => at,
+    };
+    let len = std::fs::metadata(&full).map(|m| m.len()).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    if len as usize > crate::dxf::MAX_BYTES {
+        return Err(format!("`{path}` holds {len} bytes; a DXF is read up to {}", crate::dxf::MAX_BYTES));
+    }
+    let bytes = std::fs::read(&full).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    crate::dxf::read(&bytes, &crate::dxf::Options { scale }).map(Arc::new).map_err(|e| format!("`{path}`: {e}"))
+}
+
+fn underlay_cad(s: &mut Session, p: &Value) -> R {
+    let c = "underlay";
+    let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
+    let scale = num(c, p, "scale")?;
+    let drawing = read_drawing(s, &path, scale).map_err(|e| bad(c, e))?;
+    let level = level_param(c, &s.model, p, "level")?;
+    let name = match string(c, p, "name")? {
+        Some(n) => n,
+        None => Path::new(&path).file_stem().map_or_else(|| "Drawing".into(), |f| f.to_string_lossy().into_owned()),
+    };
+    let at = point_opt(c, p, "at")?.unwrap_or(P2(0.0, 0.0));
+    let angle = num(c, p, "angle")?.unwrap_or(0.0);
+    let hidden: Vec<String> = match p.get("hidden") {
+        v if absent(v) => Vec::new(),
+        Some(Value::Array(a)) if a.len() <= MAX_POINTS => a
+            .iter()
+            .map(|v| v.as_str().map(str::to_string).ok_or_else(|| bad(c, format!("`hidden` is a list of layer names, not {v}"))))
+            .collect::<Result<_, _>>()?,
+        Some(v) => return Err(bad(c, format!("`hidden` is a list of layer names, not {v}"))),
+        None => Vec::new(),
+    };
+    let (shapes, layers, left_out, read_with) = (
+        drawing.shapes(),
+        drawing.layers.iter().map(|l| json!({"name": l.name, "shapes": l.shapes.len()})).collect::<Vec<_>>(),
+        drawing.left_out.clone(),
+        drawing.scale,
+    );
+    let m = s.model_mut();
+    let u = crate::model::Underlay { name: name.clone(), path: path.clone(), level, at, angle, scale: read_with, hidden };
+    let id = m.insert(Element::Underlay(u));
+    m.drawings.insert(path, drawing);
+    Ok(json!({"id": id, "name": name, "shapes": shapes, "layers": layers, "left_out": left_out, "scale": read_with}))
+}
+
+/// What every underlay of the project reads, again; the ones that couldn't be read, as `{name, error}`.
+fn redraw(s: &mut Session) -> Vec<Value> {
+    let want: Vec<(String, String, f64)> = s
+        .model
+        .elements
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Element::Underlay(u) => Some((u.name.clone(), u.path.clone(), u.scale)),
+            _ => None,
+        })
+        .collect();
+    let mut failed = Vec::new();
+    for (name, path, scale) in want {
+        match read_drawing(s, &path, Some(scale)) {
+            Ok(d) => {
+                Arc::make_mut(&mut s.model).drawings.insert(path, d);
+            }
+            Err(error) => {
+                Arc::make_mut(&mut s.model).drawings.remove(&path);
                 failed.push(json!({"name": name, "error": error}));
             }
         }
@@ -5732,6 +5832,7 @@ pub(crate) fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeS
         Element::Spot(sp) => sp.at = f(sp.at),
         // A link is moved and turned as a whole; its file stays as it is.
         Element::Link(l) => (l.at, l.angle) = turned(f, l.at, l.angle),
+        Element::Underlay(u) => (u.at, u.angle) = turned(f, u.at, u.angle),
         Element::Viewport(v) => v.at = f(v.at),
         Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
         // A run keeps its heights at its ends; its section is the same either way round.

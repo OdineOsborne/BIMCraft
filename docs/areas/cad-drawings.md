@@ -33,6 +33,20 @@ one — with its `TABLES`, `BLOCKS` and `OBJECTS` sections — is another thing,
 written with `ezdxf` (a flat with double-line walls, closed room outlines, an old-style `POLYLINE`, text, a block
 insert, a dimension, a hatch and a spline): the walls and the outlines came in, and the rest was counted and named.
 
-**What this is for.** It is the first step of the 2D the model is traced over: nothing in the project holds these shapes
-yet. What they become — an underlay drawn under a plan and snapped to, and then walls, openings and rooms found in them
-— is the work that follows.
+## The underlay: a drawing under a plan
+
+Manage > Link CAD (LC) puts a drawing under the plan on screen, as Revit's Link CAD does: `Element::Underlay`, with the
+path, the level whose plan draws it, where its own origin stands, how far it is turned and which of its layers it leaves
+out. It is the project's reference and none of its substance — no tool edits it, nothing of it is scheduled, checked or
+exported, and a drawing of any size costs the project's file nothing, because **the file holds the path alone**
+(`Model::drawings`, keyed by path, is `serde(skip)`, as `Model::loaded` is for linked models). Opening a project reads
+its drawings again, and one that cannot be read is named in `drawings_not_loaded`, as a link that cannot be read is.
+
+What a plan draws, and what the view fits itself to, is `underlay::lines`: the shapes where the underlay stands, turned
+by its angle, in millimetres, an arc as the line through the points along it (5° apart). They are drawn first of all, in
+a hairline and faint, so what is modelled stands out from what is only drawn over. A level's plan draws the underlays on
+that level and no others.
+
+**What is still missing**: snapping to it — the point of an underlay is to trace over it, and a picked point does not
+yet stick to its ends, its middles or its crossings — and finding walls, openings and rooms in it, which is the wizard
+this was the first step of.

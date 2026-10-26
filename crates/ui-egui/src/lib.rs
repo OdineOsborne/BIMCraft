@@ -256,7 +256,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 43] = [
+const SHORTCUTS: [(&str, &str); 44] = [
     ("MD", "Modify"),
     ("SB", "Floor: Structural"),
     ("MM", "Mirror Pick Axis"),
@@ -299,6 +299,7 @@ const SHORTCUTS: [(&str, &str); 43] = [
     ("WF", "Wireframe"),
     ("HL", "Hidden Line"),
     ("SD", "Shaded"),
+    ("LC", "Link CAD"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -473,6 +474,8 @@ pub struct BimApp {
     seen: Option<(Arc<Model>, Arc<Model>)>,
     /// Link Model was asked for: its file dialog opens on the next frame, so a shortcut typed alone never waits on one.
     link_dialog: bool,
+    /// Link CAD was asked for: its file dialog opens on the next frame, as Link Model's does.
+    cad_dialog: bool,
     /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
     /// door or window two: from its wall's start, from its end), the length so far.
     dim_edit: Option<(Id, usize, String)>,
@@ -846,6 +849,7 @@ impl BimApp {
             shadow: None,
             seen: None,
             link_dialog: false,
+            cad_dialog: false,
             tab_cycle: false,
             held: Vec::new(),
             show_shortcuts: false,
@@ -1404,6 +1408,10 @@ impl BimApp {
             }
             "LK" => {
                 self.link_dialog = true;
+                return true;
+            }
+            "LC" => {
+                self.cad_dialog = true;
                 return true;
             }
             "DP" => {
@@ -2840,10 +2848,16 @@ impl BimApp {
                 }
             });
         });
+        // Two of a kind, so two small buttons side by side rather than two wide ones: the tab is a ribbon, and what
+        // follows it has to stay in view.
         panel(ui, "Links", |ui| {
             let tip = "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to";
-            if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
+            if small_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
                 self.link_dialog = true;
+            }
+            let tip = "Link CAD (LC): a CAD drawing (.dxf) under the plan on screen, to trace over and snap to: a survey, a consultant's drawing. Nothing of it is the project's and no tool can edit it";
+            if small_button(ui, Icon::Plan, "Link CAD", false, tip).clicked() {
+                self.cad_dialog = true;
             }
         });
         panel(ui, "Family Editor", |ui| {
@@ -3616,6 +3630,9 @@ impl BimApp {
         self.purge_window(ctx);
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);
+        }
+        if std::mem::take(&mut self.cad_dialog) {
+            self.link_cad_dialog(ctx);
         }
         self.select_by_id_window(ctx);
         self.ids_of_selection_window(ctx);

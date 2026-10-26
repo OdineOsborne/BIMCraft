@@ -723,6 +723,8 @@ pub(crate) fn plan_shows(m: &Model, plan: impl Key) -> Vec<P2> {
                 extent.extend(boundary)
             }
             Element::Room(r) if r.level == level => extent.push(r.point),
+            // A drawing under this plan is part of what it shows: a survey linked into an empty project opens on it.
+            Element::Underlay(u) if u.level == level => extent.extend(crate::underlay::extent(m, u).unwrap_or_default()),
             Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(m.mass_outline(ms, r.cut)),
             Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
@@ -1255,6 +1257,19 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
         range.cut = m.elevation(level) + CEILING_CUT;
         range.top = range.top.max(range.cut);
     }
+    // The CAD drawings under this plan, before anything the project builds: a reference to trace over, in a hairline
+    // and faint, so what is modelled stands out from what is only drawn.
+    for (&id, e) in m.elements.iter().filter(|(id, _)| shown(**id)) {
+        let Element::Underlay(u) = e else { continue };
+        if !m.same(u.level, level) {
+            continue;
+        }
+        d.owner = Some(id);
+        for (points, closed) in crate::underlay::lines(m, u) {
+            d.line(&points, Pen::HAIRLINE, FAINT, closed);
+        }
+    }
+    d.owner = None;
     // Floors whose tops it sees, from the cut plane down to the view depth: their outlines and their
     // openings', the holes shafts cut in them, and a sloped one's slope arrow.
     for (&id, e) in m.elements.iter().filter(|_| !up).filter(|(id, _)| shown(**id)) {

@@ -611,6 +611,30 @@ pub struct Link {
     pub angle: f64,
 }
 
+/// A CAD drawing shown under a plan, a reference that can't be edited: Revit's Link CAD. The file stays where it is, as
+/// a linked model's does — this holds where it stands and which of its layers are left out, and `Model::drawings` holds
+/// what was read of it, which a project's own file never carries.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Underlay {
+    pub name: String,
+    /// The `.dxf` it reads, as it was given: a relative one is relative to this project's file.
+    pub path: String,
+    /// The level whose plan draws it.
+    pub level: Guid,
+    /// Where the drawing's own origin stands in this project, and how far it is turned about it, degrees.
+    #[serde(default)]
+    pub at: P2,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub angle: f64,
+    /// Millimetres to one of the file's units, as it was read with: what it is drawn at, and what a reload reads it
+    /// with again.
+    pub scale: f64,
+    /// The layers it does not draw, by the names the file gives them. A drawing's layers are all drawn but these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<String>,
+}
+
 /// A schedule view: the elements of category `of` in rows, as the `schedule` command lists them:
 /// its `fields` (its category's unless it chooses), of the elements its `filters` keep, sorted by
 /// its `sort` fields (by its first unless it says) and, `grouped`, a row for each set of their values.
@@ -1079,6 +1103,7 @@ macro_rules! visit_refs {
         match $e {
             // A view's graphics, as `views_graphics` gives them.
             Element::Level(_) | Element::Section(_) | Element::Elevation(_) | Element::View3D(_) => {}
+            Element::Underlay(u) => f(& $($m)? u.level),
             Element::Grid(_) | Element::Sheet(_) | Element::Schedule(_) | Element::Link(_) => {}
             Element::PlanView(v) => {
                 f(& $($m)? v.level);
@@ -1180,6 +1205,7 @@ pub enum Element {
     View3D(View3D),
     PlanView(PlanView),
     Link(Link),
+    Underlay(Underlay),
 }
 
 impl Element {
@@ -1343,6 +1369,7 @@ impl Element {
             Element::Text(_) => "text",
             Element::Spot(_) => "spot",
             Element::Link(_) => "link",
+            Element::Underlay(_) => "underlay",
             Element::Schedule(_) => "schedule",
             Element::View3D(_) => "view3d",
             Element::PlanView(_) => "planview",
@@ -1736,6 +1763,10 @@ pub struct Model {
     /// not loaded, and draws nothing.
     #[serde(skip)]
     pub loaded: BTreeMap<String, Arc<Model>>,
+    /// What the underlays read, by their `path`: not in a file either, which holds the path alone. An underlay with no
+    /// entry here is not loaded, and draws nothing.
+    #[serde(skip)]
+    pub drawings: BTreeMap<String, Arc<crate::dxf::Drawing>>,
 }
 
 impl Model {
@@ -1779,6 +1810,7 @@ impl Model {
             elements: Elements::new(),
             library: crate::library::Library::default(),
             loaded: BTreeMap::new(),
+            drawings: BTreeMap::new(),
         };
         // A library to start from: each material its colour, its cut's pattern and its surface's, and the texture it has.
         for (name, color, cut, surface, texture) in [
@@ -2265,6 +2297,9 @@ impl Model {
             .map(|p| P2(p[0], p[1]))
             .chain(self.elements.values().flat_map(|e| match e {
                 Element::Grid(g) => vec![g.start, g.end],
+                // A drawing under a plan is part of what the project shows, so a view that fits the model fits it too:
+                // a survey linked into an empty project would otherwise open on nothing.
+                Element::Underlay(u) => crate::underlay::extent(self, u).map(Vec::from).unwrap_or_default(),
                 _ => Vec::new(),
             }))
             .collect::<Vec<_>>();
@@ -2647,6 +2682,7 @@ impl Model {
         let wall_level = |o: &Opening| self.wall(o.host).map(|w| w.level);
         match e {
             Element::Wall(w) => Some(w.level),
+            Element::Underlay(u) => Some(u.level),
             Element::Floor(f) => Some(f.level),
             Element::Ceiling(c) => Some(c.level),
             Element::Shaft(sh) => Some(sh.level),
@@ -3875,6 +3911,23 @@ impl Model {
                     }
                     if !view_names.insert(v.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", v.name));
+                    }
+                }
+                Element::Underlay(u) => {
+                    text(&who, "name", &u.name)?;
+                    if u.name.trim().is_empty() || u.path.trim().is_empty() || u.path.chars().count() > MAX_TEXT {
+                        return Err(format!("{who}: an underlay needs a name and the path of a file, up to {MAX_TEXT} characters"));
+                    }
+                    level_ok(u.level)?;
+                    point(&format!("{who} at"), u.at)?;
+                    if !(u.angle.is_finite() && u.angle.abs() <= 360.0) {
+                        return Err(format!("{who}: its angle {}° isn't between -360° and 360°", u.angle));
+                    }
+                    if !(u.scale.is_finite() && u.scale > 0.0) {
+                        return Err(format!("{who}: a unit of {} mm isn't one", u.scale));
+                    }
+                    for layer in &u.hidden {
+                        text(&format!("{who} hidden layer"), "name", layer)?;
                     }
                 }
                 Element::Link(l) => {
