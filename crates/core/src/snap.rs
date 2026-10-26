@@ -16,6 +16,9 @@ const TOLERANCE: f64 = 4.0;
 const STEP: f64 = 10.0;
 /// The most lines near the cursor that are tried against each other.
 const MAX_NEAR: usize = 64;
+/// The most pieces of a CAD drawing taken near the cursor. A survey holds tens of thousands, and this runs at every
+/// move of the mouse: what is gathered is bounded, and the nearest of them is what a point snaps to anyway.
+const MAX_UNDERLAY: usize = 1024;
 /// How far past its centre line a wall's face may lie and still be taken for the cursor's, mm: a
 /// thicker wall isn't snapped to from farther than the reach plus this.
 const MAX_HALF_THICKNESS: f64 = 2500.0;
@@ -186,6 +189,9 @@ impl Scene {
                     s.points.extend([(g.start, Kind::Endpoint), (g.end, Kind::Endpoint)]);
                     s.lines.push((g.start, g.end));
                 }
+                // A CAD drawing under this plan: its ends, the middle of each piece of it, a circle's centre, and its
+                // segments, which is what crossings are found among. It is drawn, not built, so it snaps like a grid.
+                Element::Underlay(u) if u.level == level => underlay(&mut s, m, u, &near),
                 Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) if c.level == level && near(&[c.at]) => {
                     s.points.push((c.at, Kind::Centre))
                 }
@@ -280,6 +286,65 @@ fn corner_on(from: &[P2], d: P2) -> Option<f64> {
     let [.., prev, last] = from else { return None };
     // A step long enough to count as a line, whatever length `d` is.
     corner(*prev, *last, *last + d.unit() * (2.0 * TOL))
+}
+
+/// What a CAD drawing gives the snaps near the cursor. The drawing's own points are turned where the underlay stands
+/// only for the pieces whose box reaches the cursor's window, so a survey of tens of thousands of lines costs a few
+/// operations each and nothing is built for what lies elsewhere.
+fn underlay(s: &mut Scene, m: &Model, u: &crate::model::Underlay, near: &dyn Fn(&[P2]) -> bool) {
+    let Some(drawing) = m.drawings.get(&u.path) else { return };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |q: P2| P2(u.at.0 + q.0 * cos - q.1 * sin, u.at.1 + q.0 * sin + q.1 * cos);
+    // The box of `pts` where the underlay stands: its four corners turned, which holds whatever is inside them.
+    let reaches = |pts: &[P2]| {
+        let (lo, hi) = pts.iter().fold((P2(f64::INFINITY, f64::INFINITY), P2(f64::NEG_INFINITY, f64::NEG_INFINITY)), |(lo, hi), q| {
+            (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1)))
+        });
+        near(&[place(lo), place(P2(hi.0, lo.1)), place(hi), place(P2(lo.0, hi.1))])
+    };
+    let mut taken = 0usize;
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            if taken >= MAX_UNDERLAY {
+                return;
+            }
+            match shape {
+                crate::dxf::Shape::Arc { at, radius, .. } => {
+                    if reaches(&[*at - P2(*radius, *radius), *at + P2(*radius, *radius)]) {
+                        s.points.push((place(*at), Kind::Centre));
+                        taken += 1;
+                    }
+                }
+                crate::dxf::Shape::Line(line) => {
+                    if reaches(line) {
+                        let (a, b) = (place(line[0]), place(line[1]));
+                        s.points.extend([(a, Kind::Endpoint), (b, Kind::Endpoint), ((a + b) * 0.5, Kind::Midpoint)]);
+                        s.lines.push((a, b));
+                        taken += 1;
+                    }
+                }
+                crate::dxf::Shape::Path { points, closed } => {
+                    if !reaches(points) {
+                        continue;
+                    }
+                    // A polyline of thousands of points gives only the pieces that reach the cursor, not all of them.
+                    let ends = points.iter().chain(points.first().filter(|_| *closed));
+                    for piece in ends.copied().collect::<Vec<_>>().windows(2) {
+                        if taken >= MAX_UNDERLAY {
+                            return;
+                        }
+                        if !reaches(piece) {
+                            continue;
+                        }
+                        let (a, b) = (place(piece[0]), place(piece[1]));
+                        s.points.extend([(a, Kind::Endpoint), (b, Kind::Endpoint), ((a + b) * 0.5, Kind::Midpoint)]);
+                        s.lines.push((a, b));
+                        taken += 1;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// How points rank where two lie as near: an end before a crossing before a middle before a centre.

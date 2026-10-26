@@ -101,3 +101,100 @@ fn a_view_that_fits_the_model_fits_the_drawing_under_it() {
     let with = s.model.model_extent();
     assert!(with[1].0 > empty[1].0 + 10000.0, "a survey off to one side is still in view: {empty:?} -> {with:?}");
 }
+
+/// Where a point picked at `at` lands on the lowest level's plan, with every snap on.
+fn snapped(s: &Session, at: P2) -> crate::snap::Found {
+    let level = s.model.levels().first().map(|(id, _)| *id).expect("a level");
+    let reach = crate::snap::Reach { point: 300.0, line: 300.0 };
+    crate::snap::snap(&s.model, level, at, reach, &[], false, &crate::snap::Snaps::default())
+}
+
+/// A project with the drawing of `drawing` under its plan, where it was read.
+fn with_drawing() -> Session {
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": drawing("rilievo.dxf")})).expect("it comes in");
+    s
+}
+
+#[test]
+fn a_point_snaps_to_the_ends_of_the_drawing_and_to_the_middle_of_a_piece() {
+    let s = with_drawing();
+    // The drawing is two lines, (0,0)-(5000,0) and (5000,0)-(5000,4000), and a circle at (1000,1000).
+    let found = snapped(&s, P2(4900.0, 60.0));
+    assert_eq!((found.at, found.kind), (P2(5000.0, 0.0), crate::snap::Kind::Endpoint), "the corner they share");
+    let found = snapped(&s, P2(2500.0, 90.0));
+    assert_eq!((found.at, found.kind), (P2(2500.0, 0.0), crate::snap::Kind::Midpoint), "the middle of the long one");
+    let found = snapped(&s, P2(1050.0, 1050.0));
+    assert_eq!((found.at, found.kind), (P2(1000.0, 1000.0), crate::snap::Kind::Centre), "the circle's centre");
+}
+
+#[test]
+fn a_point_snaps_to_where_two_of_its_lines_cross() {
+    let path = drawing("incrocio.dxf");
+    // Two lines that cross at (1000, 1000) without ending there.
+    std::fs::write(
+        &path,
+        "0\nSECTION\n2\nENTITIES\n         0\nLINE\n8\nMURI\n10\n0\n20\n1000\n11\n3000\n21\n1000\n         0\nLINE\n8\nMURI\n10\n1000\n20\n0\n11\n1000\n21\n3000\n         0\nENDSEC\n0\nEOF\n",
+    )
+    .unwrap();
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let found = snapped(&s, P2(1080.0, 1080.0));
+    assert_eq!((found.at, found.kind), (P2(1000.0, 1000.0), crate::snap::Kind::Intersection));
+}
+
+#[test]
+fn nothing_snaps_to_a_layer_left_out_or_to_a_drawing_on_another_level() {
+    let path = drawing("rilievo.dxf");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path.clone(), "hidden": ["ARREDI"]})).expect("it comes in");
+    // The circle's centre is on the layer left out: the pick finds nothing there and rounds to 10 mm.
+    let found = snapped(&s, P2(1050.0, 1050.0));
+    assert_eq!(found.kind, crate::snap::Kind::Free, "{found:?}");
+
+    // The same drawing on the level above is not under this plan.
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path, "level": "Level 2"})).expect("it comes in");
+    assert_eq!(snapped(&s, P2(4900.0, 60.0)).kind, crate::snap::Kind::Free);
+}
+
+#[test]
+fn it_snaps_where_the_drawing_stands_not_where_the_file_drew_it() {
+    let path = drawing("rilievo.dxf");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path, "at": [10000, 0]})).expect("it comes in");
+    assert_eq!(snapped(&s, P2(14980.0, 40.0)).at, P2(15000.0, 0.0), "the corner, moved with the drawing");
+    assert_eq!(snapped(&s, P2(4980.0, 40.0)).kind, crate::snap::Kind::Free, "and nothing where it used to be");
+}
+
+/// What a snap costs on a survey of 50,000 lines, which is a real one: it runs at every move of the mouse, so it is
+/// measured rather than assumed. Ignored, as the other measurements are:
+/// `cargo test -p bimcraft-core underlay_snap_speed --release -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn underlay_snap_speed() {
+    let mut text = String::from("0\nSECTION\n2\nENTITIES\n");
+    for i in 0..50_000 {
+        let (x, y) = ((i % 250) * 400, (i / 250) * 400);
+        text.push_str(&format!("0\nLINE\n8\nMURI\n10\n{x}\n20\n{y}\n11\n{}\n21\n{y}\n", x + 300));
+    }
+    text.push_str("0\nENDSEC\n0\nEOF\n");
+    let path = drawing("grande.dxf");
+    std::fs::write(&path, text).unwrap();
+    let mut s = Session::new();
+    let made = std::time::Instant::now();
+    let out = run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let read = made.elapsed();
+    assert_eq!(out["shapes"], 50_000);
+
+    let started = std::time::Instant::now();
+    let rounds = 200;
+    for i in 0..rounds {
+        let (x, y) = ((i % 250) as f64 * 400.0 + 20.0, (i / 250) as f64 * 400.0 + 20.0);
+        let found = snapped(&s, P2(x, y));
+        assert_eq!(found.kind, crate::snap::Kind::Endpoint);
+    }
+    let each = started.elapsed() / rounds;
+    eprintln!("50.000 lines: read in {read:?}, {each:?} a snap");
+    assert!(each < std::time::Duration::from_millis(16), "a snap takes {each:?}, which a moving cursor would feel");
+}

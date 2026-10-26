@@ -47,6 +47,14 @@ by its angle, in millimetres, an arc as the line through the points along it (5�
 a hairline and faint, so what is modelled stands out from what is only drawn over. A level's plan draws the underlays on
 that level and no others.
 
-**What is still missing**: snapping to it — the point of an underlay is to trace over it, and a picked point does not
-yet stick to its ends, its middles or its crossings — and finding walls, openings and rooms in it, which is the wizard
-this was the first step of.
+**Snapping to it** is the point of having it: a picked point sticks to the drawing's ends, to the middle of each piece
+of it, to a circle's centre and to where two of its lines cross, as it does to the project's own walls and grids
+(`snap::underlay`). The snaps in force decide, as ever — an underlay is one more thing in the plan, not a mode.
+
+That runs at every move of the mouse, and a survey holds tens of thousands of lines, so what is gathered is bounded
+twice over: a piece is turned where the underlay stands only when the box round it, turned, reaches the cursor's window,
+and at most `MAX_UNDERLAY` pieces are taken. Measured on 50,000 lines (`underlay_snap_speed`, ignored like the other
+measurements): the file reads in about 45 ms and a snap takes about 0.2 ms, against a frame's 16.
+
+**What is still missing**: finding walls, openings and rooms in a drawing, which is the wizard this was the first step
+of; a drawing is traced over by hand until then.
