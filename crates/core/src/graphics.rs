@@ -657,6 +657,10 @@ pub struct Look {
     hidden: BTreeSet<Id>,
     paint: BTreeMap<Id, Override>,
     style: VisualStyle,
+    /// Where the phase it shows stands in the project's order, and how its phase filter shows each status: an element
+    /// is drawn by them already (`hidden`, `paint`), and a CAD drawing's layers are drawn by them where they are drawn.
+    pub at: usize,
+    pub filter: Option<crate::phasing::PhaseFilter>,
 }
 
 /// `c` halfway to the paper.
@@ -682,15 +686,17 @@ impl Look {
     /// (a room's area) makes redraws slow.
     pub fn with(m: &Model, own: &Graphics) -> Look {
         let g = own.resolved(m);
-        let mut look = Look { style: g.style, ..Look::default() };
+        // The phase it shows, and how its filter shows each status: what an element is drawn by, and a CAD drawing's
+        // layers with it (`underlay::status`), which are no elements and so are not in `hidden`.
+        let at = g.phase.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(m.phases.len().saturating_sub(1));
+        let mut look =
+            Look { style: g.style, at, filter: g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n)).cloned(), ..Look::default() };
         // Nothing to look for: no graphics of its own, and nothing in the project phased or in an option.
         let linked = m.elements.keys().next_back().is_some_and(|id| crate::link::is_linked(*id));
         if own.draws_as_is() && !linked && !crate::phasing::any(m) && !m.elements.values().any(|e| matches!(e, Element::Mass(_))) {
             return look;
         }
-        // The phase it shows, as where it stands in the project's order, and how its phase filter shows each status.
-        let at = g.phase.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(m.phases.len().saturating_sub(1));
-        let filter = g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n));
+        let filter = look.filter.as_ref();
         // Each applied filter, and the elements it picks out.
         let applied: Vec<(&Applied, BTreeSet<Id>)> =
             g.filters.iter().filter_map(|a| Some((a, m.view_filters.get(&a.filter)?.matching(m)))).collect();

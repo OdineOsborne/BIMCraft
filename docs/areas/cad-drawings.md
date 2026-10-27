@@ -68,5 +68,25 @@ twice over: a piece is turned where the underlay stands only when the box round 
 and at most `MAX_UNDERLAY` pieces are taken. Measured on 50,000 lines (`underlay_snap_speed`, ignored like the other
 measurements): the file reads in about 45 ms and a snap takes about 0.2 ms, against a frame's 16.
 
+## The phases a survey already carries
+
+A survey is drawn in layers that say what each line is of the project's history — `Stato di fatto`, `Demolizioni`,
+`Progetto` — and in Italy also in the colours a drawing is read with, yellow for what comes down and red for what goes
+up, with the layers often named after them. That is the phase information, written by hand by whoever drew it, and it
+is read rather than guessed at: `underlay::says` gives a layer's status from its own name, `read_phases` turns that into
+the pair an element holds (the phase a thing is built in, the one it is taken down in), and the `underlay` command fills
+it in unless the caller says otherwise — what it read comes back in `phases`, to be corrected.
+
+A long word is looked for inside a name, because `demolizioni` and `da demolire` are one word to a reader. A short one
+has to be a whole word in it: `red` lies inside `arredi` and `new` inside `newel`, and a layer of furniture is not a
+layer of new work — a test holds that line. A layer no word of this names says nothing, and stands in every phase, as
+the drawing does.
+
+A plan then draws a layer as it draws an element of that status: `underlay::status` answers by the same rule
+`phasing::status` answers for an element, the view's own phase and phase filter decide (`Look::at`, `Look::filter`),
+what is not there in this phase is not drawn, and what the filter overrides is drawn as the project's override for that
+status says — dashed and red for what comes down, by default. So a plan set to the first phase shows the building as it
+stands, and one set to the last shows it as it will be, out of a single drawing.
+
 **What is still missing**: finding walls, openings and rooms in a drawing, which is the wizard this was the first step
 of; a drawing is traced over by hand until then.

@@ -19,18 +19,25 @@ const ARC_POINTS: usize = 721;
 /// The lines the underlay draws, in this project's millimetres: each a run of points and whether it closes. An underlay
 /// whose drawing is not loaded draws nothing, as a link that is not loaded shows nothing.
 pub fn lines(m: &Model, u: &Underlay) -> Vec<(Vec<P2>, bool)> {
+    lines_by_layer(m, u).into_iter().map(|(_, points, closed)| (points, closed)).collect()
+}
+
+/// The same, each line with the layer it is drawn on: what a view needs to draw a layer as its phase says.
+pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
     let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
     let (sin, cos) = u.angle.to_radians().sin_cos();
     // The drawing was read in its own units; `scale` is what it was read with, so its points are millimetres already.
     let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
-    let mut out = Vec::new();
+    let mut out: Vec<(String, Vec<P2>, bool)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
             match shape {
-                crate::dxf::Shape::Line(line) => out.push((line.iter().map(|p| place(*p)).collect(), false)),
-                crate::dxf::Shape::Path { points, closed } => out.push((points.iter().map(|p| place(*p)).collect(), *closed)),
+                crate::dxf::Shape::Line(line) => out.push((layer.name.clone(), line.iter().map(|p| place(*p)).collect(), false)),
+                crate::dxf::Shape::Path { points, closed } => {
+                    out.push((layer.name.clone(), points.iter().map(|p| place(*p)).collect(), *closed))
+                }
                 crate::dxf::Shape::Arc { at, radius, from, to } => {
-                    out.push((along(*at, *radius, *from, *to).into_iter().map(place).collect(), false));
+                    out.push((layer.name.clone(), along(*at, *radius, *from, *to).into_iter().map(place).collect(), false));
                 }
             }
         }
@@ -52,6 +59,74 @@ fn along(at: P2, radius: f64, from: f64, to: f64) -> Vec<P2> {
             P2(at.0 + radius * a.cos(), at.1 + radius * a.sin())
         })
         .collect()
+}
+
+/// What a layer's own name says it is of the project's history. A survey says it in words (`Stato di fatto`,
+/// `Demolizioni`, `Progetto`) and, in Italy, in colours — a drawing is read with yellow for what comes down and red for
+/// what goes up, and the layers are often named after them. A name that says nothing is `None`, and a layer that says
+/// nothing stands in every phase, as the drawing does.
+///
+/// A long word is looked for inside a name, because `demolizioni` and `da demolire` are the same word to a reader; a
+/// short one has to be the whole of a word in it, because `red` lies inside `arredi` and `new` inside `newel`, and a
+/// layer of furniture is not a layer of new work.
+pub fn says(layer: &str) -> Option<crate::phasing::Status> {
+    let name = layer.trim().to_lowercase();
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let said = |word: &str| match word.chars().count() >= 6 {
+        true => name.contains(word),
+        false => words.contains(&word),
+    };
+    // `Demolished` is looked for first: `stato di fatto da demolire` is a demolition, and so is `existing to be
+    // demolished`.
+    const WORDS: [(crate::phasing::Status, &[&str]); 3] = [
+        (crate::phasing::Status::Demolished, &["demoli", "rimozion", "giallo", "yellow", "demolish", "demolition", "remove", "strip"]),
+        (crate::phasing::Status::New, &["progetto", "nuovo", "nuove", "costruire", "rosso", "red", "new", "proposed", "proposal"]),
+        (crate::phasing::Status::Existing, &["stato di fatto", "esistente", "rilievo", "existing", "survey", "built"]),
+    ];
+    WORDS.iter().find(|(_, words)| words.iter().any(|w| said(w))).map(|(status, _)| *status)
+}
+
+/// The phases a status stands for in `m`: what a layer of it is built in, and what it is taken down in. The project's
+/// first phase is what is there already and its last is what is being built, which is what a survey's two layers mean.
+pub fn phases_of(m: &Model, status: crate::phasing::Status) -> (Option<String>, Option<String>) {
+    let first = m.phases.first().cloned();
+    let last = m.phases.last().cloned();
+    match status {
+        crate::phasing::Status::Existing => (first, None),
+        crate::phasing::Status::Demolished => (first, last),
+        crate::phasing::Status::New => (last, None),
+        crate::phasing::Status::Temporary => (last.clone(), last),
+    }
+}
+
+/// What every layer of the drawing `u` reads is, where its name says: the phases to give it, ready for the user to
+/// change. A drawing that is not loaded says nothing.
+pub fn read_phases(m: &Model, u: &Underlay) -> Vec<crate::model::LayerPhase> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    drawing
+        .layers
+        .iter()
+        .filter_map(|l| {
+            let (created, demolished) = phases_of(m, says(&l.name)?);
+            Some(crate::model::LayerPhase { layer: l.name.clone(), created, demolished })
+        })
+        .collect()
+}
+
+/// What layer `layer` of `u` is in the phase at `at` in the project's order; none when it isn't there: built after it,
+/// or taken down before it. A layer the underlay says nothing about is there in every phase.
+pub fn status(m: &Model, u: &Underlay, layer: &str, at: usize) -> Option<crate::phasing::Status> {
+    let Some(l) = u.phases.iter().find(|l| l.layer == layer) else { return Some(crate::phasing::Status::Existing) };
+    let created = l.created.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(0);
+    let demolished = l.demolished.as_deref().and_then(|n| crate::phasing::index(m, n));
+    if created > at {
+        return None;
+    }
+    match demolished {
+        Some(d) if d < at => None,
+        Some(d) if d == at => Some(if created == at { crate::phasing::Status::Temporary } else { crate::phasing::Status::Demolished }),
+        _ => Some(if created == at { crate::phasing::Status::New } else { crate::phasing::Status::Existing }),
+    }
 }
 
 /// The box an underlay's lines lie in, mm: what a view needs to fit one. None where it draws nothing.

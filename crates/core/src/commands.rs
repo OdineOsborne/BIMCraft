@@ -138,7 +138,11 @@ pub static ALL: &[Command] = &[
          names. `scale` is millimetres to one of the file's units; without it the file's own `$INSUNITS` says, else \
          millimetres. The file is read now and again by `reload`, and the path is kept as given: a relative one is \
          relative to this project's file, so the project carries the path and never the drawing. `name` defaults to the \
-         file's. Returns `id`, `name`, `shapes`, `layers`, `left_out`, `scale`",
+         file's. `phases` [{layer, created?, demolished?}, …] says what each layer is of the project's history, the \
+         phase it is built in and the one it is taken down in, as an element holds them; without it, the layers' own \
+         names are read for it (`Stato di fatto`, `Demolizioni`, `Progetto`, and the colours an Italian drawing uses), \
+         and what was read comes back in `phases` for changing. A layer none of it names stands in every phase. \
+         Returns `id`, `name`, `shapes`, `layers`, `left_out`, `scale`, `phases`",
         underlay_cad,
     ),
     edit(
@@ -1797,6 +1801,16 @@ fn underlay_cad(s: &mut Session, p: &Value) -> R {
     };
     let at = point_opt(c, p, "at")?.unwrap_or(P2(0.0, 0.0));
     let angle = num(c, p, "angle")?.unwrap_or(0.0);
+    let phases: Option<Vec<crate::model::LayerPhase>> = match p.get("phases") {
+        v if absent(v) => None,
+        Some(Value::Array(a)) if a.len() <= MAX_POINTS => Some(
+            a.iter()
+                .map(|v| serde_json::from_value(v.clone()).map_err(|e| bad(c, format!("`phases`: {v}: {e}"))))
+                .collect::<Result<_, _>>()?,
+        ),
+        Some(v) => return Err(bad(c, format!("`phases` is [{{layer, created?, demolished?}}, …], not {v}"))),
+        None => None,
+    };
     let hidden: Vec<String> = match p.get("hidden") {
         v if absent(v) => Vec::new(),
         Some(Value::Array(a)) if a.len() <= MAX_POINTS => a
@@ -1813,10 +1827,15 @@ fn underlay_cad(s: &mut Session, p: &Value) -> R {
         drawing.scale,
     );
     let m = s.model_mut();
-    let u = crate::model::Underlay { name: name.clone(), path: path.clone(), level, at, angle, scale: read_with, hidden };
-    let id = m.insert(Element::Underlay(u));
+    let mut u =
+        crate::model::Underlay { name: name.clone(), path: path.clone(), level, at, angle, scale: read_with, hidden, phases: Vec::new() };
     m.drawings.insert(path, drawing);
-    Ok(json!({"id": id, "name": name, "shapes": shapes, "layers": layers, "left_out": left_out, "scale": read_with}))
+    // What the layers' own names say of the project's history, unless the caller said it: a survey writes it down
+    // (`Stato di fatto`, `Demolizioni`, `Progetto`), and what is read is the caller's to change.
+    u.phases = phases.unwrap_or_else(|| crate::underlay::read_phases(m, &u));
+    let said = json!(u.phases);
+    let id = m.insert(Element::Underlay(u));
+    Ok(json!({"id": id, "name": name, "shapes": shapes, "layers": layers, "left_out": left_out, "scale": read_with, "phases": said}))
 }
 
 /// What every underlay of the project reads, again; the ones that couldn't be read, as `{name, error}`.

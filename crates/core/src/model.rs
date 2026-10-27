@@ -633,6 +633,25 @@ pub struct Underlay {
     /// The layers it does not draw, by the names the file gives them. A drawing's layers are all drawn but these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<String>,
+    /// What each layer is of the project's history: a survey's layers say it themselves (`Stato di fatto`,
+    /// `Demolizioni`, `Progetto`), and a layer with no word for it here stands in every phase, as the drawing does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<LayerPhase>,
+}
+
+/// A layer of a drawing in the project's history: built in one phase, taken down in another. The same pair an element
+/// holds in its `Phase Created` and `Phase Demolished`, and read by the same rule.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerPhase {
+    /// The layer, by the name the file gives it.
+    pub layer: String,
+    /// The phase it is built in; none is the project's first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    /// The phase it is taken down in; none is never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demolished: Option<String>,
 }
 
 /// A schedule view: the elements of category `of` in rows, as the `schedule` command lists them:
@@ -3928,6 +3947,20 @@ impl Model {
                     }
                     for layer in &u.hidden {
                         text(&format!("{who} hidden layer"), "name", layer)?;
+                    }
+                    for l in &u.phases {
+                        let what = format!("{who} layer `{}`", l.layer);
+                        text(&what, "name", &l.layer)?;
+                        if l.layer.trim().is_empty() {
+                            return Err(format!("{who}: a layer of its own phase needs a name"));
+                        }
+                        for (key, phase) in [("created", &l.created), ("demolished", &l.demolished)] {
+                            if let Some(phase) = phase
+                                && !self.phases.iter().any(|p| p == phase)
+                            {
+                                return Err(format!("{what}: there's no phase `{phase}` to be {key} in"));
+                            }
+                        }
                     }
                 }
                 Element::Link(l) => {

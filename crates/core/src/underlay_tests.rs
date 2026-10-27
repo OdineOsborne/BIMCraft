@@ -198,3 +198,93 @@ fn underlay_snap_speed() {
     eprintln!("50.000 lines: read in {read:?}, {each:?} a snap");
     assert!(each < std::time::Duration::from_millis(16), "a snap takes {each:?}, which a moving cursor would feel");
 }
+
+/// A drawing of two layers, one of what is there and one of what is to be built.
+fn phased_drawing(name: &str) -> String {
+    let path = drawing(name);
+    std::fs::write(
+        &path,
+        "0\nSECTION\n2\nENTITIES\n\
+         0\nLINE\n8\nStato di fatto\n10\n0\n20\n0\n11\n5000\n21\n0\n\
+         0\nLINE\n8\nProgetto\n10\n0\n20\n2000\n11\n5000\n21\n2000\n\
+         0\nLINE\n8\nDemolizioni\n10\n0\n20\n4000\n11\n5000\n21\n4000\n\
+         0\nLINE\n8\nQuote\n10\n0\n20\n6000\n11\n5000\n21\n6000\n\
+         0\nENDSEC\n0\nEOF\n",
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_layers_own_name_says_what_it_is_of_the_projects_history() {
+    use crate::phasing::Status;
+    for (name, says) in [
+        ("Stato di fatto", Some(Status::Existing)),
+        ("STATO DI FATTO", Some(Status::Existing)),
+        ("rilievo esistente", Some(Status::Existing)),
+        ("A-EXISTING-WALL", Some(Status::Existing)),
+        ("Demolizioni", Some(Status::Demolished)),
+        ("muri da demolire", Some(Status::Demolished)),
+        // The colours an Italian drawing is read with: yellow comes down, red goes up.
+        ("giallo", Some(Status::Demolished)),
+        ("rosso", Some(Status::New)),
+        ("Progetto", Some(Status::New)),
+        ("nuove opere", Some(Status::New)),
+        // What a demolition layer says first is that it is a demolition, whatever else it names.
+        ("Stato di fatto - da demolire", Some(Status::Demolished)),
+        // And what says nothing is nothing: a layer of dimensions, a layer of furniture, a surveyor's own.
+        ("Quote", None),
+        // `red` lies inside `arredi`, and `new` inside `newel`: a short word has to be a whole word.
+        ("ARREDI", None),
+        ("newel post", None),
+        ("Credito", None),
+        ("Ciano", None),
+        ("LINEEGPS-DA-CODICI", None),
+        ("0", None),
+    ] {
+        assert_eq!(crate::underlay::says(name), says, "{name}");
+    }
+}
+
+#[test]
+fn a_drawing_comes_in_with_the_phases_its_layers_name_and_the_caller_may_say_otherwise() {
+    let path = phased_drawing("fasi.dxf");
+    let mut s = Session::new();
+    let out = run(&mut s, "underlay", json!({"path": path.clone()})).expect("it comes in");
+    assert_eq!(
+        out["phases"],
+        json!([
+            {"layer": "Stato di fatto", "created": "Existing"},
+            {"layer": "Progetto", "created": "New Construction"},
+            {"layer": "Demolizioni", "created": "Existing", "demolished": "New Construction"},
+        ]),
+        "the layer of dimensions says nothing, so nothing is said of it"
+    );
+    // What was read is the caller's to change: a layer named after a colour, meant otherwise.
+    let mut s = Session::new();
+    let said = json!([{"layer": "Quote", "created": "New Construction"}]);
+    let out = run(&mut s, "underlay", json!({"path": path, "phases": said.clone()})).expect("it comes in");
+    assert_eq!(out["phases"], said, "what the caller says stands, and nothing is read");
+}
+
+#[test]
+fn a_plan_draws_a_layer_only_in_the_phases_it_stands_in() {
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": phased_drawing("fasi.dxf")})).expect("it comes in");
+    let lines = |s: &Session| drawn(s);
+    run(&mut s, "graphics", json!({"view": "Level 1", "phase": "New Construction"})).expect("the phase is set");
+    let building = lines(&s);
+    run(&mut s, "graphics", json!({"view": "Level 1", "phase": "Existing"})).expect("the phase is set");
+    let existing = lines(&s);
+    // What is to be built is not there yet, so the plan of what is there draws one line fewer.
+    assert_eq!(existing + 1, building, "existing {existing}, building {building}");
+}
+
+#[test]
+fn a_phase_the_project_hasnt_is_refused_and_nothing_is_left_behind() {
+    let mut s = Session::new();
+    let said = json!([{"layer": "Progetto", "created": "Seconda fase"}]);
+    let err = run(&mut s, "underlay", json!({"path": phased_drawing("fasi.dxf"), "phases": said})).expect_err("refused");
+    assert!(err.contains("Seconda fase"), "{err}");
+    assert!(s.model.elements.values().all(|e| !matches!(e, Element::Underlay(_))));
+}

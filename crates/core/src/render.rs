@@ -1265,8 +1265,25 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
             continue;
         }
         d.owner = Some(id);
-        for (points, closed) in crate::underlay::lines(m, u) {
-            d.line(&points, Pen::HAIRLINE, FAINT, closed);
+        for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
+            // A layer stands in the project's history as an element does, and the view's phase and filter say the same
+            // of it: what is not there in this phase is not drawn, and what the filter overrides is drawn as the
+            // project's override for that status says — dashed and red for what comes down, by default.
+            let Some(status) = crate::underlay::status(m, u, &layer, look.at) else { continue };
+            let shown = look.filter.as_ref().map_or(crate::phasing::Presentation::ByCategory, |f| f.of(status));
+            let (color, dash) = match shown {
+                crate::phasing::Presentation::NotDisplayed => continue,
+                crate::phasing::Presentation::ByCategory => (FAINT, None),
+                crate::phasing::Presentation::Overridden => {
+                    let o = m.phase_overrides.get(&status).cloned().unwrap_or_default();
+                    let color = o.projection.color.map_or(FAINT, |[r, g, b]| Rgb(r, g, b));
+                    (color, o.projection.dash)
+                }
+            };
+            match dash {
+                Some(_) => d.dashed(&points, Pen::HAIRLINE, color, closed),
+                None => d.line(&points, Pen::HAIRLINE, color, closed),
+            }
         }
     }
     d.owner = None;
