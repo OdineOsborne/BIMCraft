@@ -33,6 +33,15 @@ pub(crate) struct Traced {
     pub(crate) thickness: f64,
 }
 
+/// An opening found in one of those walls: where it runs along the wall's axis, how thick the wall is there, and
+/// whether it is a window.
+pub(crate) struct Hole {
+    pub(crate) from: P2,
+    pub(crate) to: P2,
+    pub(crate) thickness: f64,
+    pub(crate) window: bool,
+}
+
 /// The Trace Walls window: which drawing it reads, which tab is open, what it looks for, the wall type every wall
 /// comes in as (none is one by thickness), what the last Find found and what the command said of it, and why a
 /// command was refused — said inside the window, where it is read beside the button that was pressed and not in the
@@ -43,6 +52,7 @@ pub(crate) struct TraceDialog {
     pub(crate) how: How,
     pub(crate) kind: Option<String>,
     pub(crate) found: Vec<Traced>,
+    pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
     pub(crate) error: String,
 }
@@ -56,6 +66,7 @@ impl TraceDialog {
             "thick": self.how.thick,
             "shortest": self.how.shortest,
             "skew": self.how.skew,
+            "openings": self.how.openings,
         });
         if let Some(kind) = &self.kind {
             p["type"] = json!(kind);
@@ -70,6 +81,7 @@ impl TraceDialog {
     /// the drawing would give.
     fn stale(&mut self) {
         self.found.clear();
+        self.holes.clear();
         self.report = None;
     }
 }
@@ -82,13 +94,21 @@ fn underlay_of(m: &Model, id: Id) -> Option<&Underlay> {
     }
 }
 
+/// A point of a `preview`'s answer.
+fn point(v: &Value, key: &str) -> Option<P2> {
+    let p = v[key].as_array()?;
+    Some(P2(p.first()?.as_f64()?, p.get(1)?.as_f64()?))
+}
+
 /// One wall of a `preview`'s `found`.
 fn traced(v: &Value) -> Option<Traced> {
-    let at = |key: &str| {
-        let p = v[key].as_array()?;
-        Some(P2(p.first()?.as_f64()?, p.get(1)?.as_f64()?))
-    };
-    Some(Traced { start: at("start")?, end: at("end")?, thickness: v["thickness"].as_f64()? })
+    Some(Traced { start: point(v, "start")?, end: point(v, "end")?, thickness: v["thickness"].as_f64()? })
+}
+
+/// One opening of a `preview`'s `holes`.
+fn hole(v: &Value) -> Option<Hole> {
+    let thickness = v["thickness"].as_f64()?;
+    Some(Hole { from: point(v, "from")?, to: point(v, "to")?, thickness, window: v["kind"] == json!("window") })
 }
 
 /// A layer's phase, picked from the project's. Named for the screen reader after the column and the layer, because a
@@ -195,6 +215,8 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
         ui.end_row();
     });
     ui.add_space(6.0);
+    changed |= ui.checkbox(&mut d.how.openings, t("Find the openings too")).changed();
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
         let by = t("By thickness").to_string();
         let label = ui.label(t("Wall type"));
@@ -240,12 +262,31 @@ fn found_shown(ui: &mut Ui, report: &Value) {
         );
         ui.label(RichText::new(said).color(pal().muted));
     }
+    let (doors, windows) = (number("doors"), number("windows"));
+    if doors != "0" || windows != "0" {
+        let what = [category("door", doors != "1"), category("window", windows != "1")];
+        ui.label(tf("{} {} and {} {}.", &[&doors, &what[0], &windows, &what[1]]));
+    }
+    if let Some(left) = report["too_high"].as_u64() {
+        let said = tf("{} openings stood higher than the wall they are in and were left out.", &[&left.to_string()]);
+        ui.label(RichText::new(said).color(pal().error));
+    }
     ScrollArea::vertical().max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
         for row in report["thicknesses"].as_array().into_iter().flatten() {
             let thickness = format!("{:.0}", row["thickness"].as_f64().unwrap_or(0.0));
             let walls = row["walls"].as_u64().unwrap_or(0).to_string();
             let kind = row["type"].as_str().unwrap_or_default();
             let line = tf("{} mm: {} \u{d7} {}", &[&thickness, &walls, kind]);
+            match row["made"].as_bool() == Some(true) {
+                true => ui.label(tf("{} (a type made for it)", &[&line])),
+                false => ui.label(line),
+            };
+        }
+        for row in report["openings"].as_array().into_iter().flatten() {
+            let width = format!("{:.0}", row["width"].as_f64().unwrap_or(0.0));
+            let count = row["openings"].as_u64().unwrap_or(0);
+            let kind = category(if row["kind"] == json!("window") { "window" } else { "door" }, count != 1);
+            let line = tf("{} mm {}: {} \u{d7} {}", &[&width, &kind, &count.to_string(), row["type"].as_str().unwrap_or_default()]);
             match row["made"].as_bool() == Some(true) {
                 true => ui.label(tf("{} (a type made for it)", &[&line])),
                 false => ui.label(line),
@@ -292,7 +333,8 @@ impl BimApp {
             return;
         };
         let how = How::default();
-        self.trace_dialog = Some(TraceDialog { underlay, tab: 1, how, kind: None, found: Vec::new(), report: None, error: String::new() });
+        let (found, holes) = (Vec::new(), Vec::new());
+        self.trace_dialog = Some(TraceDialog { underlay, tab: 1, how, kind: None, found, holes, report: None, error: String::new() });
     }
 
     pub(crate) fn trace_window(&mut self, ctx: &Context) {
@@ -348,6 +390,7 @@ impl BimApp {
                 // Find is the one answer worth keeping: the walls to draw over the plan, and what to show of them.
                 Some(reply) if find => {
                     d.found = reply["found"].as_array().into_iter().flatten().filter_map(traced).collect();
+                    d.holes = reply["holes"].as_array().into_iter().flatten().filter_map(hole).collect();
                     d.report = Some(reply);
                 }
                 Some(reply) => {
@@ -388,6 +431,16 @@ impl BimApp {
             let width = ((w.thickness * view.scale) as f32).max(1.0);
             out.push(Shape::line_segment(ends, Stroke::new(width, pal().select_fill.gamma_multiply(0.7))));
             out.push(Shape::line_segment(ends, Stroke::new(1.0, pal().accent)));
+        }
+        // An opening over the wall it is in, lighter than the wall: a door is left open and a window is glazed, so a
+        // window keeps a line down the middle of it and a door does not.
+        for h in &d.holes {
+            let ends = [at(h.from), at(h.to)];
+            let width = ((h.thickness * view.scale) as f32).max(1.0);
+            out.push(Shape::line_segment(ends, Stroke::new(width, pal().hover_fill)));
+            if h.window {
+                out.push(Shape::line_segment(ends, Stroke::new(1.0, pal().hover)));
+            }
         }
         out
     }

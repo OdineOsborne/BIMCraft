@@ -2720,6 +2720,13 @@ const WORDS: &[[&str; 3]] = &[
         "Estas capas nombran fases distintas, así que los muros entre ellas vienen en la primera: {}",
     ],
     ["{} walls built from {}.", "{} paredes construídas de {}.", "{} muros construidos de {}."],
+    ["Find the openings too", "Procurar também as aberturas", "Buscar también los vanos"],
+    ["{} {} and {} {}.", "{} {} e {} {}.", "{} {} y {} {}."],
+    [
+        "{} openings stood higher than the wall they are in and were left out.",
+        "{} aberturas ficavam mais altas que a parede em que estão e foram deixadas de fora.",
+        "{} vanos quedaban más altos que el muro en que están y se dejaron fuera.",
+    ],
 ];
 
 #[cfg(test)]

@@ -38,6 +38,11 @@ fn run(s: &mut Session, id: &str, p: Value) -> Result<Value, String> {
     s.execute(id, &p)
 }
 
+/// The project's elements of a category, by id.
+fn ids(s: &Session, category: &str) -> Vec<crate::model::Id> {
+    s.model.elements.iter().filter(|(_, e)| e.category() == category).map(|(id, _)| *id).collect()
+}
+
 /// The project's walls.
 fn walls(s: &Session) -> Vec<&Wall> {
     s.model
@@ -197,7 +202,7 @@ fn with_no_drawing_under_the_plan_it_says_so_and_with_several_it_asks_which() {
 }
 
 #[test]
-fn a_face_the_drawing_broke_in_two_makes_one_wall_and_a_doorway_stays_a_doorway() {
+fn a_face_the_drawing_broke_in_two_makes_one_wall_and_a_doorway_makes_a_door_in_it() {
     // One wall 300 thick and 6 m long, its inner face drawn in two pieces that meet.
     let joined = vec![
         ("MURI".to_string(), [0.0, 0.0, 6000.0, 0.0]),
@@ -207,16 +212,60 @@ fn a_face_the_drawing_broke_in_two_makes_one_wall_and_a_doorway_stays_a_doorway(
     let mut s = linked(&joined);
     let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
     assert_eq!(out["walls"], json!(1), "the pieces of one wall are one wall: {out}");
-    // The same wall with a 900 doorway in it: two walls, and the doorway is not bricked up.
-    let doorway = vec![
-        ("MURI".to_string(), [0.0, 0.0, 2500.0, 0.0]),
-        ("MURI".to_string(), [3400.0, 0.0, 6000.0, 0.0]),
-        ("MURI".to_string(), [0.0, 300.0, 2500.0, 300.0]),
-        ("MURI".to_string(), [3400.0, 300.0, 6000.0, 300.0]),
-    ];
-    let mut s = linked(&doorway);
+    // The same wall with a 900 doorway in it: one wall with a door in it, which is what a building is.
+    let mut s = linked(&doorway());
     let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
-    assert_eq!(out["walls"], json!(2), "{out}");
+    assert_eq!((out["walls"].clone(), out["doors"].clone(), out["windows"].clone()), (json!(1), json!(1), json!(0)), "{out}");
+    // Asked for the walls alone, the gap is left as the drawing has it.
+    let mut s = linked(&doorway());
+    let out = run(&mut s, "trace_walls", json!({"openings": false})).expect("it traces");
+    assert_eq!((out["walls"].clone(), out["doors"].clone()), (json!(2), json!(0)), "{out}");
+}
+
+/// One wall 300 thick and 6 m long with a 900 doorway in the middle of it.
+fn doorway() -> Vec<(String, [f64; 4])> {
+    vec![
+        ("MURI".to_string(), [0.0, 0.0, 2550.0, 0.0]),
+        ("MURI".to_string(), [3450.0, 0.0, 6000.0, 0.0]),
+        ("MURI".to_string(), [0.0, 300.0, 2550.0, 300.0]),
+        ("MURI".to_string(), [3450.0, 300.0, 6000.0, 300.0]),
+    ]
+}
+
+#[test]
+fn a_doorway_comes_in_as_a_door_in_the_wall_it_is_in_and_a_window_with_glass_in_it() {
+    let mut s = linked(&doorway());
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(out["openings"], json!([{"kind": "door", "width": 900.0, "type": "Single 900 x 2100", "openings": 1, "made": false}]));
+    // It is a door of the project's own type, in the wall that was built, centred on the doorway.
+    let (walls, doors) = (ids(&s, "wall"), ids(&s, "door"));
+    assert_eq!((walls.len(), doors.len()), (1, 1));
+    let Some(Element::Door(o)) = s.model.elements.get(doors[0]) else { panic!() };
+    assert_eq!(s.model.elements.id(o.host), Some(walls[0]), "it is in the wall");
+    assert!((o.offset - 3000.0).abs() < 1.0, "in the middle of it: {}", o.offset);
+    assert_eq!(out["opening_ids"], json!(doors));
+    // The same doorway with glass drawn across it is a window, with a sill, and its own type made for it.
+    let mut glazed = doorway();
+    glazed.push(("MURI".to_string(), [2550.0, 140.0, 3450.0, 140.0]));
+    let mut s = linked(&glazed);
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(out["openings"], json!([{"kind": "window", "width": 900.0, "type": "Fixed 900 x 1500", "openings": 1, "made": true}]));
+    let windows = ids(&s, "window");
+    let Some(Element::Window(o)) = s.model.elements.get(windows[0]) else { panic!() };
+    assert!(o.sill > 0.0, "a window stands off the floor");
+    assert_eq!(s.model.types.window["Fixed 900 x 1500"].width, 900.0);
+}
+
+#[test]
+fn a_preview_says_where_the_openings_are_and_builds_none_of_them() {
+    let mut s = linked(&doorway());
+    let out = run(&mut s, "trace_walls", json!({"preview": true})).expect("it looks");
+    assert_eq!(out["doors"], json!(1));
+    let [hole] = out["holes"].as_array().expect("the openings").as_slice() else { panic!("{out}") };
+    assert_eq!(hole["kind"], json!("door"));
+    assert_eq!(hole["width"], json!(900.0));
+    assert_eq!((hole["from"].clone(), hole["to"].clone()), (json!([2550.0, 150.0]), json!([3450.0, 150.0])), "where it runs");
+    assert!(ids(&s, "door").is_empty() && ids(&s, "wall").is_empty(), "nothing is built by the looking");
 }
 
 #[test]

@@ -1664,6 +1664,9 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "这些图层声明了不同的阶段，因此它们之间的墙归入第一个阶段：{}",
     ],
     ["{} walls built from {}.", "{} 道墙，已从 {} 建出。"],
+    ["Find the openings too", "同时查找洞口"],
+    ["{} {} and {} {}.", "{} {}，{} {}。"],
+    ["{} openings stood higher than the wall they are in and were left out.", "{} 个洞口高过所在的墙，已被略去。"],
 ];
 
 /// The core's words (`bimcraft_core::language`) that the window shows too, in English and Simplified Chinese: after [`WORDS`], which wins.

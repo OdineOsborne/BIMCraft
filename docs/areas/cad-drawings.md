@@ -98,7 +98,7 @@ project's millimetres: `thin` and `thick` (60 and 800) bound a wall's thickness,
 thickness or a hatch and a farther one is a room; `shortest` (400) is the shortest face, and the shortest stretch two
 faces must run alongside one another; `skew` (2 degrees) is how far out of parallel a wall's faces may be drawn.
 
-Four rules keep it from finding walls where there are none, and each of them was put there by a real survey.
+Five rules keep it from finding walls where there are none, and each of them was put there by a real survey.
 
 - **The nearest face across.** In a corridor 600 wide between two walls 100 thick, every distance from 100 to 800 is
   there to be mistaken for a wall. A face's wall is the nearest face across it, within a tenth of that distance, so the
@@ -109,14 +109,39 @@ Four rules keep it from finding walls where there are none, and each of them was
   and every neighbouring pair of them measures the same thickness: on the survey this was written against, a flight of
   nine treads 280 apart read as eight walls. A wall's face has a room on one side of it, so the asymmetry tells them
   apart — a face with a face across it on *both* sides, as far away as each other and over the same stretch, is a rung,
-  and no pair it is in is a wall. The cost is a wall with a cavity behind it exactly as wide as the wall, which reads
-  as a ladder of four and is drawn by hand.
+  and no pair it is in is a wall.
+- **A mark inside a wall is no face of one.** A survey draws a window by carrying the wall's two faces across the
+  opening and drawing the glass down the middle of it; the glass is 125 from a face where the far face is 300, so the
+  nearest-face rule takes glass and face for a wall 130 thick and loses the 300 wall they are drawn in. On the survey
+  this was written against that happened at eight windows. Again it is the asymmetry that tells them apart: a face
+  with a face closer than `INSIDE` (200 mm) on *both* sides, over the whole of it, is inside something, and the pair
+  that has it between them is the wall. Hatching, a cavity's lining and a duct read the same way, and a wall with a
+  cavity behind it now comes in as one wall as thick as both. What it costs is two walls less than 200 mm apart,
+  which come in as one wall as thick as the pair of them: a space narrower than that is not a room.
 - **An axis is stretched, never shortened to nothing.** The faces that make a wall stop half a wall short of a corner,
   so the axis between them does too; an end within half the thickness of another wall's axis is taken to the crossing.
   An end whose crossing would leave less than half the wall, or turn it round, is left where it was.
 
-Pieces of one wall, where the drawing broke a face in two, are joined where they touch; a gap stays a gap, so a doorway
-is not bricked up.
+## The openings in those walls
+
+Pieces of one wall, where the drawing broke a face in two, are joined where they touch. A gap that is left is a
+doorway, and a doorway is not a gap between two walls but a door in one wall, which is what the building is: the two
+pieces are made one wall and `Hole` records the opening in it. A survey marks an opening the other way too, carrying
+the wall's faces across it and drawing two lines across the wall at the jambs, and that is read as well — but only
+with the glass between them, because the space between two windows is a pair of lines at a pair of jambs as well.
+
+**Glass is what tells a window from a door.** A line drawn alongside the wall inside an opening, clear of both faces,
+is glass or a sill, and the opening is a window; an opening with nothing drawn in it is a hole you can walk through,
+which is a door. Nothing else in a plan says which it is: the survey this was written against draws no door swings at
+all, so an arc is not looked for.
+
+An opening is between `NARROWEST` (500 mm) and `WIDEST` (3,000 mm) wide — narrower is where the drawing broke a line,
+wider is where a wall stops — and those, like `INSIDE`, are measures of buildings and not the user's to set. A plan
+gives no heights, so a door is built 2,100 high and a window 1,500 high on a 900 sill, which are the sizes the
+project's own starter types carry; an opening that would stand higher than the wall it is in is left out and counted
+in `too_high`. Each width found, to the nearest 10 mm, comes in as the project's own door or window type within a
+tenth of it, or as `Single <w> x 2100` or `Fixed <w> x 1500`, made for it. `openings: false` leaves the drawing as it
+is: two walls with a gap between them.
 
 Each wall takes the phase the layers of its two faces name, as Link CAD read them (`underlay::phase_across`), so a
 survey's `Stato di fatto` comes in built and its `Progetto` comes in new, from one drawing. A wall whose two layers
@@ -130,10 +155,10 @@ the drawing. That last one is what tells a drawing that is not in the units it c
 against says `$INSUNITS` millimetres and is drawn in metres, so its longest line is 13.73 mm and there is no wall in
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
-Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about 9 ms,
-finding 56 walls and 101 m of them, or 48 walls and 88 m with the surveyor's own layers hidden. Every pair of faces is
-weighed, so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in
-about 0.9 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it.
+Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
+9 ms, finding 44 walls, 6 doors and 2 windows. Every pair of faces is weighed, so the work is the square of their
+number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about 0.9 s, and more than `MAX_FACES`
+(10,000) faces is refused with what to do about it.
 
 ## The window: Trace Walls
 
@@ -151,10 +176,11 @@ wall is in. **Read the Layer Names Again** puts back what the names say, for a c
 is not drawn is not traced either, which is how a surveyor's own layers — levels, GPS points, a north arrow — are kept
 out of the walls.
 
-**Walls** is what to look for (`How`, as above), the wall type every wall is to come in as or `By thickness`, and two
-buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how much it found of what thickness, type
-and phase, and draws every wall it found over the plan — a band as thick as it measured with its axis down it. **Build**
-builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
+**Walls** is what to look for (`How`, as above), whether to find the openings as well, the wall type every wall is to
+come in as or `By thickness`, and two buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
+much it found of what thickness, type and phase and how many doors and windows, and draws it all over the plan — each
+wall a band as thick as it measured with its axis down it, each opening a lighter stretch of that band, with a line
+down the middle of a window and none down a door. **Build** builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
 
@@ -163,5 +189,5 @@ drawn under a dim box that stands in the middle of them and cannot be moved are 
 its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
 while it is open, and the only typing it takes is into numbers.
 
-**What is still missing**: openings and rooms. A drawing's blocks (`INSERT`) are not read either, so a survey that
-draws its doors as blocks draws nothing of them.
+**What is still missing**: rooms. A drawing's blocks (`INSERT`) are not read either, so a survey that draws its
+doors and its furniture as blocks draws nothing of them, and the openings in such a drawing are not found.

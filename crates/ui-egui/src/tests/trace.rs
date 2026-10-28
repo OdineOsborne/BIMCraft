@@ -116,6 +116,44 @@ fn find_says_what_it_found_and_draws_it_and_nothing_is_built_until_build() {
     assert!(h.state().traced_shapes(&view, egui::Pos2::ZERO, level).is_empty());
 }
 
+/// One wall 300 thick and 6 m long with a 900 doorway in the middle of it.
+fn doorway() -> Vec<(String, [f64; 4])> {
+    vec![
+        ("MURI".to_string(), [0.0, 0.0, 2550.0, 0.0]),
+        ("MURI".to_string(), [3450.0, 0.0, 6000.0, 0.0]),
+        ("MURI".to_string(), [0.0, 300.0, 2550.0, 300.0]),
+        ("MURI".to_string(), [3450.0, 300.0, 6000.0, 300.0]),
+    ]
+}
+
+#[test]
+fn the_openings_it_found_are_drawn_over_the_plan_and_come_in_as_doors_and_windows() {
+    let mut h = linked(&doorway(), None);
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    assert!(says(&h, "1 Door and 0 Windows."), "what it found is said");
+    assert!(says(&h, "900 mm Door: 1 \u{d7} Single 900 x 2100"), "and the type it would come in as");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.holes.len()), Some(1));
+    // The wall is drawn over the plan as a band with its axis, and the opening over it.
+    let level = h.state().plan_level().expect("a plan");
+    let model = h.state_mut().view_model();
+    let view = bimcraft_core::render::plan(&model, level, 800, 600).view;
+    assert_eq!(h.state().traced_shapes(&view, egui::Pos2::ZERO, level).len(), 3);
+    press(&mut h, "Build 1");
+    assert_eq!((ids(&h, "wall").len(), ids(&h, "door").len()), (1, 1), "one wall with a door in it");
+}
+
+#[test]
+fn with_the_openings_unticked_a_doorway_is_left_as_the_drawing_has_it() {
+    let mut h = linked(&doorway(), None);
+    shortcut(&mut h, "TW");
+    pick(&mut h, Role::CheckBox, "Find the openings too");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| (d.found.len(), d.holes.len())), Some((2, 0)));
+    press(&mut h, "Build 2");
+    assert_eq!((ids(&h, "wall").len(), ids(&h, "door").len()), (2, 0));
+}
+
 #[test]
 fn a_layers_phase_is_put_right_in_the_window_and_the_walls_come_in_it() {
     // A layer whose name says nothing of the project's history: the walls on it would come in the first phase.

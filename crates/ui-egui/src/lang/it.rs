@@ -1952,6 +1952,12 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "Questi layer dichiarano fasi diverse, quindi i muri fra loro nascono nella prima: {}",
     ],
     ["{} walls built from {}.", "{} muri costruiti da {}."],
+    ["Find the openings too", "Trova anche le aperture"],
+    ["{} {} and {} {}.", "{} {} e {} {}."],
+    [
+        "{} openings stood higher than the wall they are in and were left out.",
+        "{} aperture erano più alte del muro in cui stanno e sono state lasciate fuori.",
+    ],
 ];
 
 /// `english` in Italian, when this table has it.

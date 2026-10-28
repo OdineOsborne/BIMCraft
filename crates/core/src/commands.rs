@@ -179,10 +179,19 @@ pub static ALL: &[Command] = &[
          thickest wall, so a closer pair is a line\'s own thickness or a hatch and a farther one is a room; \
          `shortest` (400) the shortest face, and the shortest stretch two faces must run alongside one another; \
          `skew` (2) how many degrees out of parallel a wall\'s faces may be. A face\'s wall is the nearest face \
-         across it, never the far side of a room. Pieces of one wall that touch are joined, and a gap stays a gap, so \
-         a doorway is not bricked up; an axis is stretched to the one it was going to meet at a corner. `preview` \
-         finds and reports and builds nothing. Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
-         walls, made}, …], `phases` [{phase, walls}, …], `faces` how many lines were long enough to be a wall\'s \
+         across it, never the far side of a room, and a face with a face close up on both sides of it is a mark \
+         inside a wall — a window\'s glass, a cavity, hatching — and no face at all. Pieces of one wall that \
+         touch are joined, and an axis is stretched to the one it was going to meet at a corner. `openings` \
+         (true) reads the openings in the walls as well: a gap you could walk through between two pieces of one \
+         wall makes them one wall with an opening in it, and so does a pair of lines drawn across a wall at the \
+         jambs; glass drawn in an opening makes it a window and an empty one is a door. A plan gives no heights, \
+         so a door comes in 2100 high and a window 1500 high on a 900 sill, as the project\'s own starter types \
+         are, and an opening that would stand higher than its wall is left out and counted in `too_high`. With \
+         `openings: false` a doorway is left as the drawing has it, two walls with a gap between them. `preview` \
+         finds and reports and builds nothing, and says in `holes` where each opening runs ({kind, width, \
+         thickness, from, to}). Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
+         walls, made}, …], `doors`, `windows`, `opening_ids`, `openings` [{kind, width, type, openings, made}, \
+         …], `phases` [{phase, walls}, …], `faces` how many lines were long enough to be a wall\'s \
          face, and `longest`, the longest line in the drawing: a survey whose longest line is 13 mm is a survey drawn \
          in metres, and `scale` on Link CAD is what says so",
         trace_walls,
@@ -2030,10 +2039,39 @@ fn cad_layers(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "name": name, "changed": changed, "layers": layers}))
 }
 
-/// The thickness a wall that measured `measured` mm is built at: the nearest 10 mm, which is how a wall is built.
-fn built_thickness(measured: f64) -> i64 {
+/// What something that measured `measured` mm is built at: the nearest 10 mm, which is how a wall is built and an
+/// opening is made.
+fn by_ten(measured: f64) -> i64 {
     (((measured / 10.0).round() * 10.0).max(10.0)) as i64
 }
+
+/// The door or window type an opening `wanted` mm wide comes in as, and whether it has to be made: the project's own
+/// within a tenth of the width, the nearest of them, or a name for a new one, as a wall's thickness gets.
+fn opening_type_for(m: &Model, door: bool, wanted: f64) -> (String, bool) {
+    let types = if door { &m.types.door } else { &m.types.window };
+    let near = types
+        .iter()
+        .filter(|(_, t)| (t.width - wanted).abs() <= (wanted / 10.0).max(1.0))
+        .min_by(|a, b| (a.1.width - wanted).abs().total_cmp(&(b.1.width - wanted).abs()));
+    if let Some((name, _)) = near {
+        return (name.clone(), false);
+    }
+    let base = match door {
+        true => format!("Single {} x {}", wanted as i64, DOOR_HIGH as i64),
+        false => format!("Fixed {} x {}", wanted as i64, WINDOW_HIGH as i64),
+    };
+    if !types.contains_key(&base) {
+        return (base, true);
+    }
+    let free = (2..100).map(|n| format!("{base} ({n})")).find(|n| !types.contains_key(n));
+    (free.unwrap_or(base), true)
+}
+
+/// How high a door and a window traced from a drawing are made, and how high a window's sill stands: a plan says
+/// nothing of any of it, so what is made is the size the project's own starter types are.
+const DOOR_HIGH: f64 = 2100.0;
+const WINDOW_HIGH: f64 = 1500.0;
+const WINDOW_SILL: f64 = 900.0;
 
 /// The wall type a wall `wanted` mm thick comes in as, and whether it has to be made: the project's own type within
 /// a tenth of the thickness, the nearest of them, or a name for a new one. `given` is a type the caller named, which
@@ -2068,6 +2106,10 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         thick: num(c, p, "thick")?.unwrap_or(was.thick),
         shortest: num(c, p, "shortest")?.unwrap_or(was.shortest),
         skew: num(c, p, "skew")?.unwrap_or(was.skew),
+        openings: match p.get("openings") {
+            v if absent(v) => was.openings,
+            _ => flag(c, p, "openings")?,
+        },
     };
     let given = string(c, p, "type")?;
     if let Some(name) = &given
@@ -2079,7 +2121,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     // The type each thickness comes in as, and what was found of it.
     let mut types: BTreeMap<i64, (String, bool, usize, f64)> = BTreeMap::new();
     for w in &reading.walls {
-        let mm = built_thickness(w.thickness);
+        let mm = by_ten(w.thickness);
         let found = match types.get_mut(&mm) {
             Some(found) => found,
             None => {
@@ -2121,6 +2163,25 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         .iter()
         .map(|(mm, (name, made, walls, _))| json!({"thickness": *mm as f64, "type": name, "walls": walls, "made": made}))
         .collect();
+    // The openings found, by the type each comes in as: a door and a window of one width are two types, not one.
+    let mut holes: BTreeMap<(bool, i64), (String, bool, usize)> = BTreeMap::new();
+    for h in &reading.holes {
+        let mm = by_ten(h.width);
+        let found = match holes.get_mut(&(h.window, mm)) {
+            Some(found) => found,
+            None => {
+                let (name, made) = opening_type_for(&s.model, !h.window, mm as f64);
+                holes.entry((h.window, mm)).or_insert((name, made, 0))
+            }
+        };
+        found.2 += 1;
+    }
+    let openings: Vec<Value> = holes
+        .iter()
+        .map(|((window, mm), (name, made, count))| {
+            json!({"kind": if *window { "window" } else { "door" }, "width": *mm as f64, "type": name, "openings": count, "made": made})
+        })
+        .collect();
     let mut out = json!({
         "walls": reading.walls.len(),
         "length": hundredth(reading.walls.iter().map(|w| w.start.dist(w.end)).sum()),
@@ -2128,6 +2189,9 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         "phases": by_phase,
         "faces": reading.faces,
         "longest": hundredth(reading.longest),
+        "doors": reading.holes.iter().filter(|h| !h.window).count(),
+        "windows": reading.holes.iter().filter(|h| h.window).count(),
+        "openings": openings,
     });
     if !disagreed.is_empty() {
         out["disagreed"] = json!(disagreed);
@@ -2147,6 +2211,21 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
                 }))
                 .collect::<Vec<Value>>()
         );
+        out["holes"] = json!(
+            reading
+                .holes
+                .iter()
+                .filter_map(|h| {
+                    let w = reading.walls.get(h.wall)?;
+                    let d = (w.end - w.start).unit();
+                    let (from, to) = (w.start + d * (h.at - h.width / 2.0), w.start + d * (h.at + h.width / 2.0));
+                    let kind = if h.window { "window" } else { "door" };
+                    let ends = [[hundredth(from.0), hundredth(from.1)], [hundredth(to.0), hundredth(to.1)]];
+                    let thickness = hundredth(w.thickness);
+                    Some(json!({"from": ends[0], "to": ends[1], "width": hundredth(h.width), "thickness": thickness, "kind": kind}))
+                })
+                .collect::<Vec<Value>>()
+        );
         return Ok(out);
     }
     let level = match p.get("level") {
@@ -2160,9 +2239,24 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             m.types.wall.insert(name.clone(), WallType { thickness: *mm as f64, layers: Vec::new() });
         }
     }
-    let mut ids: Vec<Id> = Vec::new();
+    for ((window, mm), (name, made, _)) in &holes {
+        if !made {
+            continue;
+        }
+        let (width, high) = (*mm as f64, if *window { WINDOW_HIGH } else { DOOR_HIGH });
+        let kind = crate::model::OpeningType { width, height: high, sill: if *window { WINDOW_SILL } else { 0.0 } };
+        match window {
+            true => m.types.window.insert(name.clone(), kind),
+            false => m.types.door.insert(name.clone(), kind),
+        };
+    }
+    // Aligned with what was read, so an opening knows the wall it is in; none where a wall was not built.
+    let mut at_wall: Vec<Option<Id>> = Vec::new();
     for (w, phase) in reading.walls.iter().zip(&said) {
-        let Some((type_name, _, _, _)) = types.get(&built_thickness(w.thickness)) else { continue };
+        let Some((type_name, _, _, _)) = types.get(&by_ten(w.thickness)) else {
+            at_wall.push(None);
+            continue;
+        };
         let mut params: BTreeMap<String, Value> = BTreeMap::new();
         if let Some(phase) = phase {
             if let Some(name) = &phase.created {
@@ -2172,7 +2266,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
                 params.insert(phasing::DEMOLISHED.into(), json!(name));
             }
         }
-        ids.push(m.insert(Element::Wall(Wall {
+        at_wall.push(Some(m.insert(Element::Wall(Wall {
             params,
             type_name: type_name.clone(),
             level,
@@ -2185,9 +2279,46 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             location: Location::Centre,
             attach_top: None,
             attach_base: None,
-        })));
+        }))));
     }
-    out["ids"] = json!(ids);
+    // Each opening in the wall it was found in. One that would stand higher than its wall is left out and said so:
+    // a plan gives no heights, so the height it is made at is the project's and may not fit a low wall.
+    let mut holes_made: Vec<Id> = Vec::new();
+    let mut too_high = 0usize;
+    for h in &reading.holes {
+        let Some(Some(wall)) = at_wall.get(h.wall) else { continue };
+        let Some((name, _, _)) = holes.get(&(h.window, by_ten(h.width))) else { continue };
+        let (high, sill) = match h.window {
+            true => (WINDOW_HIGH, WINDOW_SILL),
+            false => (DOOR_HIGH, 0.0),
+        };
+        let Some(Element::Wall(w)) = m.elements.get(*wall) else { continue };
+        if sill + high > crate::walls::top_at(m, w, h.at) - m.own_base(w) + 1.0 {
+            too_high += 1;
+            continue;
+        }
+        let host = m.guid(*wall);
+        let o = crate::model::Opening {
+            type_name: name.clone(),
+            family: None,
+            host,
+            offset: h.at,
+            sill,
+            mark: String::new(),
+            flip_facing: false,
+            flip_hand: false,
+            params: BTreeMap::new(),
+        };
+        holes_made.push(m.insert(match h.window {
+            true => Element::Window(o),
+            false => Element::Door(o),
+        }));
+    }
+    out["ids"] = json!(at_wall.iter().flatten().collect::<Vec<&Id>>());
+    out["opening_ids"] = json!(holes_made);
+    if too_high > 0 {
+        out["too_high"] = json!(too_high);
+    }
     Ok(out)
 }
 

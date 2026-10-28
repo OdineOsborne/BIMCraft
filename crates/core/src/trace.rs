@@ -13,19 +13,43 @@
 //! And a face's wall is the *nearest* face across it: in a corridor 600 wide between two walls 100 thick, every
 //! distance from 100 to 800 is there to be mistaken for a wall, and only the two 100s are walls.
 //!
-//! One thing more is not a wall, and it is the one a real survey is full of: a ladder. A stair's treads, a hatch, a
+//! Two things more are not walls, and a real survey is full of both. One is a ladder: a stair's treads, a hatch, a
 //! fence and a run of joists are parallel lines evenly spaced, and every neighbouring pair of them measures the same
 //! thickness. A wall's face has a room on one side of it, so it is the asymmetry that tells them apart: a face with a
 //! face across it on *both* sides, the same distance away and over the same stretch, is a rung, and no pair it is in
-//! is a wall. What that costs is a wall with a cavity behind it exactly as wide as the wall itself, which reads as a
-//! ladder of four and is left to be drawn by hand.
+//! is a wall.
 //!
-//! Two tidying steps follow. Pieces of one wall, where the drawing broke a face in two, are joined where they touch —
-//! a gap stays a gap, so a doorway is not bricked up. And an axis, which stops half a wall short of a corner because
-//! the faces that made it do, is stretched to the axis it was going to meet.
+//! The other is a mark drawn *inside* a wall. A survey draws a window by carrying the wall's two faces across the
+//! opening and drawing the glass down the middle of it, and the glass is nearer to a face than the far face is, so
+//! the nearest-face rule takes glass and face for a wall 130 thick and loses the 300 wall it is drawn in. A wall's
+//! face has a room on one side of it, so again it is the asymmetry that tells them apart: a face with a face close up
+//! on *both* sides, over the whole of it, is inside something ([`INSIDE`]), and it is the pair that has it between
+//! them that is the wall. Hatching, a cavity's lining and a duct read the same way, and a wall with a cavity behind
+//! it now comes in as one wall as thick as both.
+//!
+//! Pieces of one wall, where the drawing broke a face in two, are joined where they touch. A gap that is left is a
+//! doorway, and [`Hole`] is what becomes of it: the two pieces are made one wall with an opening in it, which is what
+//! a building is — a wall with a door in it, not two walls with a space between them. A survey marks an opening the
+//! other way too, carrying the wall's faces across it and drawing the glass down the middle between two lines at the
+//! jambs, and that is read as well. Glass drawn in an opening makes it a window; an opening with nothing in it is a
+//! door, because a hole you can walk through is a door. A plan says nothing of heights, so what is built takes the
+//! project's own door and window sizes.
+//!
+//! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
+//! axis it was going to meet.
 
 use crate::geom::P2;
 use crate::model::{Model, Underlay};
+
+/// The widest space between two lines that is inside a wall rather than a room between two walls: a cavity, the
+/// glass a window is drawn with, a duct, the gap in hatching. Anything wider is somewhere a person can be, and the
+/// two lines are two walls' faces. It is a measure of buildings and not of drawings, so it is not the user's to set.
+const INSIDE: f64 = 200.0;
+
+/// The narrowest and widest opening looked for in a wall: a gap narrower than this is where the drawing broke a
+/// line, and one wider is where a wall stops. Measures of buildings, like [`INSIDE`], not the user's to set.
+pub const NARROWEST: f64 = 500.0;
+pub const WIDEST: f64 = 3000.0;
 
 /// The most faces of a drawing weighed. Every pair of them is, so the work is the square of this: a drawing with more
 /// lines as long as a wall than this is refused, rather than taking an afternoon over it.
@@ -42,13 +66,16 @@ pub struct How {
     pub shortest: f64,
     /// How many degrees the two faces of one wall may differ in direction by.
     pub skew: f64,
+    /// Whether to look for the openings in the walls as well. Without it a doorway leaves two walls with a gap
+    /// between them, which is what the drawing shows and not what the building is.
+    pub openings: bool,
 }
 
 impl Default for How {
     /// What a building is drawn with: walls from a 60 mm lining to an 800 mm stone wall, nothing shorter than a
     /// doorway's width, drawn square to a couple of degrees.
     fn default() -> How {
-        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0 }
+        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0, openings: true }
     }
 }
 
@@ -56,7 +83,7 @@ impl How {
     /// Itself, where a drawing could be read with it; else what is wrong with it. Numbers come from the user, so one
     /// that is no measure of a wall is refused here rather than finding everything or nothing further down.
     fn checked(&self) -> Result<How, String> {
-        let How { thin, thick, shortest, skew } = *self;
+        let How { thin, thick, shortest, skew, openings: _ } = *self;
         if ![thin, thick, shortest, skew].iter().all(|v| v.is_finite()) {
             return Err("every measure of a wall must be a number".into());
         }
@@ -99,12 +126,23 @@ impl Found {
     }
 }
 
-/// What a drawing was read for walls: the walls, how many of its lines were long enough to be a wall's face, and the
-/// longest line in it. That last one is what tells a drawing that is not in the units it says it is: a survey whose
+/// An opening in a wall the drawing holds: which of the walls found it is in, how far along that wall's axis its
+/// middle is, how wide it measured, and whether it is a window — glass drawn in an opening makes it one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hole {
+    pub wall: usize,
+    pub at: f64,
+    pub width: f64,
+    pub window: bool,
+}
+
+/// What a drawing was read for walls: the walls, the openings in them, how many of its lines were long enough to be a
+/// wall's face, and the longest line in it. That last one is what tells a drawing that is not in the units it says it is: a survey whose
 /// longest line is 13 mm is a survey drawn in metres, and the answer says so rather than guessing at a scale.
 #[derive(Clone, Debug, Default)]
 pub struct Reading {
     pub walls: Vec<Found>,
+    pub holes: Vec<Hole>,
     pub faces: usize,
     pub longest: f64,
 }
@@ -130,6 +168,9 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
     let mut names: Vec<String> = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
+    // Every run of the drawing, however short: a wall's faces are the long ones, and what marks an opening in a wall
+    // is drawn with the short ones.
+    let mut marks: Vec<(P2, P2)> = Vec::new();
     let mut longest = 0.0f64;
     for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
         let at = match names.iter().position(|n| *n == layer) {
@@ -156,6 +197,7 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
                 continue;
             }
             longest = longest.max(len);
+            marks.push((a, b));
             if len < how.shortest {
                 continue;
             }
@@ -168,8 +210,8 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
             faces.push(Face { layer: at, dir: (b - a).unit(), at: a, len });
         }
     }
-    let walls = pair_up(&faces, &names, &how);
-    Ok(Reading { walls, faces: faces.len(), longest })
+    let (walls, holes) = pair_up(&faces, &names, &how, &marks);
+    Ok(Reading { walls, holes, faces: faces.len(), longest })
 }
 
 /// What the two faces of one wall would measure: how far `b` lies to the left of `a`, and the stretch of `a` the two
@@ -204,12 +246,52 @@ fn across(a: &Face, b: &Face, how: &How) -> Option<(f64, f64, f64)> {
     Some((d, s0, s1))
 }
 
-/// Every face paired with the nearest face across it, as the walls that makes, tidied.
-fn pair_up(faces: &[Face], names: &[String], how: &How) -> Vec<Found> {
+/// How far `b` lies to the left of `a`, and how much of `a` it runs alongside, whatever the distance between them:
+/// what [`inside`] needs, where [`across`] would have thrown the pair away for being too close or too far.
+fn alongside(a: &Face, b: &Face, how: &How) -> Option<(f64, f64)> {
+    if (a.dir.cross(b.dir)).abs() > how.skew.to_radians().sin() {
+        return None;
+    }
+    let (along, off) = (|p: P2| a.dir.dot(p - a.at), |p: P2| a.dir.perp().dot(p - a.at));
+    let (t0, t1) = (along(b.at), along(b.end()));
+    let (s0, s1) = (t0.min(t1).max(0.0), t0.max(t1).min(a.len));
+    if s1 - s0 <= 0.0 || a.len <= 0.0 {
+        return None;
+    }
+    Some(((off(b.at) + off(b.end())) / 2.0, (s1 - s0) / a.len))
+}
+
+/// Which faces are marks inside a wall and not a wall's own: a face with another face closer than [`INSIDE`] on both
+/// sides of it, over the whole of it. A line drawn on top of another is neither side of it and says nothing here.
+fn inside(faces: &[Face], how: &How) -> Vec<bool> {
+    (0..faces.len())
+        .map(|i| {
+            let (mut up, mut down) = (f64::INFINITY, f64::INFINITY);
+            for (j, b) in faces.iter().enumerate() {
+                let Some((d, over)) = (j != i).then(|| alongside(&faces[i], b, how)).flatten() else { continue };
+                if over < 0.9 || d == 0.0 {
+                    continue;
+                }
+                match d > 0.0 {
+                    true => up = up.min(d),
+                    false => down = down.min(-d),
+                }
+            }
+            up <= INSIDE && down <= INSIDE
+        })
+        .collect()
+}
+
+/// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them.
+fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (Vec<Found>, Vec<Hole>) {
+    let inside = inside(faces, how);
     let mut pairs: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
     let mut nearest = vec![f64::INFINITY; faces.len()];
     for (i, a) in faces.iter().enumerate() {
         for (j, b) in faces.iter().enumerate().skip(i + 1) {
+            if inside[i] || inside[j] {
+                continue;
+            }
             let Some((d, s0, s1)) = across(a, b, how) else { continue };
             nearest[i] = nearest[i].min(d.abs());
             nearest[j] = nearest[j].min(d.abs());
@@ -251,8 +333,149 @@ fn pair_up(faces: &[Face], names: &[String], how: &How) -> Vec<Found> {
         walls.push(Found { start: mid(s0), end: mid(s1), thickness: t, layers: [name_of(names, a.layer), name_of(names, faces[j].layer)] });
     }
     join(&mut walls, how);
+    let mut holes = match how.openings {
+        true => open_up(&mut walls, marks, how),
+        false => Vec::new(),
+    };
+    if how.openings {
+        holes.extend(glazed_openings(&walls, marks, how));
+    }
     meet(&mut walls, how);
-    walls
+    let holes = placed(&walls, &holes, how);
+    (walls, holes)
+}
+
+/// How far along a wall's axis a point lies, and how far off it.
+fn on(wall: &Found, p: P2) -> (f64, f64) {
+    let d = wall.dir();
+    (d.dot(p - wall.start), d.perp().dot(p - wall.start))
+}
+
+/// Whether the drawing draws glass in the stretch `a..b` of `wall`: a line alongside the wall, inside its thickness
+/// and not on a face of it, over most of that stretch. A window is drawn with its glass and a doorway is drawn empty,
+/// which is the whole of what tells the two apart in a plan.
+fn glazed(wall: &Found, marks: &[(P2, P2)], a: f64, b: f64, how: &How) -> bool {
+    let room = wall.thickness / 2.0 - how.slack(wall.thickness);
+    let square = how.skew.to_radians().sin();
+    marks.iter().any(|(p, q)| {
+        if wall.dir().cross((*q - *p).unit()).abs() > square {
+            return false;
+        }
+        let ((t0, o0), (t1, o1)) = (on(wall, *p), on(wall, *q));
+        if o0.abs() > room || o1.abs() > room {
+            return false;
+        }
+        let (lo, hi) = (t0.min(t1).max(a), t0.max(t1).min(b));
+        hi - lo >= (b - a) * 0.8
+    })
+}
+
+/// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
+/// each opening, how wide, and whether it is a window.
+fn open_up(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
+    let mut holes: Vec<(P2, f64, bool)> = Vec::new();
+    let square = how.skew.to_radians().sin();
+    let mut again = true;
+    while again {
+        again = false;
+        'pairs: for i in 0..walls.len() {
+            for j in 0..walls.len() {
+                if i == j {
+                    continue;
+                }
+                let (a, b) = (&walls[i], &walls[j]);
+                let slack = how.slack(a.thickness);
+                if (a.thickness - b.thickness).abs() > slack || a.dir().cross(b.dir()).abs() > square {
+                    continue;
+                }
+                let ((t0, o0), (t1, o1)) = (on(a, b.start), on(a, b.end));
+                if o0.abs() > slack || o1.abs() > slack {
+                    continue;
+                }
+                let (lo, hi) = (t0.min(t1), t0.max(t1));
+                let gap = lo - a.length();
+                if !(NARROWEST..=WIDEST).contains(&gap) {
+                    continue;
+                }
+                // Nothing else of the same wall stands in the gap.
+                let between = walls.iter().enumerate().any(|(k, w)| {
+                    if k == i || k == j {
+                        return false;
+                    }
+                    let ((u0, f0), (u1, f1)) = (on(a, w.start), on(a, w.end));
+                    f0.abs() <= slack && f1.abs() <= slack && u0.max(u1) > a.length() && u0.min(u1) < lo
+                });
+                if between {
+                    continue;
+                }
+                let (mid, end) = (a.start + a.dir() * (a.length() + gap / 2.0), a.start + a.dir() * hi);
+                holes.push((mid, gap, glazed(a, marks, a.length(), lo, how)));
+                walls[i].end = end;
+                walls.remove(j);
+                again = true;
+                break 'pairs;
+            }
+        }
+    }
+    holes
+}
+
+/// The windows a drawing marks without breaking the wall: two lines drawn across it at the jambs, with the glass
+/// between them. A pair with no glass between is not taken, because the space between two windows is a pair too.
+fn glazed_openings(walls: &[Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
+    let mut holes = Vec::new();
+    let square = how.skew.to_radians().sin();
+    for wall in walls {
+        let (t, len) = (wall.thickness, wall.length());
+        let mut cuts: Vec<f64> = marks
+            .iter()
+            .filter_map(|(p, q)| {
+                let v = *q - *p;
+                if !(t * 0.6..=t * 1.6).contains(&v.length()) || v.unit().cross(wall.dir().perp()).abs() > square {
+                    return None;
+                }
+                let (along, off) = on(wall, *p + v * 0.5);
+                (off.abs() <= t / 2.0 && (0.0..=len).contains(&along)).then_some(along)
+            })
+            .collect();
+        cuts.sort_by(f64::total_cmp);
+        for (a, b) in cuts.iter().zip(cuts.iter().skip(1)) {
+            let width = b - a;
+            if (NARROWEST..=WIDEST).contains(&width) && glazed(wall, marks, *a, *b, how) {
+                holes.push((wall.start + wall.dir() * ((a + b) / 2.0), width, true));
+            }
+        }
+    }
+    holes
+}
+
+/// Each opening in the wall it is in, once the walls are tidied: where it falls along that wall's axis. One that no
+/// longer fits in a wall is dropped, and one already found another way is not found twice.
+fn placed(walls: &[Found], found: &[(P2, f64, bool)], how: &How) -> Vec<Hole> {
+    let mut holes: Vec<Hole> = Vec::new();
+    for (mid, width, window) in found {
+        let mut best: Option<(usize, f64, f64)> = None;
+        for (i, w) in walls.iter().enumerate() {
+            let (along, off) = on(w, *mid);
+            let slack = how.slack(w.thickness);
+            if off.abs() > w.thickness / 2.0 + slack {
+                continue;
+            }
+            if along - width / 2.0 < -slack || along + width / 2.0 > w.length() + slack {
+                continue;
+            }
+            if best.is_none_or(|(_, _, d)| off.abs() < d) {
+                best = Some((i, along, off.abs()));
+            }
+        }
+        let Some((wall, at, _)) = best else { continue };
+        let twice = holes.iter().any(|h| h.wall == wall && (h.at - at).abs() <= (h.width + width) / 4.0);
+        if !twice {
+            holes.push(Hole { wall, at, width: *width, window: *window });
+        }
+    }
+    holes.sort_by(|a, b| (a.wall, a.at).partial_cmp(&(b.wall, b.at)).unwrap_or(std::cmp::Ordering::Equal));
+    holes
 }
 
 fn name_of(names: &[String], at: usize) -> String {
@@ -365,10 +588,78 @@ mod tests {
         (m, u)
     }
 
+    /// What those lines were read as, by the default rule.
+    fn reading(lines: &[(&str, [f64; 4])]) -> Reading {
+        let (m, u) = with(lines);
+        read(&m, &u, &How::default()).expect("it reads")
+    }
+
     /// The walls found in those lines, by the default rule.
     fn found(lines: &[(&str, [f64; 4])]) -> Vec<Found> {
-        let (m, u) = with(lines);
-        read(&m, &u, &How::default()).expect("it reads").walls
+        reading(lines).walls
+    }
+
+    /// One wall 6 m long and 300 thick, its faces broken from `a` to `b`: a doorway, as a drawing leaves one.
+    fn doorway(a: f64, b: f64) -> Vec<(&'static str, [f64; 4])> {
+        vec![("A", [0.0, 0.0, a, 0.0]), ("A", [b, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, a, 300.0]), ("A", [b, 300.0, 6000.0, 300.0])]
+    }
+
+    #[test]
+    fn a_doorway_becomes_one_wall_with_a_door_in_it() {
+        let r = reading(&doorway(2550.0, 3450.0));
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((wall.length() - 6000.0).abs() < 1e-6, "the wall runs past its doorway: {}", wall.length());
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}", r.holes.len()) };
+        assert!(!hole.window, "nothing is drawn in it, so it is a door");
+        assert!((hole.width - 900.0).abs() < 1e-6, "{}", hole.width);
+        assert!((hole.at - 3000.0).abs() < 1e-6, "in the middle of the wall: {}", hole.at);
+    }
+
+    #[test]
+    fn glass_drawn_in_an_opening_makes_it_a_window() {
+        let mut lines = doorway(2550.0, 3450.0);
+        lines.push(("A", [2550.0, 140.0, 3450.0, 140.0]));
+        let r = reading(&lines);
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}", r.holes.len()) };
+        assert!(hole.window, "glass inside it, so it is a window");
+        // A line on the wall's face is the face, not glass: the doorway stays a door.
+        let mut face = doorway(2550.0, 3450.0);
+        face.push(("A", [2550.0, 300.0, 3450.0, 300.0]));
+        assert!(!reading(&face).holes[0].window);
+    }
+
+    #[test]
+    fn a_window_the_wall_runs_past_is_found_by_the_lines_at_its_jambs_and_the_glass_between_them() {
+        // The other way a survey draws a window: the faces carry on across the opening, two lines are drawn across
+        // the wall at the jambs, and the glass runs between them.
+        let mut lines = vec![("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, 6000.0, 300.0])];
+        lines.extend([("A", [2600.0, 0.0, 2600.0, 300.0]), ("A", [3400.0, 0.0, 3400.0, 300.0])]);
+        lines.extend([("A", [2600.0, 140.0, 3400.0, 140.0]), ("A", [2600.0, 160.0, 3400.0, 160.0])]);
+        let r = reading(&lines);
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}", r.walls.len()) };
+        assert!((wall.length() - 6000.0).abs() < 1e-6);
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}: {:?}", r.holes.len(), r.holes) };
+        assert!(hole.window && (hole.width - 800.0).abs() < 1e-6 && (hole.at - 3000.0).abs() < 1e-6, "{hole:?}");
+        // Without the glass the pair of lines says nothing: the space between two windows is a pair too.
+        let bare: Vec<(&str, [f64; 4])> = lines[..4].to_vec();
+        assert!(reading(&bare).holes.is_empty());
+    }
+
+    #[test]
+    fn a_gap_too_narrow_or_too_wide_to_walk_through_is_no_opening() {
+        for (a, b) in [(2850.0, 3150.0), (1000.0, 5000.0)] {
+            let r = reading(&doorway(a, b));
+            assert_eq!(r.walls.len(), 2, "two walls with a gap between them, not one with an opening");
+            assert!(r.holes.is_empty());
+        }
+    }
+
+    #[test]
+    fn without_openings_a_doorway_is_left_as_the_drawing_has_it() {
+        let (m, u) = with(&doorway(2550.0, 3450.0));
+        let r = read(&m, &u, &How { openings: false, ..How::default() }).expect("it reads");
+        assert_eq!(r.walls.len(), 2);
+        assert!(r.holes.is_empty());
     }
 
     #[test]
@@ -389,17 +680,59 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_the_drawing_broke_in_two_is_one_wall_and_a_doorway_is_two() {
+    fn a_window_drawn_in_a_wall_leaves_the_wall_whole_and_makes_no_wall_of_its_glass() {
+        // A survey draws a window by carrying the wall's faces across its opening, breaking them at the jambs, and
+        // drawing the glass down the middle: this is one 300 wall 6 m long with an 800-wide window in it. The glass
+        // is 125 from a face and the far face is 300, so the nearest-face rule alone takes the two for a wall 130
+        // thick and loses the wall they are drawn in.
+        let wall = [
+            ("A", [0.0, 0.0, 2600.0, 0.0]),
+            ("A", [2600.0, 0.0, 3400.0, 0.0]),
+            ("A", [3400.0, 0.0, 6000.0, 0.0]),
+            ("A", [0.0, 300.0, 2600.0, 300.0]),
+            ("A", [2600.0, 300.0, 3400.0, 300.0]),
+            ("A", [3400.0, 300.0, 6000.0, 300.0]),
+        ];
+        let glass = [("A", [2600.0, 125.0, 3400.0, 125.0]), ("A", [2600.0, 175.0, 3400.0, 175.0])];
+        let lines: Vec<(&str, [f64; 4])> = wall.into_iter().chain(glass).collect();
+        let walls = found(&lines);
+        let [one] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((one.thickness - 300.0).abs() < 1e-9, "{}", one.thickness);
+        assert!((one.length() - 6000.0).abs() < 1e-6, "{}", one.length());
+    }
+
+    #[test]
+    fn a_space_wider_than_a_mark_inside_a_wall_is_two_walls_with_a_room_between_them() {
+        // What leaves a window's glass out must not swallow a room: a corridor 600 wide between two walls 100 thick
+        // is two walls, and so is a gap of 250, wider than anything drawn inside a wall.
+        let two = |gap: f64| {
+            found(&[
+                ("A", [0.0, 0.0, 5000.0, 0.0]),
+                ("A", [0.0, 100.0, 5000.0, 100.0]),
+                ("A", [0.0, 100.0 + gap, 5000.0, 100.0 + gap]),
+                ("A", [0.0, 200.0 + gap, 5000.0, 200.0 + gap]),
+            ])
+        };
+        assert_eq!(two(600.0).len(), 2, "a corridor");
+        assert_eq!(two(250.0).len(), 2, "a gap too wide to be inside a wall");
+        // What it costs: a gap narrower than that is read as one wall as thick as all of it.
+        let [one] = &two(150.0)[..] else { panic!("one wall") };
+        assert!((one.thickness - 350.0).abs() < 1e-9, "{}", one.thickness);
+    }
+
+    #[test]
+    fn a_wall_the_drawing_broke_in_two_is_one_wall_and_a_doorway_is_a_door_in_it() {
         let touching = found(&[("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, 2500.0, 300.0]), ("A", [2500.0, 300.0, 6000.0, 300.0])]);
         let [one] = &touching[..] else { panic!("one wall, not {}", touching.len()) };
         assert!((one.length() - 6000.0).abs() < 1e-6, "{}", one.length());
-        let doorway = found(&[
-            ("A", [0.0, 0.0, 2500.0, 0.0]),
-            ("A", [3400.0, 0.0, 6000.0, 0.0]),
-            ("A", [0.0, 300.0, 2500.0, 300.0]),
-            ("A", [3400.0, 300.0, 6000.0, 300.0]),
-        ]);
-        assert_eq!(doorway.len(), 2, "the doorway is not bricked up");
+        // A gap where both faces stop is a doorway, and a doorway is a door in a wall, not two walls.
+        let r = reading(&doorway(2500.0, 3400.0));
+        assert_eq!((r.walls.len(), r.holes.len()), (1, 1), "{r:?}");
+        assert!((r.holes[0].width - 900.0).abs() < 1e-6, "{}", r.holes[0].width);
+        // Asked for walls alone, the drawing is left as it is and the gap stays a gap.
+        let (m, u) = with(&doorway(2500.0, 3400.0));
+        let bare = read(&m, &u, &How { openings: false, ..How::default() }).expect("it reads");
+        assert_eq!(bare.walls.len(), 2, "the doorway is not bricked up");
     }
 
     #[test]
