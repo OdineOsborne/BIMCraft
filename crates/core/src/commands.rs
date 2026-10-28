@@ -146,6 +146,22 @@ pub static ALL: &[Command] = &[
         underlay_cad,
     ),
     edit(
+        "cad_layers",
+        "CAD Layers",
+        &[],
+        "{underlay?, layers: [{layer, drawn?, created?, demolished?}, \u{2026}]} what the layers of a drawing under a \
+         plan are: whether each is `drawn`, and what it is of the project's history \u{2014} the phase it is `created` \
+         in and the one it is `demolished` in, as an element holds them and as Link CAD read them from the layers' own \
+         names. `underlay` is which drawing (the only one there is, unless there are several). A layer the list leaves \
+         out is left as it was, and so is a field a layer leaves out; `null` is none, which for `created` is the \
+         project's first phase and for `demolished` is never, and a layer with neither stands in every phase and \
+         leaves the other face of a wall to say which phase a wall traced from it is in. A layer that is not drawn is \
+         not traced either, so this is how a surveyor's own layers are kept out of Trace Walls. Returns `id`, `name`, \
+         `changed` (the layers it touched) and `layers` [{layer, shapes, drawn, created, demolished}, \u{2026}], every \
+         layer the drawing has",
+        cad_layers,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -1890,6 +1906,130 @@ fn redraw(s: &mut Session) -> Vec<Value> {
     failed
 }
 
+/// The drawing under a plan a command works on, and its id: the one `underlay` names, or the only one the project has.
+/// `doing` is what is about to be done with it, for the message when the project has none.
+fn chosen_underlay(c: &str, m: &Model, p: &Value, doing: &str) -> Result<(Id, crate::model::Underlay), String> {
+    let drawings: Vec<(Id, &crate::model::Underlay)> = m
+        .elements
+        .iter()
+        .filter_map(|(id, e)| match e {
+            Element::Underlay(u) => Some((*id, u)),
+            _ => None,
+        })
+        .collect();
+    let named = || drawings.iter().map(|(id, u)| format!("`{}` ({id})", u.name)).collect::<Vec<_>>().join(", ");
+    let wanted: Option<Id> = match p.get("underlay") {
+        v if absent(v) => None,
+        Some(v) => Some(element_id(c, m, v)?),
+        None => None,
+    };
+    let chosen = match (wanted, drawings.len()) {
+        (Some(id), _) => drawings.iter().find(|(at, _)| *at == id),
+        (None, 1) => drawings.first(),
+        (None, 0) => {
+            let said = format!("there is no drawing under a plan to {doing}: bring a survey in with Link CAD (`underlay`) first");
+            return Err(bad(c, said));
+        }
+        (None, _) => return Err(bad(c, format!("`underlay` says which drawing to {doing}, one of {}", named()))),
+    };
+    match chosen {
+        Some((id, u)) => Ok((*id, (*u).clone())),
+        None => Err(bad(c, format!("`underlay` names a drawing under a plan, one of {}", named()))),
+    }
+}
+
+/// What a layer of a drawing may be told about itself.
+const LAYER_FIELDS: [&str; 4] = ["layer", "drawn", "created", "demolished"];
+
+fn cad_layers(s: &mut Session, p: &Value) -> R {
+    let c = "cad_layers";
+    let (id, mut u) = chosen_underlay(c, &s.model, p, "read")?;
+    let was = u.clone();
+    let known: Vec<(String, usize)> =
+        s.model.drawings.get(&u.path).map(|d| d.layers.iter().map(|l| (l.name.clone(), l.shapes.len())).collect()).unwrap_or_default();
+    let wanted = "`layers` is [{layer, drawn?, created?, demolished?}, \u{2026}]: which layers to change and what to";
+    let told: &Vec<Value> = match p.get("layers") {
+        Some(Value::Array(a)) if a.len() <= MAX_POINTS => a,
+        Some(Value::Array(_)) => return Err(bad(c, format!("`layers` names more than {MAX_POINTS} layers"))),
+        v if absent(v) => return Err(bad(c, wanted)),
+        Some(v) => return Err(bad(c, format!("{wanted}, not {v}"))),
+        None => return Err(bad(c, wanted)),
+    };
+    let mut changed: Vec<String> = Vec::new();
+    for row in told {
+        let Some(fields) = row.as_object() else {
+            return Err(bad(c, format!("a layer is {{layer, drawn?, created?, demolished?}}, not {row}")));
+        };
+        if let Some(key) = fields.keys().find(|k| !LAYER_FIELDS.contains(&k.as_str())) {
+            return Err(bad(c, format!("a layer takes {}, not `{key}`", LAYER_FIELDS.map(|f| format!("`{f}`")).join(", "))));
+        }
+        let layer = string(c, row, "layer")?.ok_or_else(|| bad(c, format!("`layer` says which layer, and {row} names none")))?;
+        if !known.iter().any(|(name, _)| *name == layer) {
+            let names = known.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>().join(", ");
+            let has = match names.is_empty() {
+                true => "it draws nothing, its file not being loaded".to_string(),
+                false => format!("it has {names}"),
+            };
+            return Err(bad(c, format!("`{}` has no layer `{layer}`: {has}", u.name)));
+        }
+        if let Some(v) = fields.get("drawn") {
+            let drawn = v.as_bool().ok_or_else(|| bad(c, format!("`drawn` is true or false, not {v}")))?;
+            u.hidden.retain(|h| *h != layer);
+            if !drawn {
+                u.hidden.push(layer.clone());
+            }
+        }
+        if fields.contains_key("created") || fields.contains_key("demolished") {
+            let at = u.phases.iter().position(|l| l.layer == layer);
+            let mut said = match at {
+                Some(at) => u.phases.remove(at),
+                None => crate::model::LayerPhase { layer: layer.clone(), created: None, demolished: None },
+            };
+            for (key, slot) in [("created", &mut said.created), ("demolished", &mut said.demolished)] {
+                match fields.get(key) {
+                    None => {}
+                    Some(Value::Null) => *slot = None,
+                    Some(Value::String(name)) => *slot = Some(name.clone()),
+                    Some(v) => return Err(bad(c, format!("`{key}` is the name of a phase or null, not {v}"))),
+                }
+            }
+            // A layer with neither phase said of it is left out, as a layer the list never named is: it stands in
+            // every phase, and leaves the other face of a wall to say which phase the wall is in.
+            match (said.created.is_none() && said.demolished.is_none(), at) {
+                (true, _) => {}
+                (false, Some(at)) => u.phases.insert(at, said),
+                (false, None) => u.phases.push(said),
+            }
+        }
+        if !changed.contains(&layer) {
+            changed.push(layer.clone());
+        }
+    }
+    let (name, hidden, phases) = (u.name.clone(), u.hidden.clone(), u.phases.clone());
+    // Told what is so already, it leaves the project alone and so leaves no undo step: Read the Layer Names Again, on
+    // layers already read, changes nothing.
+    if u != was {
+        match s.model_mut().elements.get_mut(id) {
+            Some(Element::Underlay(slot)) => *slot = u,
+            _ => return Err(bad(c, format!("{id} is no drawing under a plan"))),
+        }
+    }
+    let layers: Vec<Value> = known
+        .iter()
+        .map(|(layer, shapes)| {
+            let said = phases.iter().find(|l| l.layer == *layer);
+            json!({
+                "layer": layer,
+                "shapes": shapes,
+                "drawn": !hidden.iter().any(|h| h == layer),
+                "created": said.and_then(|l| l.created.clone()),
+                "demolished": said.and_then(|l| l.demolished.clone()),
+            })
+        })
+        .collect();
+    Ok(json!({"id": id, "name": name, "changed": changed, "layers": layers}))
+}
+
 /// The thickness a wall that measured `measured` mm is built at: the nearest 10 mm, which is how a wall is built.
 fn built_thickness(measured: f64) -> i64 {
     (((measured / 10.0).round() * 10.0).max(10.0)) as i64
@@ -1921,33 +2061,7 @@ fn wall_type_for(m: &Model, given: Option<&str>, wanted: f64) -> (String, bool) 
 
 fn trace_walls(s: &mut Session, p: &Value) -> R {
     let c = "trace_walls";
-    let m = &s.model;
-    let drawings: Vec<(Id, &crate::model::Underlay)> = m
-        .elements
-        .iter()
-        .filter_map(|(id, e)| match e {
-            Element::Underlay(u) => Some((*id, u)),
-            _ => None,
-        })
-        .collect();
-    let named = || drawings.iter().map(|(id, u)| format!("`{}` ({id})", u.name)).collect::<Vec<_>>().join(", ");
-    let wanted: Option<Id> = match p.get("underlay") {
-        v if absent(v) => None,
-        Some(v) => Some(element_id(c, m, v)?),
-        None => None,
-    };
-    let chosen = match (wanted, drawings.len()) {
-        (Some(id), _) => drawings.iter().find(|(at, _)| *at == id),
-        (None, 1) => drawings.first(),
-        (None, 0) => {
-            return Err(bad(c, "there is no drawing under a plan to trace: bring a survey in with Link CAD (`underlay`) first"));
-        }
-        (None, _) => return Err(bad(c, format!("`underlay` says which drawing to trace, one of {}", named()))),
-    };
-    let u = match chosen {
-        Some((_, u)) => (*u).clone(),
-        None => return Err(bad(c, format!("`underlay` names a drawing under a plan, one of {}", named()))),
-    };
+    let (_, u) = chosen_underlay(c, &s.model, p, "trace")?;
     let was = crate::trace::How::default();
     let how = crate::trace::How {
         thin: num(c, p, "thin")?.unwrap_or(was.thin),

@@ -935,6 +935,8 @@ impl BimApp {
         }
         paint(&p, Place::at(rect.min), &d, &marked, hovered, self.thin, &[]);
         p.extend(crop);
+        // The walls Trace Walls found and has not built, over the drawing they were read from.
+        p.extend(self.traced_shapes(&view, rect.min, level));
         let rooms = hovered.iter().map(|id| (*id, pal().hover)).chain(self.selection.iter().map(|id| (*id, pal().accent)));
         for (id, accent) in rooms {
             if let Some(Element::Room(r)) = model.elements.get(id)

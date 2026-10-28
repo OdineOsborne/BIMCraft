@@ -38,6 +38,7 @@ mod structure;
 mod style;
 #[cfg(test)]
 mod tests;
+mod trace;
 mod updates;
 pub mod window;
 
@@ -256,7 +257,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 44] = [
+const SHORTCUTS: [(&str, &str); 45] = [
     ("MD", "Modify"),
     ("SB", "Floor: Structural"),
     ("MM", "Mirror Pick Axis"),
@@ -300,6 +301,7 @@ const SHORTCUTS: [(&str, &str); 44] = [
     ("HL", "Hidden Line"),
     ("SD", "Shaded"),
     ("LC", "Link CAD"),
+    ("TW", "Trace Walls"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -543,6 +545,8 @@ pub struct BimApp {
     /// Manage > Price List, while open.
     price_dialog: Option<prices::PriceDialog>,
     purge_dialog: Option<purge::PurgeDialog>,
+    /// Trace Walls, while it's open: the drawing it reads and what it found in it.
+    trace_dialog: Option<trace::TraceDialog>,
     /// Manage > Select by ID and IDs of Selection, while open.
     select_by_id: Option<inquiry::SelectById>,
     ids_of_selection: Option<inquiry::IdsOfSelection>,
@@ -889,6 +893,7 @@ impl BimApp {
             options_dialog: None,
             price_dialog: None,
             purge_dialog: None,
+            trace_dialog: None,
             select_by_id: None,
             ids_of_selection: None,
             copied: None,
@@ -1228,6 +1233,7 @@ impl BimApp {
             || self.options_dialog.is_some()
             || self.price_dialog.is_some()
             || self.purge_dialog.is_some()
+            || self.trace_dialog.is_some()
             || self.select_by_id.is_some()
             || self.ids_of_selection.is_some()
             || self.settings_page.is_some()
@@ -1412,6 +1418,10 @@ impl BimApp {
             }
             "LC" => {
                 self.cad_dialog = true;
+                return true;
+            }
+            "TW" => {
+                self.open_trace();
                 return true;
             }
             "DP" => {
@@ -2848,8 +2858,8 @@ impl BimApp {
                 }
             });
         });
-        // Two of a kind, so two small buttons side by side rather than two wide ones: the tab is a ribbon, and what
-        // follows it has to stay in view.
+        // Of a kind, so small buttons side by side rather than wide ones: the tab is a ribbon, and what follows it
+        // has to stay in view.
         panel(ui, "Links", |ui| {
             let tip = "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to";
             if small_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
@@ -2858,6 +2868,10 @@ impl BimApp {
             let tip = "Link CAD (LC): a CAD drawing (.dxf) under the plan on screen, to trace over and snap to: a survey, a consultant's drawing. Nothing of it is the project's and no tool can edit it";
             if small_button(ui, Icon::Plan, "Link CAD", false, tip).clicked() {
                 self.cad_dialog = true;
+            }
+            let tip = "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in";
+            if small_button(ui, Icon::Wall, "Trace Walls", self.trace_dialog.is_some(), tip).clicked() {
+                self.open_trace();
             }
         });
         panel(ui, "Family Editor", |ui| {
@@ -3628,6 +3642,7 @@ impl BimApp {
         self.options_window(ctx);
         self.price_window(ctx);
         self.purge_window(ctx);
+        self.trace_window(ctx);
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);
         }

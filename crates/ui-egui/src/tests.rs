@@ -4967,6 +4967,7 @@ fn show_mass_hides_and_shows_the_masses_in_the_view_on_screen() {
 }
 
 mod structure;
+mod trace;
 
 mod updates {
     use std::path::PathBuf;
@@ -5546,6 +5547,8 @@ fn ids_of_selection_shows_each_ones_id_guid_and_ifc_globalid_and_copies_them() {
     let mut h = app(BOX);
     let walls = ids(&h, "wall");
     press(&mut h, "Manage");
+    // The Inquiry panel's second button is past the window's edge until the tab is scrolled.
+    scroll_ribbon_right(&mut h);
     // Nothing selected: nothing to show.
     press(&mut h, "IDs of Selection");
     assert!(h.query_by_label("Copy All").is_none());

@@ -135,5 +135,28 @@ finding 56 walls and 101 m of them, or 48 walls and 88 m with the surveyor's own
 weighed, so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in
 about 0.9 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it.
 
-**What is still missing**: openings and rooms, and a window to do all this from — the phases and the walls are read and
-built by command, and nothing in the app shows or corrects them yet.
+## The window: Trace Walls
+
+All of this is a reading, and a reading is to be looked at before it is believed, so the window (`crates/ui-egui/src/trace.rs`,
+Trace Walls, `TW`, beside Link CAD on the Manage tab) shows it and lets it be put right. It opens on the drawing under
+the plan on screen — with no plan open, or no drawing under it, it says so and opens nothing, as Link CAD does — and
+holds two tabs.
+
+**Layers** is a row for each layer the drawing has: whether it is drawn, how many shapes are on it, and the two phases
+it stands in, each picked from the project's own. It is what Link CAD read from the layers' names, there to be
+corrected, because a name is a guess and a surveyor's `rosso` may be a property line and not new work. Each click is
+its own `cad_layers` command and its own undo step, as the Phasing dialog's clicks are; `<None>` is nothing said, and a
+layer with neither phase said of it stands in every phase and leaves the other face of a wall to say which phase the
+wall is in. **Read the Layer Names Again** puts back what the names say, for a change thought better of. A layer that
+is not drawn is not traced either, which is how a surveyor's own layers — levels, GPS points, a north arrow — are kept
+out of the walls.
+
+**Walls** is what to look for (`How`, as above), the wall type every wall is to come in as or `By thickness`, and two
+buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how much it found of what thickness, type
+and phase, and draws every wall it found over the plan — a band as thick as it measured with its axis down it. **Build**
+builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
+changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
+window. A refusal is said inside the window, because the status box in a view's corner can lie over a modal's buttons.
+
+**What is still missing**: openings and rooms. A drawing's blocks (`INSERT`) are not read either, so a survey that
+draws its doors as blocks draws nothing of them.

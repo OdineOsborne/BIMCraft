@@ -1618,6 +1618,52 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Building information modelling, open and free.", "开放、免费的建筑信息模型。"],
     ["Home", "主页"],
     ["Legends are coming in a later version.", "图例功能将在后续版本中推出。"],
+    ["Trace Walls", "描绘墙体"],
+    [
+        "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in",
+        "描绘墙体 (TW)：把当前平面下方图纸中的墙体建出来。测绘图把墙画成它的两个面，因此相距一个墙厚的一对线就是一道墙；图层说明每道墙属于哪个阶段",
+    ],
+    ["Trace Walls: open a plan first", "描绘墙体：请先打开一个平面"],
+    ["Trace Walls: bring a drawing under this plan with Link CAD first", "描绘墙体：请先用链接 CAD 在此平面下放入一张图纸"],
+    ["From the drawing {}, under this plan.", "来自本平面下方的图纸 {}。"],
+    ["Its file is not loaded.", "它的文件未加载。"],
+    [
+        "What each layer of the drawing is of the project's history, as its own name says. A layer that is not drawn is not traced either.",
+        "图纸的每个图层在项目历史中代表什么，依其图层名而定。未绘制的图层也不会被描绘。",
+    ],
+    ["Read the Layer Names Again", "重新读取图层名"],
+    ["Layer", "图层"],
+    ["Shapes", "图形数"],
+    ["Built in", "建于"],
+    ["Taken down in", "拆于"],
+    [
+        "A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall. What to look for:",
+        "测绘图把墙画成它的两个面，因此相距一个墙厚的一对线就是一道墙。要查找的范围：",
+    ],
+    ["Thinnest wall", "最薄的墙"],
+    ["Thickest wall", "最厚的墙"],
+    ["Shortest wall", "最短的墙"],
+    ["Out of parallel", "平行偏差"],
+    ["Wall type", "墙类型"],
+    ["By thickness", "按厚度"],
+    ["Find", "查找"],
+    ["Build {}", "建出 {}"],
+    [
+        "Find reads the drawing and draws the walls it found over the plan; nothing is built until Build.",
+        "查找会读取图纸并把找到的墙画在平面上；按“建出”之前不会建任何东西。",
+    ],
+    ["{} walls, {} m, of {} lines long enough to be a wall's face.", "{} 道墙，{} 米，出自 {} 条足以作为墙面的线。"],
+    [
+        "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
+        "其中最长的线只有 {} 毫米。以米绘制却声明毫米的图纸就是这样：请用 1000 的比例重新链接。",
+    ],
+    ["{} (a type made for it)", "{}（为此新建的类型）"],
+    ["{}: {} walls", "{}：{} 道墙"],
+    [
+        "These layers name different phases, so the walls between them come in the first: {}",
+        "这些图层声明了不同的阶段，因此它们之间的墙归入第一个阶段：{}",
+    ],
+    ["{} walls built from {}.", "{} 道墙，已从 {} 建出。"],
 ];
 
 /// The core's words (`bimcraft_core::language`) that the window shows too, in English and Simplified Chinese: after [`WORDS`], which wins.

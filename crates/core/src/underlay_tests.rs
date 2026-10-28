@@ -288,3 +288,98 @@ fn a_phase_the_project_hasnt_is_refused_and_nothing_is_left_behind() {
     assert!(err.contains("Seconda fase"), "{err}");
     assert!(s.model.elements.values().all(|e| !matches!(e, Element::Underlay(_))));
 }
+
+/// The one drawing under a plan.
+fn under(s: &Session) -> &crate::model::Underlay {
+    let found = s.model.elements.values().find_map(|e| match e {
+        Element::Underlay(u) => Some(u),
+        _ => None,
+    });
+    found.expect("a drawing under a plan")
+}
+
+fn phase(layer: &str, created: Option<&str>, demolished: Option<&str>) -> crate::model::LayerPhase {
+    crate::model::LayerPhase { layer: layer.into(), created: created.map(str::to_string), demolished: demolished.map(str::to_string) }
+}
+
+#[test]
+fn what_a_layer_is_of_the_project_is_corrected_and_what_it_is_not_told_is_left_as_it_was() {
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": phased_drawing("fasi.dxf")})).expect("it comes in");
+    // The layer named after dimensions said nothing of itself and is a layer of what is there; `Progetto` is built
+    // and comes down again in the same phase, which is said without saying what it is built in twice.
+    let out = run(
+        &mut s,
+        "cad_layers",
+        json!({"layers": [{"layer": "Quote", "created": "Existing"}, {"layer": "Progetto", "demolished": "New Construction"}]}),
+    )
+    .expect("it is told");
+    assert_eq!(out["changed"], json!(["Quote", "Progetto"]));
+    assert_eq!(
+        under(&s).phases,
+        vec![
+            phase("Stato di fatto", Some("Existing"), None),
+            phase("Progetto", Some("New Construction"), Some("New Construction")),
+            phase("Demolizioni", Some("Existing"), Some("New Construction")),
+            phase("Quote", Some("Existing"), None),
+        ],
+        "each layer keeps its place, and a phase it was not told about is left alone"
+    );
+    // Every layer the drawing has comes back, with how much is drawn on it: what a dialog shows.
+    assert_eq!(out["layers"][3], json!({"layer": "Quote", "shapes": 1, "drawn": true, "created": "Existing", "demolished": null}));
+    // Told nothing of either phase, a layer is left out again: it stands in every phase, as one never named does,
+    // and leaves the other face of a wall to say which phase the wall is in.
+    run(&mut s, "cad_layers", json!({"layers": [{"layer": "Quote", "created": null, "demolished": null}]})).expect("unsaid");
+    assert!(!under(&s).phases.iter().any(|l| l.layer == "Quote"), "{:?}", under(&s).phases);
+    // Told again what is so already, it leaves the project alone and so leaves no undo step behind: the one undo
+    // below takes back the command above it.
+    run(&mut s, "cad_layers", json!({"layers": [{"layer": "Quote", "created": null, "demolished": null}]})).expect("again");
+    assert_eq!(under(&s).phases.len(), 3);
+    // One command, one undo step.
+    run(&mut s, "undo", json!({})).expect("it goes back");
+    assert_eq!(under(&s).phases.len(), 4);
+}
+
+#[test]
+fn a_layer_turned_off_is_not_drawn_and_turned_on_again_it_is() {
+    let path = drawing("rilievo.dxf");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let lines = |s: &Session| crate::underlay::lines(&s.model, under(s)).len();
+    assert_eq!(lines(&s), 3, "two walls and a circle");
+    let out = run(&mut s, "cad_layers", json!({"layers": [{"layer": "ARREDI", "drawn": false}]})).expect("off it goes");
+    assert_eq!(out["layers"][1], json!({"layer": "ARREDI", "shapes": 1, "drawn": false, "created": null, "demolished": null}));
+    assert_eq!(lines(&s), 2, "the furniture is not drawn, so it is not traced either");
+    run(&mut s, "cad_layers", json!({"layers": [{"layer": "ARREDI", "drawn": true}]})).expect("and back on");
+    assert_eq!(lines(&s), 3);
+    assert!(under(&s).hidden.is_empty());
+}
+
+#[test]
+fn it_refuses_a_layer_the_drawing_hasnt_a_phase_the_project_hasnt_and_a_field_it_doesnt_know() {
+    let mut s = Session::new();
+    let err = run(&mut s, "cad_layers", json!({"layers": []})).expect_err("no drawing");
+    assert!(err.contains("Link CAD"), "{err}");
+    run(&mut s, "underlay", json!({"path": phased_drawing("fasi.dxf")})).expect("it comes in");
+    for (params, said) in [
+        (json!({"layers": [{"layer": "Muri", "drawn": false}]}), "Muri"),
+        (json!({"layers": [{"layer": "Quote", "created": "Terza fase"}]}), "Terza fase"),
+        (json!({"layers": [{"layer": "Quote", "colour": "red"}]}), "colour"),
+        (json!({"layers": [{"layer": "Quote", "drawn": "no"}]}), "true or false"),
+        (json!({"layers": "Quote"}), "layers"),
+        (json!({}), "layers"),
+    ] {
+        let err = run(&mut s, "cad_layers", params.clone()).expect_err("refused");
+        assert!(err.contains(said), "{params}: {err}");
+    }
+    // Nothing of what was refused stuck.
+    assert_eq!(
+        under(&s).phases,
+        vec![
+            phase("Stato di fatto", Some("Existing"), None),
+            phase("Progetto", Some("New Construction"), None),
+            phase("Demolizioni", Some("Existing"), Some("New Construction")),
+        ]
+    );
+    assert!(under(&s).hidden.is_empty());
+}

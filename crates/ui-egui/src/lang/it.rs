@@ -1900,6 +1900,58 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Building information modelling, open and free.", "Building information modelling, aperto e gratuito."],
     ["Home", "Home"],
     ["Legends are coming in a later version.", "Le legende arriveranno in una versione successiva."],
+    ["Trace Walls", "Ricava i muri"],
+    [
+        "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in",
+        "Ricava i muri (TW): i muri del disegno sotto la pianta a schermo, costruiti. Un rilievo disegna un muro come le sue due facce, quindi una coppia di linee distanti uno spessore di muro è un muro; i layer dicono in che fase sta ogni muro",
+    ],
+    ["Trace Walls: open a plan first", "Ricava i muri: apri prima una pianta"],
+    [
+        "Trace Walls: bring a drawing under this plan with Link CAD first",
+        "Ricava i muri: porta prima un disegno sotto questa pianta con Collega CAD",
+    ],
+    ["From the drawing {}, under this plan.", "Dal disegno {}, sotto questa pianta."],
+    ["Its file is not loaded.", "Il suo file non è caricato."],
+    [
+        "What each layer of the drawing is of the project's history, as its own name says. A layer that is not drawn is not traced either.",
+        "Che cosa è ogni layer del disegno nella storia del progetto, come dice il suo nome. Un layer che non viene disegnato non viene nemmeno ricavato.",
+    ],
+    ["Read the Layer Names Again", "Rileggi i nomi dei layer"],
+    ["Layer", "Layer"],
+    ["Shapes", "Forme"],
+    ["Built in", "Costruito in"],
+    ["Taken down in", "Demolito in"],
+    [
+        "A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall. What to look for:",
+        "Un rilievo disegna un muro come le sue due facce, quindi una coppia di linee distanti uno spessore di muro è un muro. Cosa cercare:",
+    ],
+    ["Thinnest wall", "Muro più sottile"],
+    ["Thickest wall", "Muro più spesso"],
+    ["Shortest wall", "Muro più corto"],
+    ["Out of parallel", "Fuori parallelo"],
+    ["Wall type", "Tipo di muro"],
+    ["By thickness", "Per spessore"],
+    ["Find", "Cerca"],
+    ["Build {}", "Costruisci {}"],
+    [
+        "Find reads the drawing and draws the walls it found over the plan; nothing is built until Build.",
+        "Cerca legge il disegno e traccia sulla pianta i muri che ha trovato; non viene costruito niente fino a Costruisci.",
+    ],
+    [
+        "{} walls, {} m, of {} lines long enough to be a wall's face.",
+        "{} muri, {} m, su {} linee abbastanza lunghe da essere la faccia di un muro.",
+    ],
+    [
+        "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
+        "La linea più lunga è {} mm. Un disegno in metri che dichiara millimetri si legge così: collegalo di nuovo con una scala di 1000.",
+    ],
+    ["{} (a type made for it)", "{} (un tipo creato per lui)"],
+    ["{}: {} walls", "{}: {} muri"],
+    [
+        "These layers name different phases, so the walls between them come in the first: {}",
+        "Questi layer dichiarano fasi diverse, quindi i muri fra loro nascono nella prima: {}",
+    ],
+    ["{} walls built from {}.", "{} muri costruiti da {}."],
 ];
 
 /// `english` in Italian, when this table has it.
