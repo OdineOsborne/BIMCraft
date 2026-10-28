@@ -113,6 +113,25 @@ pub fn read_phases(m: &Model, u: &Underlay) -> Vec<crate::model::LayerPhase> {
         .collect()
 }
 
+/// What the layers a wall's two faces are drawn on make of the wall: the phases they agree on. A wall is not in two
+/// moments of a project's history, so layers that disagree give nothing and are reported; a layer that says nothing
+/// leaves the other to speak, and two that say nothing leave the wall in the project's first phase, as anything
+/// unsaid is.
+#[allow(clippy::type_complexity)]
+pub fn phase_across<'a>(
+    u: &'a Underlay,
+    a: &str,
+    b: &str,
+) -> Result<Option<&'a crate::model::LayerPhase>, (&'a crate::model::LayerPhase, &'a crate::model::LayerPhase)> {
+    let of = |name: &str| u.phases.iter().find(|l| l.layer == name);
+    match (of(a), of(b)) {
+        (Some(x), Some(y)) if x.created == y.created && x.demolished == y.demolished => Ok(Some(x)),
+        (Some(x), Some(y)) => Err((x, y)),
+        (Some(x), None) | (None, Some(x)) => Ok(Some(x)),
+        (None, None) => Ok(None),
+    }
+}
+
 /// What layer `layer` of `u` is in the phase at `at` in the project's order; none when it isn't there: built after it,
 /// or taken down before it. A layer the underlay says nothing about is there in every phase.
 pub fn status(m: &Model, u: &Underlay, layer: &str, at: usize) -> Option<crate::phasing::Status> {

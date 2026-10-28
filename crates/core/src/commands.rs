@@ -146,6 +146,32 @@ pub static ALL: &[Command] = &[
         underlay_cad,
     ),
     edit(
+        "trace_walls",
+        "Trace Walls",
+        // No shortcut: in this project the letters belong to the window, which gives them when it has something to
+        // open (`LC` for Link CAD), and nothing in the window traces a drawing yet.
+        &[],
+        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, preview?} the walls of the \
+         drawing under a plan, built. A survey draws a wall as its two faces, so a pair of lines running alongside one \
+         another a wall\'s thickness apart is a wall: one wall is built down the middle of each pair, as thick as the \
+         pair measured. `underlay` is which drawing to read (the only one there is, unless there are several); the \
+         walls stand on its level unless `level` says, and each takes the phase the layers of its two faces name, as \
+         Link CAD read them — a wall whose two layers name different phases is left in the project\'s first and \
+         reported in `disagreed`. Each thickness found, to the nearest 10 mm, comes in as the project\'s own wall type \
+         within a tenth of it, or as `Generic - <n>mm`, made for it; `type` is one type for every wall instead. \
+         `height` and `top_level` as for `wall`. What is looked for: `thin` and `thick` (60 and 800) the thinnest and \
+         thickest wall, so a closer pair is a line\'s own thickness or a hatch and a farther one is a room; \
+         `shortest` (400) the shortest face, and the shortest stretch two faces must run alongside one another; \
+         `skew` (2) how many degrees out of parallel a wall\'s faces may be. A face\'s wall is the nearest face \
+         across it, never the far side of a room. Pieces of one wall that touch are joined, and a gap stays a gap, so \
+         a doorway is not bricked up; an axis is stretched to the one it was going to meet at a corner. `preview` \
+         finds and reports and builds nothing. Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
+         walls, made}, …], `phases` [{phase, walls}, …], `faces` how many lines were long enough to be a wall\'s \
+         face, and `longest`, the longest line in the drawing: a survey whose longest line is 13 mm is a survey drawn \
+         in metres, and `scale` on Link CAD is what says so",
+        trace_walls,
+    ),
+    edit(
         "link",
         "Link Model",
         &["LK"],
@@ -1862,6 +1888,193 @@ fn redraw(s: &mut Session) -> Vec<Value> {
         }
     }
     failed
+}
+
+/// The thickness a wall that measured `measured` mm is built at: the nearest 10 mm, which is how a wall is built.
+fn built_thickness(measured: f64) -> i64 {
+    (((measured / 10.0).round() * 10.0).max(10.0)) as i64
+}
+
+/// The wall type a wall `wanted` mm thick comes in as, and whether it has to be made: the project's own type within
+/// a tenth of the thickness, the nearest of them, or a name for a new one. `given` is a type the caller named, which
+/// is every wall's.
+fn wall_type_for(m: &Model, given: Option<&str>, wanted: f64) -> (String, bool) {
+    if let Some(name) = given {
+        return (name.to_string(), false);
+    }
+    let near = m
+        .types
+        .wall
+        .iter()
+        .filter(|(_, t)| (t.thickness - wanted).abs() <= (wanted / 10.0).max(1.0))
+        .min_by(|a, b| (a.1.thickness - wanted).abs().total_cmp(&(b.1.thickness - wanted).abs()));
+    if let Some((name, _)) = near {
+        return (name.clone(), false);
+    }
+    let base = format!("Generic - {}mm", wanted as i64);
+    if !m.types.wall.contains_key(&base) {
+        return (base, true);
+    }
+    let free = (2..100).map(|n| format!("{base} ({n})")).find(|n| !m.types.wall.contains_key(n));
+    (free.unwrap_or(base), true)
+}
+
+fn trace_walls(s: &mut Session, p: &Value) -> R {
+    let c = "trace_walls";
+    let m = &s.model;
+    let drawings: Vec<(Id, &crate::model::Underlay)> = m
+        .elements
+        .iter()
+        .filter_map(|(id, e)| match e {
+            Element::Underlay(u) => Some((*id, u)),
+            _ => None,
+        })
+        .collect();
+    let named = || drawings.iter().map(|(id, u)| format!("`{}` ({id})", u.name)).collect::<Vec<_>>().join(", ");
+    let wanted: Option<Id> = match p.get("underlay") {
+        v if absent(v) => None,
+        Some(v) => Some(element_id(c, m, v)?),
+        None => None,
+    };
+    let chosen = match (wanted, drawings.len()) {
+        (Some(id), _) => drawings.iter().find(|(at, _)| *at == id),
+        (None, 1) => drawings.first(),
+        (None, 0) => {
+            return Err(bad(c, "there is no drawing under a plan to trace: bring a survey in with Link CAD (`underlay`) first"));
+        }
+        (None, _) => return Err(bad(c, format!("`underlay` says which drawing to trace, one of {}", named()))),
+    };
+    let u = match chosen {
+        Some((_, u)) => (*u).clone(),
+        None => return Err(bad(c, format!("`underlay` names a drawing under a plan, one of {}", named()))),
+    };
+    let was = crate::trace::How::default();
+    let how = crate::trace::How {
+        thin: num(c, p, "thin")?.unwrap_or(was.thin),
+        thick: num(c, p, "thick")?.unwrap_or(was.thick),
+        shortest: num(c, p, "shortest")?.unwrap_or(was.shortest),
+        skew: num(c, p, "skew")?.unwrap_or(was.skew),
+    };
+    let given = string(c, p, "type")?;
+    if let Some(name) = &given
+        && !s.model.types.wall.contains_key(name)
+    {
+        return Err(bad(c, format!("`type` is one of this project's wall types, not `{name}`")));
+    }
+    let reading = crate::trace::read(&s.model, &u, &how).map_err(|e| bad(c, e))?;
+    // The type each thickness comes in as, and what was found of it.
+    let mut types: BTreeMap<i64, (String, bool, usize, f64)> = BTreeMap::new();
+    for w in &reading.walls {
+        let mm = built_thickness(w.thickness);
+        let found = match types.get_mut(&mm) {
+            Some(found) => found,
+            None => {
+                let (name, made) = wall_type_for(&s.model, given.as_deref(), mm as f64);
+                types.entry(mm).or_insert((name, made, 0, 0.0))
+            }
+        };
+        found.2 += 1;
+        found.3 += w.start.dist(w.end);
+    }
+    // The phase each wall comes in: what the layers of its two faces agree on.
+    let mut disagreed: Vec<Value> = Vec::new();
+    let said: Vec<Option<crate::model::LayerPhase>> = reading
+        .walls
+        .iter()
+        .map(|w| match crate::underlay::phase_across(&u, &w.layers[0], &w.layers[1]) {
+            Ok(phase) => phase.cloned(),
+            Err((x, y)) => {
+                let pair = json!({"layers": [x.layer, y.layer]});
+                if disagreed.len() < 16 && !disagreed.contains(&pair) {
+                    disagreed.push(pair);
+                }
+                None
+            }
+        })
+        .collect();
+    let first = s.model.phases.first().cloned();
+    let created: Vec<Option<String>> = said.iter().map(|p| p.as_ref().and_then(|p| p.created.clone()).or_else(|| first.clone())).collect();
+    let by_phase: Vec<Value> = s
+        .model
+        .phases
+        .iter()
+        .filter_map(|name| {
+            let walls = created.iter().filter(|c| c.as_deref() == Some(name.as_str())).count();
+            (walls > 0).then(|| json!({"phase": name, "walls": walls}))
+        })
+        .collect();
+    let thicknesses: Vec<Value> = types
+        .iter()
+        .map(|(mm, (name, made, walls, _))| json!({"thickness": *mm as f64, "type": name, "walls": walls, "made": made}))
+        .collect();
+    let mut out = json!({
+        "walls": reading.walls.len(),
+        "length": hundredth(reading.walls.iter().map(|w| w.start.dist(w.end)).sum()),
+        "thicknesses": thicknesses,
+        "phases": by_phase,
+        "faces": reading.faces,
+        "longest": hundredth(reading.longest),
+    });
+    if !disagreed.is_empty() {
+        out["disagreed"] = json!(disagreed);
+    }
+    if flag(c, p, "preview")? {
+        out["found"] = json!(
+            reading
+                .walls
+                .iter()
+                .zip(&said)
+                .map(|(w, phase)| json!({
+                    "start": [hundredth(w.start.0), hundredth(w.start.1)],
+                    "end": [hundredth(w.end.0), hundredth(w.end.1)],
+                    "thickness": hundredth(w.thickness),
+                    "layers": w.layers,
+                    "phase": phase.as_ref().and_then(|p| p.created.clone()),
+                }))
+                .collect::<Vec<Value>>()
+        );
+        return Ok(out);
+    }
+    let level = match p.get("level") {
+        v if absent(v) => u.level,
+        _ => level_param(c, &s.model, p, "level")?,
+    };
+    let (top_level, height) = top_param(c, &s.model, p, level)?;
+    let m = s.model_mut();
+    for (mm, (name, made, _, _)) in &types {
+        if *made {
+            m.types.wall.insert(name.clone(), WallType { thickness: *mm as f64, layers: Vec::new() });
+        }
+    }
+    let mut ids: Vec<Id> = Vec::new();
+    for (w, phase) in reading.walls.iter().zip(&said) {
+        let Some((type_name, _, _, _)) = types.get(&built_thickness(w.thickness)) else { continue };
+        let mut params: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(phase) = phase {
+            if let Some(name) = &phase.created {
+                params.insert(phasing::CREATED.into(), json!(name));
+            }
+            if let Some(name) = &phase.demolished {
+                params.insert(phasing::DEMOLISHED.into(), json!(name));
+            }
+        }
+        ids.push(m.insert(Element::Wall(Wall {
+            params,
+            type_name: type_name.clone(),
+            level,
+            start: w.start,
+            end: w.end,
+            top_level,
+            height,
+            base_offset: 0.0,
+            arc: 0.0,
+            location: Location::Centre,
+            attach_top: None,
+            attach_base: None,
+        })));
+    }
+    out["ids"] = json!(ids);
+    Ok(out)
 }
 
 /// How big a price-list file is read: enough for any published price list, bounded because the path is hostile.

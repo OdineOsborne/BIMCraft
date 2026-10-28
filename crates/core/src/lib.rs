@@ -48,6 +48,9 @@ pub mod stairs;
 pub mod step;
 pub mod styles;
 pub mod texture;
+pub mod trace;
+#[cfg(test)]
+mod trace_tests;
 pub mod underlay;
 #[cfg(test)]
 mod underlay_tests;

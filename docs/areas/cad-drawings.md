@@ -88,5 +88,52 @@ what is not there in this phase is not drawn, and what the filter overrides is d
 status says — dashed and red for what comes down, by default. So a plan set to the first phase shows the building as it
 stands, and one set to the last shows it as it will be, out of a single drawing.
 
-**What is still missing**: finding walls, openings and rooms in a drawing, which is the wizard this was the first step
-of; a drawing is traced over by hand until then.
+## The walls a survey already draws
+
+A draughtsman draws a wall as its two faces, so a wall in a drawing is a pair of lines running alongside one another a
+wall's thickness apart. `trace::read` takes every straight run of the drawing long enough to be a face, pairs each with
+the nearest face across it, and gives the line down the middle of each pair with the thickness it measured; the
+`trace_walls` command builds a wall on each, on the drawing's own level. `How` is what it looks for, all in the
+project's millimetres: `thin` and `thick` (60 and 800) bound a wall's thickness, so a closer pair is a line's own
+thickness or a hatch and a farther one is a room; `shortest` (400) is the shortest face, and the shortest stretch two
+faces must run alongside one another; `skew` (2 degrees) is how far out of parallel a wall's faces may be drawn.
+
+Four rules keep it from finding walls where there are none, and each of them was put there by a real survey.
+
+- **The nearest face across.** In a corridor 600 wide between two walls 100 thick, every distance from 100 to 800 is
+  there to be mistaken for a wall. A face's wall is the nearest face across it, within a tenth of that distance, so the
+  far side of a room is never one.
+- **The faces of a wall keep the same distance apart** over the stretch they share. A pair that splays is a kerb, a
+  ditch, a roof's pitch — not a wall.
+- **A ladder is no wall.** A stair's treads, a hatch, a fence and a run of joists are parallel lines evenly spaced,
+  and every neighbouring pair of them measures the same thickness: on the survey this was written against, a flight of
+  nine treads 280 apart read as eight walls. A wall's face has a room on one side of it, so the asymmetry tells them
+  apart — a face with a face across it on *both* sides, as far away as each other and over the same stretch, is a rung,
+  and no pair it is in is a wall. The cost is a wall with a cavity behind it exactly as wide as the wall, which reads
+  as a ladder of four and is drawn by hand.
+- **An axis is stretched, never shortened to nothing.** The faces that make a wall stop half a wall short of a corner,
+  so the axis between them does too; an end within half the thickness of another wall's axis is taken to the crossing.
+  An end whose crossing would leave less than half the wall, or turn it round, is left where it was.
+
+Pieces of one wall, where the drawing broke a face in two, are joined where they touch; a gap stays a gap, so a doorway
+is not bricked up.
+
+Each wall takes the phase the layers of its two faces name, as Link CAD read them (`underlay::phase_across`), so a
+survey's `Stato di fatto` comes in built and its `Progetto` comes in new, from one drawing. A wall whose two layers
+name different phases is left in the project's first and reported in `disagreed`: a wall is not in two moments of a
+project's history, and which one it is in is the user's to say. Each thickness found, to the nearest 10 mm, comes in as
+the project's own wall type within a tenth of it, or as `Generic - <n>mm`, made for it.
+
+What it found is a reading, like the phases: `preview` reports every wall it would build and builds nothing, and the
+answer always carries `faces`, how many lines were long enough to be a wall's face, and `longest`, the longest line in
+the drawing. That last one is what tells a drawing that is not in the units it claims — the survey this was written
+against says `$INSUNITS` millimetres and is drawn in metres, so its longest line is 13.73 mm and there is no wall in
+it until Link CAD is given `scale`. Nothing guesses at a scale.
+
+Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about 9 ms,
+finding 56 walls and 101 m of them, or 48 walls and 88 m with the surveyor's own layers hidden. Every pair of faces is
+weighed, so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in
+about 0.9 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it.
+
+**What is still missing**: openings and rooms, and a window to do all this from — the phases and the walls are read and
+built by command, and nothing in the app shows or corrects them yet.
