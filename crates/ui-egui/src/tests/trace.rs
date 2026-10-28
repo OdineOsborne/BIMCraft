@@ -70,6 +70,22 @@ fn tw_opens_trace_walls_on_the_drawing_under_the_plan_and_ks_lists_it() {
 }
 
 #[test]
+fn it_floats_so_the_plan_behind_it_can_still_be_worked_and_its_title_bar_closes_it() {
+    let mut h = linked(&one_room("MURI"), None);
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    // A shortcut still reaches the plan: the window takes no keys, because what it found is drawn behind it and is
+    // there to be looked at.
+    let thin = h.state().thin;
+    shortcut(&mut h, "TL");
+    assert_ne!(h.state().thin, thin, "Thin Lines went through");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "and the window is as it was");
+    // Its title bar closes it, as its own Close button does.
+    press(&mut h, "Close window");
+    assert!(h.state().trace_dialog.is_none());
+}
+
+#[test]
 fn with_no_drawing_under_the_plan_it_says_so_and_opens_nothing() {
     let mut h = app(BOX);
     shortcut(&mut h, "TW");
@@ -155,7 +171,7 @@ fn a_drawing_in_metres_that_says_millimetres_finds_nothing_and_is_told_what_to_d
 }
 
 #[test]
-fn a_refusal_is_said_inside_the_window_where_it_cannot_lie_over_the_buttons() {
+fn a_refusal_is_said_inside_the_window_beside_the_button_that_was_pressed() {
     let mut h = linked(&one_room("MURI"), None);
     shortcut(&mut h, "TW");
     // The thinnest wall asked for is thicker than the thickest, so no wall can be between the two.
@@ -165,6 +181,6 @@ fn a_refusal_is_said_inside_the_window_where_it_cannot_lie_over_the_buttons() {
     let said = h.state().trace_dialog.as_ref().map(|d| d.error.clone()).unwrap_or_default();
     assert!(said.contains("trace_walls"), "the core's refusal, inside the window: {said:?}");
     assert!(says(&h, "trace_walls"), "and on screen");
-    assert!(h.state().status.text.is_empty(), "not in the view's corner, where it could lie over the buttons");
+    assert!(h.state().status.text.is_empty(), "not in the far corner of the view");
     assert!(ids(&h, "wall").is_empty());
 }

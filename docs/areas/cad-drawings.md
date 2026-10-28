@@ -156,7 +156,12 @@ buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
 and phase, and draws every wall it found over the plan — a band as thick as it measured with its axis down it. **Build**
 builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
-window. A refusal is said inside the window, because the status box in a view's corner can lie over a modal's buttons.
+window. A refusal is said inside the window, where it is read beside the button that was pressed.
+
+It is the one window here that is not a modal, and for a reason: what it shows is on the plan behind it, and walls
+drawn under a dim box that stands in the middle of them and cannot be moved are no use. So it floats, is dragged by
+its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
+while it is open, and the only typing it takes is into numbers.
 
 **What is still missing**: openings and rooms. A drawing's blocks (`INSERT`) are not read either, so a survey that
 draws its doors as blocks draws nothing of them.

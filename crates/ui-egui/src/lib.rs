@@ -1233,7 +1233,6 @@ impl BimApp {
             || self.options_dialog.is_some()
             || self.price_dialog.is_some()
             || self.purge_dialog.is_some()
-            || self.trace_dialog.is_some()
             || self.select_by_id.is_some()
             || self.ids_of_selection.is_some()
             || self.settings_page.is_some()

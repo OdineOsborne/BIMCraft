@@ -3,6 +3,10 @@
 //! project's history as Link CAD read it from the layers' own names — put right a row at a time (`cad_layers`); the
 //! Walls tab is what to look for, Find (`trace_walls` with `preview`, which draws what it found over the plan) and
 //! Build (`trace_walls`). Nothing is built until Build is pressed, and a layer that is not drawn is not traced.
+//!
+//! It floats and is dragged by its title, and it does not take the keys, because what it shows is on the plan behind
+//! it: the walls it found are no use under a modal that stands in the middle of them and cannot be moved. So the plan
+//! pans, zooms and fits (`ZF`) while it is open, and the only typing it takes is into numbers.
 
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -12,8 +16,8 @@ use bimcraft_core::model::{Element, Id, Model, Underlay};
 use bimcraft_core::render::View;
 use bimcraft_core::trace::How;
 use egui::{
-    Align, Button, ComboBox, Context, DragValue, Grid, Id as UiId, Layout, Modal, Pos2, RichText, ScrollArea, Shape, Stroke, Ui,
-    WidgetInfo, WidgetType, vec2,
+    Align, Button, ComboBox, Context, DragValue, Grid, Id as UiId, Layout, Pos2, RichText, ScrollArea, Shape, Stroke, Ui, WidgetInfo,
+    WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -31,7 +35,8 @@ pub(crate) struct Traced {
 
 /// The Trace Walls window: which drawing it reads, which tab is open, what it looks for, the wall type every wall
 /// comes in as (none is one by thickness), what the last Find found and what the command said of it, and why a
-/// command was refused — said inside the window, because a status box in the view's corner can lie over its buttons.
+/// command was refused — said inside the window, where it is read beside the button that was pressed and not in the
+/// far corner of the view.
 pub(crate) struct TraceDialog {
     pub(crate) underlay: Id,
     pub(crate) tab: usize,
@@ -296,34 +301,42 @@ impl BimApp {
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
-        let r = Modal::new(UiId::new("trace-walls")).show(ctx, |ui| {
-            // As large on either tab, so the window doesn't move about as the tabs change.
-            ui.set_width(620.0);
-            ui.set_min_height(380.0);
-            ui.label(RichText::new(t("Trace Walls")).heading());
-            ui.add_space(4.0);
-            ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
-            ui.add_space(6.0);
-            let tabs = [t("Layers").to_string(), category("wall", true)];
-            ui.horizontal(|ui| {
-                for (i, label) in tabs.iter().enumerate() {
-                    if ui.selectable_label(d.tab == i, label).clicked() {
-                        d.tab = i;
-                    }
-                }
-            });
-            ui.separator();
-            match d.tab {
-                0 => layers_tab(ui, &d, &model, &mut layers),
-                _ => walls_tab(ui, &mut d, &model, &mut find, &mut build),
-            }
-            if !d.error.is_empty() {
+        let mut open = true;
+        egui::Window::new(t("Trace Walls"))
+            .id(UiId::new("trace-walls"))
+            .open(&mut open)
+            // Rolled up to its title bar, it is out of the way of the walls it drew on the plan without being closed.
+            .collapsible(true)
+            .resizable(false)
+            // Where it stands the first time: under the ribbon and against the palettes down the left, so the plan it
+            // reads is beside it. After that it stands where it was dragged.
+            .default_pos(pos2(320.0, 190.0))
+            .show(ctx, |ui| {
+                // As large on either tab, so the window doesn't move about as the tabs change.
+                ui.set_width(600.0);
+                ui.set_min_height(360.0);
+                ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
                 ui.add_space(6.0);
-                ui.label(RichText::new(&d.error).color(pal().error));
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
-        });
+                let tabs = [t("Layers").to_string(), category("wall", true)];
+                ui.horizontal(|ui| {
+                    for (i, label) in tabs.iter().enumerate() {
+                        if ui.selectable_label(d.tab == i, label).clicked() {
+                            d.tab = i;
+                        }
+                    }
+                });
+                ui.separator();
+                match d.tab {
+                    0 => layers_tab(ui, &d, &model, &mut layers),
+                    _ => walls_tab(ui, &mut d, &model, &mut find, &mut build),
+                }
+                if !d.error.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(&d.error).color(pal().error));
+                }
+                ui.add_space(8.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            });
         let asked = match (layers, find || build) {
             (Some(p), _) => Some(("cad_layers", p)),
             (None, true) => Some(("trace_walls", d.params(find))),
@@ -352,7 +365,7 @@ impl BimApp {
                 }
             }
         }
-        if !(close || r.should_close()) {
+        if open && !close {
             self.trace_dialog = Some(d);
         }
     }
