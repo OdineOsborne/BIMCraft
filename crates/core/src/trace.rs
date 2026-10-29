@@ -58,6 +58,10 @@
 //! wall between the two faces was too short to be read. Without that nothing is built across a room that nothing
 //! was drawn across.
 //!
+//! All of that is read from the lines drawn near the wall and not from every line of the plan ([`Marks`]): nothing
+//! farther from a wall than the widest opening in it has anything to say about the openings in it, and on a plan of
+//! a thousand rooms the lines of the other rooms are the whole of the work.
+//!
 //! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
 //! axis it was going to meet — the one the two of them have least to go to meet, and not simply the crossing
 //! nearest the end, which a third wall whose axis runs through that end may hold it at while the corner stays
@@ -436,13 +440,14 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
         walls.push(Found { start: mid(s0), end: mid(s1), thickness: t, layers: [name_of(names, a.layer), name_of(names, faces[j].layer)] });
     }
     join(&mut walls, how);
+    let marks = Marks::of(marks);
     let mut holes = match how.openings {
-        true => open_up(&mut walls, marks, how),
+        true => open_up(&mut walls, &marks, how),
         false => Vec::new(),
     };
     if how.openings {
-        holes.extend(open_ends(&mut walls, marks, how));
-        holes.extend(glazed_openings(&walls, marks, how));
+        holes.extend(open_ends(&mut walls, &marks, how));
+        holes.extend(glazed_openings(&walls, &marks, how));
     }
     meet(&mut walls, how);
     let alone = tidy(&mut walls, how);
@@ -593,54 +598,151 @@ fn face_across(wall: &Found, marks: &[(P2, P2)], from: f64, to: f64, how: &How) 
     })
 }
 
-/// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
-/// each opening, how wide, and whether it is a window.
-fn open_up(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
-    let mut holes: Vec<(P2, f64, bool)> = Vec::new();
-    let square = how.skew.to_radians().sin();
-    let mut again = true;
-    while again {
-        again = false;
-        'pairs: for i in 0..walls.len() {
-            for j in 0..walls.len() {
-                if i == j {
-                    continue;
+/// How many squares a side a drawing is laid out in, and the most squares a line may lie in before it is one every
+/// wall sees. Measures of nothing in a building: what they buy is the time, and any number of that order buys it.
+const SQUARES: f64 = 128.0;
+const SPREAD: i64 = 64;
+
+/// The lines of a drawing laid out in squares, so that a wall is weighed against the lines drawn near it and not
+/// against every line of the plan. What is read from them is read within the widest opening of a wall's axis
+/// ([`WIDEST`]), and on a plan of a thousand rooms everything else is the whole of the work: looking for the
+/// openings in its walls cost more than finding the walls did, and all of that was the lines of other rooms.
+///
+/// A line whose own corner of the drawing is a great part of it — the boundary of the plot, a grid line drawn right
+/// across the plan, a long diagonal — is put in no square and seen by every wall. A drawing holds few of those, and
+/// keeping them whole costs less than cutting each into the hundred squares it crosses.
+struct Marks<'a> {
+    all: &'a [(P2, P2)],
+    /// The corner the squares are counted from, and how wide one is.
+    corner: P2,
+    cell: f64,
+    /// Which lines lie in each square, by the square's place in the grid.
+    squares: std::collections::HashMap<(i32, i32), Vec<usize>>,
+    /// The lines in too much of the drawing to be put in squares at all.
+    everywhere: Vec<usize>,
+}
+
+impl<'a> Marks<'a> {
+    fn of(all: &'a [(P2, P2)]) -> Marks<'a> {
+        let (mut lo, mut hi) = (P2(f64::INFINITY, f64::INFINITY), P2(f64::NEG_INFINITY, f64::NEG_INFINITY));
+        for p in all.iter().flat_map(|(p, q)| [p, q]) {
+            lo = P2(lo.0.min(p.0), lo.1.min(p.1));
+            hi = P2(hi.0.max(p.0), hi.1.max(p.1));
+        }
+        let span = (hi.0 - lo.0).max(hi.1 - lo.1);
+        let cell = match span.is_finite() && span > 0.0 {
+            true => span / SQUARES,
+            false => 1.0,
+        };
+        let corner = match lo.0.is_finite() && lo.1.is_finite() {
+            true => lo,
+            false => P2(0.0, 0.0),
+        };
+        let mut marks = Marks { all, corner, cell, squares: std::collections::HashMap::new(), everywhere: Vec::new() };
+        for (i, (p, q)) in all.iter().enumerate() {
+            let x = marks.over(p.0.min(q.0), p.0.max(q.0), marks.corner.0);
+            let y = marks.over(p.1.min(q.1), p.1.max(q.1), marks.corner.1);
+            if (x.1 - x.0 + 1) as i64 * (y.1 - y.0 + 1) as i64 > SPREAD {
+                marks.everywhere.push(i);
+                continue;
+            }
+            for cx in x.0..=x.1 {
+                for cy in y.0..=y.1 {
+                    marks.squares.entry((cx, cy)).or_default().push(i);
                 }
-                let (a, b) = (&walls[i], &walls[j]);
-                let slack = how.slack(a.thickness);
-                if (a.thickness - b.thickness).abs() > slack || a.dir().cross(b.dir()).abs() > square {
-                    continue;
-                }
-                let ((t0, o0), (t1, o1)) = (on(a, b.start), on(a, b.end));
-                if o0.abs() > slack || o1.abs() > slack {
-                    continue;
-                }
-                let (lo, hi) = (t0.min(t1), t0.max(t1));
-                let gap = lo - a.length();
-                if !(NARROWEST..=WIDEST).contains(&gap) {
-                    continue;
-                }
-                // Nothing else of the same wall stands in the gap.
-                let between = walls.iter().enumerate().any(|(k, w)| {
-                    if k == i || k == j {
-                        return false;
-                    }
-                    let ((u0, f0), (u1, f1)) = (on(a, w.start), on(a, w.end));
-                    f0.abs() <= slack && f1.abs() <= slack && u0.max(u1) > a.length() && u0.min(u1) < lo
-                });
-                if between {
-                    continue;
-                }
-                let (mid, end) = (a.start + a.dir() * (a.length() + gap / 2.0), a.start + a.dir() * hi);
-                holes.push((mid, gap, glazed(a, marks, a.length(), lo, how)));
-                walls[i].end = end;
-                walls.remove(j);
-                again = true;
-                break 'pairs;
             }
         }
+        marks
     }
+
+    /// The squares a stretch `from..to` of the drawing reaches along one way of it, the first and the last, counted
+    /// from `corner`. Nothing outside the drawing is asked for: the squares are cut from the drawing's own size, so
+    /// on a drawing a few centimetres across one of them is a fraction of a millimetre, and asking for the three
+    /// metres around a wall square by square would be asking hundreds of millions of times for the lines of a
+    /// drawing that holds four. A coordinate too far out to count lands in the outermost square either way, which
+    /// leaves a line in more squares than its own and never in fewer.
+    fn over(&self, from: f64, to: f64, corner: f64) -> (i32, i32) {
+        let edge = SQUARES as i32;
+        let at = |x: f64| (((x - corner) / self.cell).floor() as i32).clamp(0, edge);
+        let (lo, hi) = (at(from), at(to));
+        (lo.min(hi), lo.max(hi))
+    }
+
+    /// The lines of the drawing a wall's openings can be read from: those drawn within the widest of its openings of
+    /// its axis, along it and beyond its ends, together with those in no square at all. In the order the drawing has
+    /// them, so that a reading does not depend on where in a drawing a wall stands.
+    fn near(&self, wall: &Found) -> Vec<(P2, P2)> {
+        let reach = WIDEST + wall.thickness;
+        let (p, q) = (wall.start, wall.end);
+        let x = self.over(p.0.min(q.0) - reach, p.0.max(q.0) + reach, self.corner.0);
+        let y = self.over(p.1.min(q.1) - reach, p.1.max(q.1) + reach, self.corner.1);
+        let mut found = self.everywhere.clone();
+        for cx in x.0..=x.1 {
+            for cy in y.0..=y.1 {
+                if let Some(in_it) = self.squares.get(&(cx, cy)) {
+                    found.extend(in_it);
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found.iter().filter_map(|i| self.all.get(*i).copied()).collect()
+    }
+}
+
+/// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
+/// each opening, how wide, and whether it is a window.
+fn open_up(walls: &mut Vec<Found>, marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
+    let mut holes: Vec<(P2, f64, bool)> = Vec::new();
+    let mut taken = vec![false; walls.len()];
+    for i in 0..walls.len() {
+        if taken[i] {
+            continue;
+        }
+        // The drawing of a long wall is broken at every door in it, so a wall that has taken in the piece beyond its
+        // end reaches on from that piece's end, and is asked again until there is nothing beyond it. Taking a piece
+        // in makes no opening for any wall but this one, which is why one pass over them is enough.
+        while let Some((j, lo, hi)) = beyond(walls, &taken, i, how) {
+            let a = &walls[i];
+            let (gap, dir) = (lo - a.length(), a.dir());
+            let (mid, end) = (a.start + dir * (a.length() + gap / 2.0), a.start + dir * hi);
+            holes.push((mid, gap, glazed(a, &marks.near(a), a.length(), lo, how)));
+            walls[i].end = end;
+            taken[j] = true;
+        }
+    }
+    *walls = kept(walls, &taken.iter().map(|taken| !taken).collect::<Vec<bool>>());
     holes
+}
+
+/// The next piece of the wall `i`, lying beyond the end of it: a wall alongside its axis and as thick as it, with a
+/// gap between the two that a person could walk through and nothing else of the same wall standing in that gap.
+/// Where along `i`'s axis that piece begins and ends.
+fn beyond(walls: &[Found], taken: &[bool], i: usize, how: &How) -> Option<(usize, f64, f64)> {
+    let (a, square) = (&walls[i], how.skew.to_radians().sin());
+    let slack = how.slack(a.thickness);
+    // Where a wall lies along `a`'s axis, if it lies along it at all.
+    let along = |w: &Found| {
+        let ((t0, o0), (t1, o1)) = (on(a, w.start), on(a, w.end));
+        (o0.abs() <= slack && o1.abs() <= slack).then(|| (t0.min(t1), t0.max(t1)))
+    };
+    for (j, b) in walls.iter().enumerate() {
+        if j == i || taken[j] || (a.thickness - b.thickness).abs() > slack || a.dir().cross(b.dir()).abs() > square {
+            continue;
+        }
+        let Some((lo, hi)) = along(b) else { continue };
+        if !(NARROWEST..=WIDEST).contains(&(lo - a.length())) {
+            continue;
+        }
+        let between = walls
+            .iter()
+            .enumerate()
+            .any(|(k, w)| k != i && k != j && !taken[k] && matches!(along(w), Some((u0, u1)) if u1 > a.length() && u0 < lo));
+        if !between {
+            return Some((j, lo, hi));
+        }
+    }
+    None
 }
 
 /// A doorway at the end of a wall, where the drawing leaves the wall stopping short of the wall it runs into. The
@@ -650,7 +752,7 @@ fn open_up(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) -> Vec<(P2, f6
 /// it was going to meet is taken to it, and what is left between where it stopped and the face of that wall is the
 /// opening. The gap between two pieces of one wall is [`open_up`]'s; this is the gap at a corner. What it found: the
 /// middle of each opening, how wide, and whether it is a window.
-fn open_ends(walls: &mut [Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
+fn open_ends(walls: &mut [Found], marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
     let was: Vec<Found> = walls.to_vec();
     let square = how.skew.to_radians().sin();
     let mut holes = Vec::new();
@@ -699,10 +801,11 @@ fn open_ends(walls: &mut [Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64
             // What says the wall carries on is the drawing: a face of it drawn across the gap, where the wall
             // between the two faces was too short to be read. Without that the wall stops where it was drawn, and
             // nothing is built across a room that nothing was drawn across.
-            if !face_across(mine, marks, from, to, how) {
+            let lines = marks.near(mine);
+            if !face_across(mine, &lines, from, to, how) {
                 continue;
             }
-            holes.push((p + out * (width / 2.0), width, glazed(mine, marks, from, to, how)));
+            holes.push((p + out * (width / 2.0), width, glazed(mine, &lines, from, to, how)));
             match far {
                 true => wall.end = at,
                 false => wall.start = at,
@@ -714,12 +817,13 @@ fn open_ends(walls: &mut [Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64
 
 /// The windows a drawing marks without breaking the wall: two lines drawn across it at the jambs, with the glass
 /// between them. A pair with no glass between is not taken, because the space between two windows is a pair too.
-fn glazed_openings(walls: &[Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
+fn glazed_openings(walls: &[Found], marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
     let mut holes = Vec::new();
     let square = how.skew.to_radians().sin();
     for wall in walls {
         let (t, len) = (wall.thickness, wall.length());
-        let mut cuts: Vec<f64> = marks
+        let lines = marks.near(wall);
+        let mut cuts: Vec<f64> = lines
             .iter()
             .filter_map(|(p, q)| {
                 let v = *q - *p;
@@ -735,7 +839,7 @@ fn glazed_openings(walls: &[Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f
         cuts.sort_by(f64::total_cmp);
         for (a, b) in cuts.iter().zip(cuts.iter().skip(1)) {
             let width = b - a;
-            if (NARROWEST..=WIDEST).contains(&width) && glazed(wall, marks, *a, *b, how) {
+            if (NARROWEST..=WIDEST).contains(&width) && glazed(wall, &lines, *a, *b, how) {
                 holes.push((wall.start + wall.dir() * ((a + b) / 2.0), width, true));
             }
         }
@@ -1051,6 +1155,65 @@ mod tests {
         assert!(!hole.window, "nothing is drawn in it, so it is a door");
         assert!((hole.width - 900.0).abs() < 1e-6, "{}", hole.width);
         assert!((hole.at - 3000.0).abs() < 1e-6, "in the middle of the wall: {}", hole.at);
+    }
+
+    #[test]
+    fn a_wall_broken_twice_is_one_wall_with_a_door_in_it_at_each_break() {
+        // Three pieces of one wall, 300 thick, with a doorway between each two: the piece a wall has just taken in
+        // is not the end of it, and what lies beyond that piece is its own too.
+        let piece = |a: f64, b: f64| vec![("A", [a, 0.0, b, 0.0]), ("A", [a, 300.0, b, 300.0])];
+        let lines: Vec<(&str, [f64; 4])> =
+            piece(0.0, 2000.0).into_iter().chain(piece(2900.0, 4000.0)).chain(piece(4900.0, 7000.0)).collect();
+        let r = reading(&lines);
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((wall.length() - 7000.0).abs() < 1e-6, "the wall runs past both of them: {}", wall.length());
+        let at: Vec<f64> = r.holes.iter().map(|h| h.at).collect();
+        assert_eq!(r.holes.len(), 2, "a door at each break: {:?}", r.holes);
+        assert!(at.iter().zip([2450.0, 4450.0]).all(|(a, b)| (a - b).abs() < 1e-6), "{at:?}");
+    }
+
+    #[test]
+    fn the_lines_of_a_drawing_far_from_a_wall_say_nothing_about_the_openings_in_it() {
+        // A window in a wall, and then the same drawing with a thousand lines drawn a hundred metres from it: a
+        // wall's openings are read from the lines near it, so the rest of a plan neither makes an opening nor
+        // unmakes one.
+        let mut lines = doorway(2550.0, 3450.0);
+        lines.push(("A", [2550.0, 140.0, 3450.0, 140.0]));
+        let one = reading(&lines);
+        assert!(one.holes.first().is_some_and(|h| h.window), "a window to begin with: {:?}", one.holes);
+        let mut crowded = lines.clone();
+        for k in 0..1000 {
+            let y = 100_000.0 + k as f64 * 10.0;
+            crowded.push(("A", [100_000.0, y, 100_300.0, y]));
+        }
+        let also = reading(&crowded);
+        assert_eq!(also.walls, one.walls, "the same walls");
+        assert_eq!(also.holes, one.holes, "and the same openings in them");
+    }
+
+    #[test]
+    fn a_drawing_smaller_than_an_opening_is_read_like_any_other() {
+        // The squares the lines are laid out in are cut from the drawing's own size, and a drawing may be smaller
+        // than the widest opening looked for in a wall: then the lines near a wall are every line there is, and
+        // nothing outside the drawing is asked for.
+        let how = How { thin: 0.5, thick: 8.0, shortest: 4.0, ..How::default() };
+        let lines = [("A", [0.0, 0.0, 60.0, 0.0]), ("A", [0.0, 2.0, 60.0, 2.0]), ("A", [20.0, 1.0, 40.0, 1.0])];
+        let (m, u) = with(&lines);
+        let r = read(&m, &u, &how).expect("it reads");
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((wall.thickness - 2.0).abs() < 1e-9, "{}", wall.thickness);
+    }
+
+    #[test]
+    fn a_wall_sees_the_lines_drawn_near_it_and_the_ones_drawn_right_across_the_drawing() {
+        let wall = Found { start: P2(0.0, 0.0), end: P2(4000.0, 0.0), thickness: 300.0, layers: Default::default() };
+        let glass = (P2(1000.0, 100.0), P2(2000.0, 100.0));
+        let away = (P2(0.0, 80_000.0), P2(4000.0, 80_000.0));
+        let right_across = (P2(-10_000.0, -10_000.0), P2(90_000.0, 90_000.0));
+        let near = Marks::of(&[glass, away, right_across]).near(&wall);
+        assert!(near.contains(&glass), "the glass drawn in it: {near:?}");
+        assert!(!near.contains(&away), "and not the line eighty metres off: {near:?}");
+        assert!(near.contains(&right_across), "a line drawn right across a drawing is every wall's: {near:?}");
     }
 
     #[test]

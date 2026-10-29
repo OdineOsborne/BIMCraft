@@ -233,10 +233,22 @@ it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
 9 ms, finding 21 walls, 7 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
-so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about
-2.7 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
-them as well takes it to about 10 s, because `glazed_openings` weighs every line of the drawing against every wall
-found; that is where to look first if a big drawing is ever to be traced quickly.
+so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) reads and links in 64 ms and
+traces 4,800 walls in about 2.2 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it.
+Looking for the openings as well brings that to about 1.2 s — less than without them, because a wall and the pieces
+of it beyond its doors become one wall, so `meet` and `tidy` weigh 140 walls against each other and not 4,800.
+
+Finding those openings took 10 s until it was measured instead of guessed at, and the guess written here before was
+wrong: `glazed_openings` costs 7 ms on that plan. Two things cost it. **`open_up` began again at the first wall after
+every piece of a wall it took in**, which on that plan is 4,660 restarts of a search over 4,800 walls; taking a piece
+in makes an opening for no wall but the one that took it, so one pass over them is enough — `beyond` finds the next
+piece of a wall and the wall is asked again until there is nothing beyond it. **What was left was `glazed`**, which
+read every line of the drawing for every opening: 4,660 openings against 9,600 lines, two thirds of what remained.
+The lines are now laid out in squares (`Marks`) and a wall is handed those drawn within the widest of its openings of
+its axis, with the few that lie in too much of the drawing to be put in a square — the boundary of a plot, a long
+diagonal — handed to every wall. Neither changed what is read: the same 21 walls, 7 doors, 6 windows and 3 rooms on
+the survey, and the same 4,800 walls and 4,660 openings on the plan of 1,200 rooms. What is square in the number of
+faces is now the pairing itself (`across`, and `inside` before it), which is where to look next.
 
 ## The rooms those walls shut in
 
