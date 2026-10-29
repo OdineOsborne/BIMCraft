@@ -351,6 +351,54 @@ fn rooms_need_walls_around_them_and_follow_the_walls() {
 }
 
 #[test]
+fn a_room_is_placed_in_every_area_the_walls_enclose_and_never_a_second_in_one() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "wall", json!({"points": [[5000, 0], [5000, 6000]], "type": "Interior - 100mm"}));
+    let out = run(&mut s, "place_rooms", json!({}));
+    assert_eq!(out["rooms"], 2);
+    assert_eq!(out["area_m2"], 48.0, "the two of them are the house");
+    // Numbered from the back of the plan to the front and from the left across: both rooms reach the back, so the
+    // left one is the first.
+    let rooms = run(&mut s, "elements", json!({"category": "room"}));
+    let said: Vec<(&str, f64)> = rooms["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["number"].as_str().unwrap_or_default(), e["area_m2"].as_f64().unwrap_or_default()))
+        .collect();
+    assert_eq!(said, vec![("1", 30.0), ("2", 18.0)]);
+    // Asked again, it leaves the rooms that are there alone.
+    let again = run(&mut s, "place_rooms", json!({}));
+    assert_eq!((again["rooms"].as_u64(), again["held"].as_u64()), (Some(0), Some(2)));
+    assert_eq!(run(&mut s, "elements", json!({"category": "room"}))["elements"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn placing_the_rooms_names_them_and_skips_what_is_no_room() {
+    let mut s = Session::new();
+    house(&mut s);
+    // A stub that shuts nothing in leaves the house one room; a duct's shaft inside it is a room of its own, and
+    // the hall is the house less the shaft.
+    run(&mut s, "wall", json!({"points": [[0, 3000], [2000, 3000]], "type": "Interior - 100mm"}));
+    let shaft = [[1000, 5000], [1600, 5000], [1600, 5600], [1000, 5600], [1000, 5000]];
+    run(&mut s, "wall", json!({"points": shaft, "type": "Interior - 100mm"}));
+    let out = run(&mut s, "place_rooms", json!({"name": "Locale"}));
+    assert_eq!(out["rooms"], 2);
+    let mut areas: Vec<f64> = out["areas_m2"].as_array().unwrap().iter().filter_map(|a| a.as_f64()).collect();
+    areas.sort_by(f64::total_cmp);
+    assert_eq!(areas, vec![0.36, 47.64]);
+    let rooms = run(&mut s, "elements", json!({"category": "room"}));
+    assert!(rooms["elements"].as_array().unwrap().iter().all(|e| e["name"] == "Locale"), "{rooms}");
+    // A line drawn a hair off a wall leaves a sliver between the two, which is nowhere at all and no room.
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "wall", json!({"points": [[0, 0], [8000, 50]], "type": "Interior - 100mm"}));
+    let out = run(&mut s, "place_rooms", json!({}));
+    assert_eq!((out["rooms"].as_u64(), out["small"].as_u64()), (Some(1), Some(1)), "the sliver is no room");
+}
+
+#[test]
 fn floors_default_to_the_outline_of_the_walls() {
     let mut s = Session::new();
     house(&mut s);

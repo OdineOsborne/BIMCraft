@@ -1959,6 +1959,15 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "{} aperture erano più alte del muro in cui stanno e sono state lasciate fuori.",
     ],
     ["Take the lines that stand alone too", "Prendi anche le linee che stanno da sole"],
+    ["Place the rooms too", "Metti anche i locali"],
+    ["Place Rooms", "Metti i locali"],
+    [
+        "Place Rooms Automatically: a room in every area the walls of this plan shut in that has none",
+        "Metti i locali in automatico: un locale in ogni area che i muri di questa pianta chiudono e che non ne ha",
+    ],
+    ["Place Rooms Automatically: open a plan first", "Metti i locali in automatico: apri prima una pianta"],
+    ["{} rooms placed.", "{} locali messi."],
+    ["{} walls and {} rooms built from {}.", "{} muri e {} locali costruiti da {}."],
     [
         "{} lines met no wall of the building and were left out.",
         "{} linee non incontrano nessun muro dell'edificio e sono state lasciate fuori.",

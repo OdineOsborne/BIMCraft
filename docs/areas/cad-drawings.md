@@ -130,11 +130,19 @@ Six rules keep it from finding walls where there are none, and each of them was 
   the same way. What it costs is the wall of two equal leaves, which stays what the nearest pair makes of it.
 - **An axis is stretched, never shortened to nothing.** The faces that make a wall stop half a wall short of a corner,
   so the axis between them does too; an end within half the thickness of another wall's axis is taken to the crossing.
-  An end whose crossing would leave less than half the wall, or turn it round, is left where it was.
+  The crossing it is taken to is the one the two walls have least to go to meet, and not simply the one nearest the
+  end: on the survey this was written against a wall runs north from 60 inside the north-east corner, so its axis
+  passes through the end of the top wall exactly, and taking the nearest crossing held that end 60 short of the
+  corner and left the building open — which is a building with no rooms in it. An end whose crossing would leave
+  less than half the wall, or turn it round, is left where it was.
 
 ## The openings in those walls
 
-Pieces of one wall, where the drawing broke a face in two, are joined where they touch. A gap that is left is a
+Pieces of one wall, where the drawing broke a face in two, are joined where they touch, or where the gap between
+them is too narrow to walk through — under `NARROWEST`, below — because that is where the drawing broke the line and
+not where it left a doorway. The two halves of one wall drawn on two layers break at different places, and on the
+survey this was written against the top wall of the house is drawn in five pieces whose faces stagger by up to 180:
+joined, it is one wall 8.6 m long, and the house has a top to it. A gap that is left is a
 doorway, and a doorway is not a gap between two walls but a door in one wall, which is what the building is: the two
 pieces are made one wall and `Hole` records the opening in it. A survey marks an opening the other way too, carrying
 the wall's faces across it and drawing two lines across the wall at the jambs, and that is read as well — but only
@@ -150,6 +158,17 @@ all, so an arc is not looked for. A line that runs more than half the length of 
 axis is the wall's own and no glass (`runs_along`): the line between a wall's two leaves lies inside its thickness
 from end to end, so without that the pier between two windows reads as a window itself.
 
+**A wall that stops short of the wall it runs into has a doorway at its end** (`trace::open_ends`). The piece of
+wall between a door and the corner is a few centimetres long, which is shorter than anything a draughtsman draws as a
+wall's face, so the drawing shows the wall ending at the door — and a building is a wall with a door in it, not a wall
+that stops in mid-air. So an end that holds on to nothing and stands within a doorway's width (`DOORWAY`, 1,200 mm: a
+double door, and wider than that the one room is open to the next) of the wall it was going to meet is taken to it,
+and what is left between where it stopped and the face of that wall is the opening. What says the wall carries on is
+the drawing itself: one of its own two faces drawn across the gap (`face_across`, four fifths of it), where the wall
+between the two faces was too short to be read. Without that nothing is built across a room that nothing was drawn
+across — and with `WIDEST` in place of `DOORWAY` that one survey gained 8.6 m of wall it does not have, and a pair of
+two-metre doorways where its two faces merely stagger.
+
 An opening is between `NARROWEST` (500 mm) and `WIDEST` (3,000 mm) wide — narrower is where the drawing broke a line,
 wider is where a wall stops — and those, like `INSIDE`, are measures of buildings and not the user's to set. A plan
 gives no heights, so a door is built 2,100 high and a window 1,500 high on a 900 sill, which are the sizes the
@@ -162,7 +181,7 @@ is: two walls with a gap between them.
 
 What the pairing leaves is then tidied of three things that pair as a wall does and are no wall of the building
 (`trace::tidy`). None of them was thought of in advance: each is what the survey this was written against actually
-draws, and together they take 30 pairs down to 24 walls.
+draws, and together they take what the pairing leaves down to the walls the house has.
 
 - **Nothing is a wall across itself.** A pair shorter than it is far apart is a pier drawn as a box, a plinth, a
   chimney, or the two jambs of an opening read as a pair of faces — on that survey, lines 262 long and 542 apart. The
@@ -176,8 +195,8 @@ draws, and together they take 30 pairs down to 24 walls.
   building too: the boundary of the plot, the kerb of the road, the neighbour's wall, the lines the surveyor took his
   levels along. Those hold on to nothing, so a wall that meets none of the others (`trace::joined`, an end within half
   the two thicknesses of the other's own stretch, which is where the axes have already been taken) is left out and
-  counted in `alone` — on that survey a boundary 13.6 m long, one 4 m long across the plot, and two lines of the
-  surveyor's own. `alone: true` takes them, for a survey of a garden wall or a boundary to be built. Unless nothing in
+  counted in `alone` — on that survey five lines: a boundary 13.6 m long, one across the plot, and the lines the
+  surveyor took his levels along. `alone: true` takes them, for a survey of a garden wall or a boundary to be built. Unless nothing in
   the drawing meets anything at all, when the drawing is of a wall or two rather than of a building and every one of
   them is taken.
 
@@ -199,11 +218,40 @@ against says `$INSUNITS` millimetres and is drawn in metres, so its longest line
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
-9 ms, finding 24 walls, 3 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
+9 ms, finding 20 walls, 5 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
 so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about
-2.1 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
+2.6 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
 them as well takes it to about 10 s, because `glazed_openings` weighs every line of the drawing against every wall
 found; that is where to look first if a big drawing is ever to be traced quickly.
+
+## The rooms those walls shut in
+
+A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
+area the walls of a level shut in, which is a bounded face of the planar graph their centre lines make
+(`geom::regions`, `Model::enclosures`), with the separate pieces standing inside it — a shaft, a duct — as its
+islands. That is the same geometry a room has always used to measure itself (`geom::region_at`, the boundary from the
+walls around a room's point, Revit's "At wall centerline"), asked the other way round: not *what is around this
+point* but *where are all the areas*, in one pass over the drawing instead of one pass for each room.
+
+**Place Rooms Automatically** (`place_rooms`, Revit's own tool, which has no shortcut there either; in the window it
+is **Place Rooms**, beside Room on the Architecture tab, and it fills the plan on screen) puts a room in
+every one of them that holds none. Each room is placed at its region's `middle`: its centre of area, which is where
+anyone would point at a room, or — where the region bends round that, as an L-shaped room does, or an island stands
+on it — the middle of the largest triangle its outline cuts into, and failing that a step in from its longest edge,
+which is what is left of a room that runs all the way round a core. They are numbered from the back of the plan to
+the front and from the left across, as a plan is read.
+
+Two things are passed over and counted rather than placed. An area that already holds a room is that room's
+(`held`), so the command can be asked again after a wall is drawn by hand and only the new rooms appear — which is
+how a survey that leaves a gap is finished off. And an area smaller than `SMALLEST_ROOM` (a quarter of a square
+metre, which is a duct's shaft and the least of a building that is anywhere at all) is counted in `small`: it is the
+sliver two walls leave between their centre lines where one is drawn a hair off the other, and no room.
+
+`trace_walls` takes `rooms` and does the same with the walls it has just built, in the one command, so one undo step
+takes the lot back. On the survey this was written against that gives two rooms, 8.06 m² and 58.56 m², which is the
+main block of the house in two; the rest of it stays open, because the survey draws partitions that stop two metres
+short of the walls they run into and nothing is built across a gap that wide. A wall drawn by hand across one of
+those, and `place_rooms` again, is what finishes it.
 
 ## The window: Trace Walls
 
@@ -222,12 +270,14 @@ is not drawn is not traced either, which is how a surveyor's own layers — leve
 out of the walls.
 
 **Walls** is what to look for (`How`, as above), whether to find the openings as well, whether to take the lines that
-stand alone too, the wall type every wall is to
+stand alone too, whether to place the rooms too, the wall type every wall is to
 come in as or `By thickness`, and two buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
 much it found of what thickness, type and phase, how many doors and windows, and how many lines it left out for
 meeting no wall of the building, and draws it all over the plan — each
 wall a band as thick as it measured with its axis down it, each opening a lighter stretch of that band, with a line
-down the middle of a window and none down a door. **Build** builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
+down the middle of a window and none down a door. **Build** builds them, places the rooms if they were asked for, says how many of each, and closes. Asking for the
+rooms does not drop what was found, because the rooms are of the walls and not of the drawing: a Find builds nothing,
+so it places nothing either. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
 

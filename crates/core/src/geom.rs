@@ -326,6 +326,43 @@ impl Region {
     pub fn perimeter(&self) -> f64 {
         perimeter(&self.outer) + self.holes.iter().map(|h| perimeter(h)).sum::<f64>()
     }
+
+    /// Whether `p` is in it: inside its outer ring and in none of the islands standing in it.
+    pub fn holds(&self, p: P2) -> bool {
+        contains(&self.outer, p) && !self.holes.iter().any(|h| contains(h, p))
+    }
+
+    /// A point inside it, where a room goes: its centre of area, which is the middle of a room as anyone would
+    /// point at it. Where the region bends round that — an L-shaped room — or an island stands on it, the middle
+    /// of the largest triangle its outline cuts into instead, and failing that a step in from its longest edge,
+    /// which is what is left of a room that runs round a core. `None` for a region that holds nothing.
+    pub fn middle(&self) -> Option<P2> {
+        let pt = |i: usize| self.outer.get(i).copied().unwrap_or_default();
+        let mut tris: Vec<[P2; 3]> = triangulate(&self.outer).into_iter().map(|t| t.map(pt)).collect();
+        tris.sort_by(|a, b| area(b).abs().total_cmp(&area(a).abs()));
+        let mut edges: Vec<(P2, P2)> = ring_edges(&self.outer).collect();
+        edges.sort_by(|a, b| b.0.dist(b.1).total_cmp(&a.0.dist(a.1)));
+        // A ring is counter-clockwise, so what it holds is to the left of each of its edges.
+        let inward = edges.into_iter().flat_map(|(a, b)| {
+            let (mid, side, len) = ((a + b) * 0.5, (b - a).unit().perp(), a.dist(b));
+            [0.25, 0.05, 0.01].map(move |part| mid + side * (len * part))
+        });
+        centre(&self.outer)
+            .into_iter()
+            .chain(tris.iter().map(|t| (t[0] + t[1] + t[2]) * (1.0 / 3.0)))
+            .chain(inward)
+            .find(|p| p.is_finite() && self.holds(*p))
+    }
+}
+
+/// A ring's centre of area. `None` for one that encloses nothing.
+fn centre(ring: &[P2]) -> Option<P2> {
+    let a = area(ring);
+    if a.abs() <= f64::EPSILON {
+        return None;
+    }
+    let sum = ring_edges(ring).fold(P2(0.0, 0.0), |acc, (p, q)| acc + (p + q) * p.cross(q));
+    Some(sum * (1.0 / (6.0 * a))).filter(|c| c.is_finite())
 }
 
 /// The region around `p`: the smallest loop of segments enclosing it, minus any separate pieces
@@ -333,14 +370,29 @@ impl Region {
 pub fn region_at(segs: &[(P2, P2)], p: P2, tol: f64) -> Option<Region> {
     let all = faces(segs, tol);
     let outer = all.iter().filter(|f| area(f) > tol * tol && contains(f, p)).min_by(|a, b| area(a).total_cmp(&area(b)))?;
-    // Outlines of other pieces lying inside it; ours is the one around `p`.
-    let islands: Vec<&Vec<P2>> = all.iter().filter(|f| area(f) < 0.0 && !contains(f, p) && f.iter().all(|q| contains(outer, *q))).collect();
+    Some(region_in(&all, outer))
+}
+
+/// Every region the segments enclose, each with the pieces standing inside it as its islands: the areas a plan of
+/// walls shuts in, which is where the rooms of a building are. One pass over the drawing, where asking [`region_at`]
+/// room by room is a pass for each.
+pub fn regions(segs: &[(P2, P2)], tol: f64) -> Vec<Region> {
+    let all = faces(segs, tol);
+    all.iter().filter(|f| area(f) > tol * tol).map(|outer| region_in(&all, outer)).collect()
+}
+
+/// The region `outer` bounds, given every face around it: the outlines of the pieces lying inside it are its
+/// islands. A piece that is a single loop has its outline and its inner face for one ring, and a ring encloses as
+/// much as itself, so an island is a ring that encloses less.
+fn region_in(all: &[Vec<P2>], outer: &[P2]) -> Region {
+    let room = area(outer);
+    let islands: Vec<&Vec<P2>> = all.iter().filter(|f| area(f) < 0.0 && -area(f) < room && f.iter().all(|q| contains(outer, *q))).collect();
     let holes = islands
         .iter()
         .filter(|h| !islands.iter().any(|o| !std::ptr::eq(*o, **h) && h.iter().all(|q| contains(o, *q))))
         .map(|h| h.iter().rev().copied().collect())
         .collect();
-    Some(Region { outer: outer.clone(), holes })
+    Region { outer: outer.to_vec(), holes }
 }
 
 #[cfg(test)]
@@ -461,6 +513,56 @@ mod tests {
         let shaft = region_at(&segs, P2(4200.0, 4200.0), 1.0).unwrap();
         assert_eq!(shaft.area(), 3e6);
         assert!(region_at(&segs, P2(-10.0, 5.0), 1.0).is_none());
+    }
+
+    #[test]
+    fn every_enclosed_area_is_a_region_of_its_own_with_a_point_inside_it() {
+        let mut segs = rect(0.0, 0.0, 6000.0, 4000.0);
+        segs.push((P2(2000.0, 0.0), P2(2000.0, 4000.0)));
+        let found = regions(&segs, 1.0);
+        let mut said: Vec<f64> = found.iter().map(|r| r.area()).collect();
+        said.sort_by(f64::total_cmp);
+        assert_eq!(said, vec![8e6, 16e6], "the outside of the loop is no region");
+        for r in &found {
+            let p = r.middle().unwrap();
+            assert!(r.holds(p), "{p:?} is not in {:?}", r.outer);
+            assert_eq!(region_at(&segs, p, 1.0).map(|at| at.area()), Some(r.area()), "the region at its own point is itself");
+        }
+    }
+
+    #[test]
+    fn a_region_round_an_island_holds_it_as_a_hole_and_the_island_is_a_region_too() {
+        let mut segs = rect(0.0, 0.0, 10000.0, 10000.0);
+        segs.extend(rect(4000.0, 4000.0, 6000.0, 6000.0));
+        let found = regions(&segs, 1.0);
+        let mut said: Vec<f64> = found.iter().map(|r| r.area()).collect();
+        said.sort_by(f64::total_cmp);
+        assert_eq!(said, vec![4e6, 96e6]);
+        let hall = found.iter().find(|r| r.area() > 50e6).unwrap();
+        assert_eq!(hall.holes.len(), 1, "the island standing in it");
+        // Its centre of area is in the island, so the point is not there.
+        let p = hall.middle().unwrap();
+        assert!(hall.holds(p), "{p:?}");
+        assert_eq!(region_at(&segs, p, 1.0).map(|at| at.area()), Some(96e6));
+    }
+
+    #[test]
+    fn the_point_inside_a_room_is_its_centre_unless_the_room_bends_round_it() {
+        let plain = |outer: Vec<P2>| Region { outer, holes: Vec::new() };
+        let sq = plain(vec![P2(0.0, 0.0), P2(4000.0, 0.0), P2(4000.0, 2000.0), P2(0.0, 2000.0)]);
+        assert!(sq.middle().unwrap().dist(P2(2000.0, 1000.0)) < 1e-6);
+        // An L: its centre of area falls in the corner it is cut out of, so the point is elsewhere.
+        let l = plain(vec![P2(0.0, 0.0), P2(6000.0, 0.0), P2(6000.0, 1000.0), P2(1000.0, 1000.0), P2(1000.0, 6000.0), P2(0.0, 6000.0)]);
+        let p = l.middle().unwrap();
+        assert!(l.holds(p), "{p:?}");
+        assert!(plain(vec![P2(0.0, 0.0), P2(1.0, 0.0)]).middle().is_none(), "two points enclose nothing");
+        // A room that runs all the way round a core: its centre and every triangle of its outline are in the hole.
+        let mut segs = rect(0.0, 0.0, 10000.0, 10000.0);
+        segs.extend(rect(400.0, 400.0, 9600.0, 9600.0));
+        let band = regions(&segs, 1.0).into_iter().find(|r| !r.holes.is_empty()).unwrap();
+        let p = band.middle().unwrap();
+        assert!(band.holds(p), "{p:?}");
+        assert_eq!(region_at(&segs, p, 1.0).map(|at| at.area()), Some(band.area()));
     }
 
     #[test]

@@ -835,7 +835,10 @@ fn the_level_and_grid_tools_add_datums() {
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run();
     assert_eq!(h.state().sheet, Sheet::Plan(100000));
-    tool(&mut h, "Grid");
+    // Grid is the last button of the Architecture tab, which is wider than the window.
+    press(&mut h, "Architecture");
+    scroll_ribbon_right(&mut h);
+    press(&mut h, "Grid");
     click(&mut h, P2(-3000.0, -3000.0));
     click(&mut h, P2(-3000.0, 3000.0));
     let grid = ids(&h, "grid");

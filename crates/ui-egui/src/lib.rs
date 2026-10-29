@@ -2490,6 +2490,18 @@ impl BimApp {
         });
     }
 
+    /// Place Rooms Automatically: a room in every area the walls of the plan on screen shut in that holds none.
+    fn place_rooms(&mut self) {
+        let Some(level) = self.plan_level() else {
+            self.status = Status { text: t("Place Rooms Automatically: open a plan first").to_string(), error: true };
+            return;
+        };
+        if let Some(reply) = self.run("place_rooms", json!({"level": level})) {
+            let rooms = reply["rooms"].as_u64().unwrap_or(0).to_string();
+            self.status = Status { text: tf("{} rooms placed.", &[&rooms]), error: false };
+        }
+    }
+
     /// Show Mass (MH): the masses in the view on screen, hidden if they show and shown if they're hidden.
     fn show_mass(&mut self) {
         match self.graphic_view() {
@@ -2557,7 +2569,26 @@ impl BimApp {
                 ),
             ],
         );
-        self.tools(ui, "Room & Area", &[(Icon::Room, "Room", "Room (RM): click inside walls", Tool::Room)]);
+        // Room places one, where Place Rooms places them all: the second is no tool, because there is nothing to
+        // click — the walls have already said where the rooms are.
+        let mut placing = false;
+        panel(ui, "Room & Area", |ui| {
+            let tip = "Room (RM): click inside walls";
+            if big_button(ui, Icon::Room, "Room", structure::same_tool(&self.tool, &Tool::Room), tip).clicked() {
+                self.set_tool(Tool::Room);
+            }
+            placing = big_button(
+                ui,
+                Icon::Room,
+                "Place Rooms",
+                false,
+                "Place Rooms Automatically: a room in every area the walls of this plan shut in that has none",
+            )
+            .clicked();
+        });
+        if placing {
+            self.place_rooms();
+        }
         self.tools(
             ui,
             "Opening",

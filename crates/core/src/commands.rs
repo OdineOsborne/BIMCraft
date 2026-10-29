@@ -167,7 +167,7 @@ pub static ALL: &[Command] = &[
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
         // open (`LC` for Link CAD), and nothing in the window traces a drawing yet.
         &[],
-        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, preview?} the walls of the \
+        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, rooms?, preview?} the walls of the \
          drawing under a plan, built. A survey draws a wall as its two faces, so a pair of lines running alongside one \
          another a wall\'s thickness apart is a wall: one wall is built down the middle of each pair, as thick as the \
          pair measured. `underlay` is which drawing to read (the only one there is, unless there are several); the \
@@ -194,7 +194,8 @@ pub static ALL: &[Command] = &[
          boundary of the plot, the kerb of the road, the lines the surveyor took his levels along \u{2014} and a wall \
          of a building meets another wall, so a wall that meets none of the others is left out and counted in \
          `alone`; `alone: true` takes them as well, for a survey of a garden wall or a boundary to be built. \
-         `preview` \
+         `rooms` places a room in every area the walls it built shut in, as Place Rooms Automatically does, and \
+         says how many in `rooms` and what they measure together in `room_area_m2`. `preview` \
          finds and reports and builds nothing, and says in `holes` where each opening runs ({kind, width, \
          thickness, from, to}). Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
          walls, made}, …], `doors`, `windows`, `opening_ids`, `openings` [{kind, width, type, openings, made}, \
@@ -372,6 +373,14 @@ pub static ALL: &[Command] = &[
         show_mass,
     ),
     edit("room", "Room", &["RM"], "{point: [x,y], level?, name?, number?} bounded by the walls around the point", room),
+    edit(
+        "place_rooms",
+        "Place Rooms Automatically",
+        // No shortcut: Revit gives this one none either, and `RM` belongs to Room, which places one by hand.
+        &[],
+        "{level?, name?} a room in every area the walls of a level shut in that has none: the rooms of a building,          from the walls of it. An area a room stands in already is that room's and is counted in `held`, so asking          again places the rooms of the walls just built and leaves the rest alone; one too small to be anywhere a          person can be is no room and is counted in `small`, which is the sliver two walls leave between their          centre lines where one is drawn a hair off the other. Each room is `name` (the project's word for a room          unless it says) and numbered from the back of the plan to the front and from the left across, and measured          at the wall centre lines as a room is, less any island standing in it. Returns `rooms`, `ids`, `areas_m2`          and `area_m2`, all of them together",
+        place_rooms,
+    ),
     edit(
         "column",
         "Column",
@@ -2122,6 +2131,10 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             _ => flag(c, p, "alone")?,
         },
     };
+    let rooms = match p.get("rooms") {
+        v if absent(v) => false,
+        _ => flag(c, p, "rooms")?,
+    };
     let given = string(c, p, "type")?;
     if let Some(name) = &given
         && !s.model.types.wall.contains_key(name)
@@ -2330,6 +2343,15 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     out["opening_ids"] = json!(holes_made);
     if too_high > 0 {
         out["too_high"] = json!(too_high);
+    }
+    // The rooms the walls just built shut in, placed with them: one command, so one undo step takes the lot back.
+    if rooms {
+        let name = s.model.language.word("Room").to_string();
+        let (ids, areas, _, _) = fill_rooms(s, level, &name);
+        let total: f64 = areas.iter().sum();
+        out["rooms"] = json!(ids.len());
+        out["room_ids"] = json!(ids);
+        out["room_area_m2"] = json!(m2(total));
     }
     Ok(out)
 }
@@ -4386,6 +4408,73 @@ fn room(s: &mut Session, p: &Value) -> R {
     let area = m2(region.area());
     let id = s.model_mut().insert(Element::Room(r));
     Ok(json!({"id": id, "number": number, "area_m2": area}))
+}
+
+/// The smallest area Place Rooms Automatically puts a room in: a quarter of a square metre, which is a duct's
+/// shaft, and the least of a building that is anywhere at all. What is smaller is the sliver two walls leave
+/// between their centre lines where one is drawn a hair off the other, and a room that small is placed by hand.
+const SMALLEST_ROOM: f64 = 250_000.0;
+
+fn place_rooms(s: &mut Session, p: &Value) -> R {
+    let c = "place_rooms";
+    let level = level_param(c, &s.model, p, "level")?;
+    let name = match string(c, p, "name")? {
+        Some(n) => n,
+        None => s.model.language.word("Room").to_string(),
+    };
+    let (ids, areas, held, small) = fill_rooms(s, level, &name);
+    let total: f64 = areas.iter().sum();
+    let areas: Vec<f64> = areas.iter().map(|a| m2(*a)).collect();
+    Ok(json!({"rooms": ids.len(), "ids": ids, "areas_m2": areas, "area_m2": m2(total), "held": held, "small": small}))
+}
+
+/// A room in every area the walls of `level` shut in that holds none: what Place Rooms Automatically does, and what
+/// Trace Walls does with the walls it has just built. Gives back what it made, what each measures, and how many
+/// areas it left to the rooms already standing in them or passed over as too small to be a room.
+fn fill_rooms(s: &mut Session, level: Guid, name: &str) -> (Vec<Id>, Vec<f64>, usize, usize) {
+    let m = &s.model;
+    let rooms = || {
+        m.elements.values().filter_map(|e| match e {
+            Element::Room(r) => Some(r),
+            _ => None,
+        })
+    };
+    // Where a room stands already, the area around it is that room's and no second room goes in it.
+    let standing: Vec<P2> = rooms().filter(|r| r.level == level).map(|r| r.point).collect();
+    let mut numbers: Vec<String> = rooms().map(|r| r.number.clone()).collect();
+    // Numbered as a plan is read: from the back of the building to the front, and from the left across.
+    let mut found: Vec<(geom::Region, P2)> = m
+        .enclosures(level)
+        .into_iter()
+        .filter_map(|r| {
+            let middle = r.middle()?;
+            Some((r, middle))
+        })
+        .collect();
+    found.sort_by(|(_, a), (_, b)| b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0)));
+    let (mut held, mut small) = (0usize, 0usize);
+    let mut placing: Vec<(P2, String, f64)> = Vec::new();
+    for (region, point) in &found {
+        if standing.iter().any(|q| region.holds(*q)) {
+            held += 1;
+            continue;
+        }
+        let area = region.area();
+        if area < SMALLEST_ROOM {
+            small += 1;
+            continue;
+        }
+        let number = next_number(numbers.iter().map(String::as_str));
+        numbers.push(number.clone());
+        placing.push((*point, number, area));
+    }
+    let areas: Vec<f64> = placing.iter().map(|(_, _, a)| *a).collect();
+    let m = s.model_mut();
+    let ids: Vec<Id> = placing
+        .into_iter()
+        .map(|(point, number, _)| m.insert(Element::Room(Room { params: Default::default(), level, point, name: name.into(), number })))
+        .collect();
+    (ids, areas, held, small)
 }
 
 /// Of the lines a plan of `level` shows that `keep` takes (walls' faces, centre lines and ends,

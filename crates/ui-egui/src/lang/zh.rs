@@ -1668,6 +1668,15 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["{} {} and {} {}.", "{} {}，{} {}。"],
     ["{} openings stood higher than the wall they are in and were left out.", "{} 个洞口高过所在的墙，已被略去。"],
     ["Take the lines that stand alone too", "连独自存在的线也一并取用"],
+    ["Place the rooms too", "同时放置房间"],
+    ["Place Rooms", "放置房间"],
+    [
+        "Place Rooms Automatically: a room in every area the walls of this plan shut in that has none",
+        "自动放置房间：本平面图中墙体围合而尚无房间的每一块区域各放一个房间",
+    ],
+    ["Place Rooms Automatically: open a plan first", "自动放置房间：请先打开一张平面图"],
+    ["{} rooms placed.", "已放置 {} 个房间。"],
+    ["{} walls and {} rooms built from {}.", "{} 道墙和 {} 个房间，已从 {} 建出。"],
     ["{} lines met no wall of the building and were left out.", "{} 条线未与建筑的任何墙相接，已被略去。"],
     ["{} of them meet no wall of the building.", "其中 {} 条未与建筑的任何墙相接。"],
 ];

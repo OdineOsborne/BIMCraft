@@ -3437,6 +3437,13 @@ impl Model {
         geom::region_at(&self.bounding_lines(r.level), r.point, TOL)
     }
 
+    /// Every area the walls of `level` shut in, which is where its rooms are: each with the pieces standing inside
+    /// it as its islands, and measured at the wall centre lines as a room is. What Place Rooms Automatically puts a
+    /// room in, one in each.
+    pub fn enclosures(&self, level: impl Key) -> Vec<Region> {
+        geom::regions(&self.bounding_lines(level), TOL)
+    }
+
     /// Everything that must hold between commands: references resolve, geometry is finite and
     /// not degenerate, doors and windows fit their walls and don't overlap.
     pub fn check(&self) -> Result<(), String> {

@@ -2728,6 +2728,20 @@ const WORDS: &[[&str; 3]] = &[
         "{} vanos quedaban más altos que el muro en que están y se dejaron fuera.",
     ],
     ["Take the lines that stand alone too", "Pegar também as linhas que ficam sozinhas", "Tomar también las líneas que quedan solas"],
+    ["Place the rooms too", "Colocar também os ambientes", "Colocar también los recintos"],
+    ["Place Rooms", "Colocar ambientes", "Colocar recintos"],
+    [
+        "Place Rooms Automatically: a room in every area the walls of this plan shut in that has none",
+        "Colocar Ambientes Automaticamente: um ambiente em cada área que as paredes desta planta fecham e que não tem nenhum",
+        "Colocar Recintos Automáticamente: un recinto en cada área que los muros de este plano cierran y que no tiene ninguno",
+    ],
+    [
+        "Place Rooms Automatically: open a plan first",
+        "Colocar Ambientes Automaticamente: abra primeiro uma planta",
+        "Colocar Recintos Automáticamente: abre primero un plano",
+    ],
+    ["{} rooms placed.", "{} ambientes colocados.", "{} recintos colocados."],
+    ["{} walls and {} rooms built from {}.", "{} paredes e {} ambientes construídos de {}.", "{} muros y {} recintos construidos de {}."],
     [
         "{} lines met no wall of the building and were left out.",
         "{} linhas não encontraram nenhuma parede do edifício e foram deixadas de fora.",

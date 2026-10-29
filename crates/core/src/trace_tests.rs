@@ -78,6 +78,36 @@ fn a_room_drawn_as_the_two_faces_of_its_walls_becomes_four_walls_that_meet_at_it
 }
 
 #[test]
+fn the_rooms_the_walls_shut_in_are_placed_with_them_when_they_are_asked_for() {
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    // A partition across it, 100 thick, from the one wall to the other.
+    lines.push(("MURI".to_string(), [300.0, 2950.0, 7700.0, 2950.0]));
+    lines.push(("MURI".to_string(), [300.0, 3050.0, 7700.0, 3050.0]));
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(out["walls"], json!(5), "{out}");
+    assert!(out["rooms"].is_null(), "no rooms unless they are asked for: {out}");
+    assert!(ids(&s, "room").is_empty());
+    // Asked for, each area the walls shut in holds a room, and they are the walls' own areas.
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({"rooms": true})).expect("it traces");
+    assert_eq!((out["walls"].as_u64(), out["rooms"].as_u64()), (Some(5), Some(2)), "{out}");
+    let mut areas: Vec<f64> = s
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Room(r) => Some(s.model.room_region(r)?.area()),
+            _ => None,
+        })
+        .collect();
+    areas.sort_by(f64::total_cmp);
+    // The room is 7700 by 5700 at the wall centre lines, and the partition down the middle halves it.
+    assert_eq!(areas, vec![21.945e6, 21.945e6], "{areas:?}");
+    assert_eq!(out["room_ids"].as_array().map(Vec::len), Some(2), "{out}");
+}
+
+#[test]
 fn a_face_takes_the_face_across_the_wall_and_not_the_one_across_the_room() {
     // A corridor 600 wide between two walls 100 thick: every distance from 100 to 800 is there to be mistaken for a
     // wall, and only the two 100s are walls.

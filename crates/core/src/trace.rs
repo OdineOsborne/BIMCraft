@@ -36,7 +36,9 @@
 //! is the wall and this line is a face like any other — and where it does not lie halfway between them, which is a
 //! ladder's rung. A lining and a cavity's inner leaf read the same way.
 //!
-//! Pieces of one wall, where the drawing broke a face in two, are joined where they touch. A gap that is left is a
+//! Pieces of one wall, where the drawing broke a face in two, are joined where they touch, or where what is left
+//! between them is too narrow to walk through: that is where the drawing broke the line and not where it left a
+//! doorway, and the two halves of one wall drawn on two layers break at different places. A gap that is left is a
 //! doorway, and [`Hole`] is what becomes of it: the two pieces are made one wall with an opening in it, which is what
 //! a building is — a wall with a door in it, not two walls with a space between them. A survey marks an opening the
 //! other way too, carrying the wall's faces across it and drawing the glass down the middle between two lines at the
@@ -47,8 +49,19 @@
 //! two windows would be a window itself. A plan says nothing of heights, so what is built takes the project's own
 //! door and window sizes.
 //!
+//! A wall that stops short of the wall it runs into has a doorway at its end ([`open_ends`]). The piece of wall
+//! between a door and the corner is a few centimetres long, which is shorter than anything drawn as a wall's face,
+//! so the drawing shows the wall ending at the door — and a building is a wall with a door in it, not a wall that
+//! stops in mid-air. An end that holds on to nothing and stands within a doorway's width of the wall it was going
+//! to meet is taken to it, and what is left between where it stopped and the face of that wall is the opening.
+//! What says the wall carries on is the drawing itself: one of its own two faces drawn across the gap, where the
+//! wall between the two faces was too short to be read. Without that nothing is built across a room that nothing
+//! was drawn across.
+//!
 //! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
-//! axis it was going to meet.
+//! axis it was going to meet — the one the two of them have least to go to meet, and not simply the crossing
+//! nearest the end, which a third wall whose axis runs through that end may hold it at while the corner stays
+//! open.
 //!
 //! Then what is left is tidied of three things that pair as a wall does and are none ([`tidy`]). A block shorter than
 //! it is thick is no wall, because nothing is a wall across itself: a pier drawn as a box, a plinth, the two jambs of
@@ -74,6 +87,11 @@ const INSIDE: f64 = 200.0;
 /// line, and one wider is where a wall stops. Measures of buildings, like [`INSIDE`], not the user's to set.
 pub const NARROWEST: f64 = 500.0;
 pub const WIDEST: f64 = 3000.0;
+
+/// The widest gap a wall may stop short of the wall it runs into and still be taken to it: a double door, which is
+/// the widest thing a building calls a doorway. Where a wall stops wider of another than that, the one room is open
+/// to the next, and an opening is not what that is.
+const DOORWAY: f64 = 1200.0;
 
 /// The most faces of a drawing weighed. Every pair of them is, so the work is the square of this: a drawing with more
 /// lines as long as a wall than this is refused, rather than taking an afternoon over it.
@@ -420,6 +438,7 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
         false => Vec::new(),
     };
     if how.openings {
+        holes.extend(open_ends(&mut walls, marks, how));
         holes.extend(glazed_openings(&walls, marks, how));
     }
     meet(&mut walls, how);
@@ -464,12 +483,16 @@ fn kept(walls: &[Found], keep: &[bool]) -> Vec<Found> {
 /// Whether these two walls meet: an end of either within half of the two thicknesses of the other's own stretch,
 /// which is where [`meet`] has already taken the axes that cross. A corner, a T, or one running into another.
 fn joined(a: &Found, b: &Found) -> bool {
+    // Within half of each of their thicknesses of one another, as the true distance and not a box about the wall,
+    // or two lines that pass a corner wide of each other hold one another up.
     let reach = (a.thickness + b.thickness) / 2.0;
-    let close = |w: &Found, p: P2| {
-        let (along, off) = on(w, p);
-        off.hypot((-along).max(along - w.length()).max(0.0)) <= reach
-    };
-    [a.start, a.end].iter().any(|p| close(b, *p)) || [b.start, b.end].iter().any(|p| close(a, *p))
+    [a.start, a.end].iter().any(|p| away(b, *p) <= reach) || [b.start, b.end].iter().any(|p| away(a, *p) <= reach)
+}
+
+/// How far `p` lies from a wall: its distance to the stretch of the wall's axis, not to the line through it.
+fn away(w: &Found, p: P2) -> f64 {
+    let (along, off) = on(w, p);
+    off.hypot((-along).max(along - w.length()).max(0.0))
 }
 
 /// Whether one of these walls is drawn in the place of the other: alongside it over most of the shorter of them, with
@@ -542,6 +565,31 @@ fn runs_along(wall: &Found, marks: &[(P2, P2)], off: f64, how: &How) -> f64 {
     run
 }
 
+/// Whether the drawing carries one of the wall's faces across the stretch `from..to` of its axis, which may lie
+/// beyond the wall's own ends: the face of a wall is drawn past the door at the end of it, though the piece of wall
+/// left there is too short to be read as a face of its own.
+fn face_across(wall: &Found, marks: &[(P2, P2)], from: f64, to: f64, how: &How) -> bool {
+    let half = wall.thickness / 2.0;
+    let slack = how.slack(wall.thickness);
+    [half, -half].iter().any(|face| {
+        let mut spans: Vec<(f64, f64)> = marks
+            .iter()
+            .filter_map(|(p, q)| {
+                let (o0, o1, lo, hi) = axiswise(wall, *p, *q, how)?;
+                (((o0 + o1) / 2.0 - face).abs() <= slack).then(|| (lo.max(from), hi.min(to)))
+            })
+            .filter(|(lo, hi)| hi > lo)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut drawn, mut far) = (0.0, f64::NEG_INFINITY);
+        for (lo, hi) in spans {
+            drawn += (hi - lo.max(far)).max(0.0);
+            far = far.max(hi);
+        }
+        drawn >= (to - from) * 0.8
+    })
+}
+
 /// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
 /// each opening, how wide, and whether it is a window.
 fn open_up(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
@@ -586,6 +634,72 @@ fn open_up(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) -> Vec<(P2, f6
                 walls.remove(j);
                 again = true;
                 break 'pairs;
+            }
+        }
+    }
+    holes
+}
+
+/// A doorway at the end of a wall, where the drawing leaves the wall stopping short of the wall it runs into. The
+/// piece of wall between a door and the corner is a few centimetres long, which is shorter than anything drawn as a
+/// wall's face, so the drawing shows the wall ending at the door; and a building is a wall with a door in it, not a
+/// wall that stops in mid-air. So an end that holds on to nothing and stands within an opening's width of the wall
+/// it was going to meet is taken to it, and what is left between where it stopped and the face of that wall is the
+/// opening. The gap between two pieces of one wall is [`open_up`]'s; this is the gap at a corner. What it found: the
+/// middle of each opening, how wide, and whether it is a window.
+fn open_ends(walls: &mut [Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64, bool)> {
+    let was: Vec<Found> = walls.to_vec();
+    let square = how.skew.to_radians().sin();
+    let mut holes = Vec::new();
+    for (i, wall) in walls.iter_mut().enumerate() {
+        for far in [false, true] {
+            let mine = &was[i];
+            let (p, out) = match far {
+                true => (mine.end, mine.dir()),
+                false => (mine.start, mine.dir() * -1.0),
+            };
+            // An end that holds on to a wall is a corner already, and no doorway.
+            if was.iter().enumerate().any(|(j, other)| j != i && away(other, p) <= (mine.thickness + other.thickness) / 2.0) {
+                continue;
+            }
+            // The nearest wall it was going to meet, a doorway's width away and within that wall's own stretch.
+            let mut best: Option<(f64, P2, f64)> = None;
+            for (j, other) in was.iter().enumerate() {
+                if j == i || mine.dir().cross(other.dir()).abs() <= square {
+                    continue;
+                }
+                let Some(at) = crate::geom::line_intersection(mine.start, mine.end, other.start, other.end) else {
+                    continue;
+                };
+                let gap = out.dot(at - p);
+                let s = other.dir().dot(at - other.start);
+                if !(NARROWEST..=DOORWAY).contains(&gap) || s < 0.0 || s > other.length() {
+                    continue;
+                }
+                if best.is_none_or(|(near, _, _)| gap < near) {
+                    best = Some((gap, at, other.thickness));
+                }
+            }
+            let Some((gap, at, thick)) = best else { continue };
+            let width = gap - thick / 2.0;
+            if width < how.thin {
+                continue;
+            }
+            let t = on(mine, p).0;
+            let (from, to) = match far {
+                true => (t, t + width),
+                false => (t - width, t),
+            };
+            // What says the wall carries on is the drawing: a face of it drawn across the gap, where the wall
+            // between the two faces was too short to be read. Without that the wall stops where it was drawn, and
+            // nothing is built across a room that nothing was drawn across.
+            if !face_across(mine, marks, from, to, how) {
+                continue;
+            }
+            holes.push((p + out * (width / 2.0), width, glazed(mine, marks, from, to, how)));
+            match far {
+                true => wall.end = at,
+                false => wall.start = at,
             }
         }
     }
@@ -676,11 +790,12 @@ fn join(walls: &mut Vec<Found>, how: &How) {
                 if off(b.start).abs() > slack || off(b.end).abs() > slack {
                     continue;
                 }
-                // Along the one, where the other lies: touching, or overlapping, is one wall.
+                // Along the one, where the other lies: touching, overlapping, or with a gap too narrow to walk
+                // through — where the drawing broke the line rather than left a doorway — is one wall.
                 let along = |p: P2| a.dir().dot(p - a.start);
                 let (mine, theirs) = ([0.0, a.length()], [along(b.start), along(b.end)]);
                 let (t0, t1) = (theirs[0].min(theirs[1]), theirs[0].max(theirs[1]));
-                if t0 > mine[1] + how.thin || t1 < mine[0] - how.thin {
+                if t0 - mine[1] >= NARROWEST || mine[0] - t1 >= NARROWEST {
                     continue;
                 }
                 let (lo, hi) = (mine[0].min(t0), mine[1].max(t1));
@@ -721,8 +836,12 @@ fn meet(walls: &mut [Found], how: &How) {
                 if s < -reach || s > other.length() + reach {
                     continue;
                 }
-                if best.is_none_or(|(near, _)| p.dist(at) < near) {
-                    best = Some((p.dist(at), at));
+                // A corner is where the two of them have least to go to meet, and not simply the crossing nearest
+                // this end: a third wall whose axis runs through the end exactly, and which stops short of it, is
+                // no corner, and holding the end there leaves the building open.
+                let cost = p.dist(at) + (-s).max(s - other.length()).max(0.0);
+                if best.is_none_or(|(near, _)| cost < near) {
+                    best = Some((cost, at));
                 }
             }
             // Stretched, never shortened to nothing: an end taken to a crossing that leaves less than half the
@@ -786,6 +905,75 @@ mod tests {
     /// One wall 6 m long and 300 thick, its faces broken from `a` to `b`: a doorway, as a drawing leaves one.
     fn doorway(a: f64, b: f64) -> Vec<(&'static str, [f64; 4])> {
         vec![("A", [0.0, 0.0, a, 0.0]), ("A", [b, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, a, 300.0]), ("A", [b, 300.0, 6000.0, 300.0])]
+    }
+
+    #[test]
+    fn a_gap_too_narrow_to_walk_through_is_where_the_drawing_broke_the_line_and_no_opening() {
+        let r = reading(&doorway(2910.0, 3090.0));
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((wall.length() - 6000.0).abs() < 1e-6, "{}", wall.length());
+        assert!(r.holes.is_empty(), "180 is no doorway: {:?}", r.holes);
+        // The two halves of a wall drawn on two layers break at different places, and that is the same thing.
+        let staggered = vec![
+            ("A", [0.0, 0.0, 2910.0, 0.0]),
+            ("B", [3090.0, 0.0, 6000.0, 0.0]),
+            ("A", [0.0, 300.0, 3010.0, 300.0]),
+            ("B", [3200.0, 300.0, 6000.0, 300.0]),
+        ];
+        let walls = found(&staggered);
+        let [wall] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((wall.length() - 6000.0).abs() < 1e-6, "{}", wall.length());
+    }
+
+    #[test]
+    fn a_corner_is_where_the_two_walls_have_least_to_go_to_meet() {
+        // A wall running east that stops 60 short of the wall it turns into, with a third wall whose axis passes
+        // through its end exactly and which stops 200 short of it: the corner is the first, not the third.
+        let lines = [
+            ("A", [0.0, -150.0, 2000.0, -150.0]),
+            ("A", [0.0, 150.0, 2000.0, 150.0]),
+            ("A", [1860.0, -3000.0, 1860.0, 0.0]),
+            ("A", [2260.0, -3000.0, 2260.0, 0.0]),
+            ("A", [1850.0, 200.0, 1850.0, 3000.0]),
+            ("A", [2150.0, 200.0, 2150.0, 3000.0]),
+        ];
+        let walls = found(&lines);
+        assert_eq!(walls.len(), 3, "{walls:?}");
+        let east = walls.iter().find(|w| w.dir().1.abs() < 0.5).expect("the wall running east");
+        let far = east.start.0.max(east.end.0);
+        assert!((far - 2060.0).abs() < 1e-6, "it should reach the wall it turns into, not stop at 2000: {far}");
+    }
+
+    #[test]
+    fn a_wall_that_stops_a_doorway_short_of_the_wall_it_runs_into_is_taken_to_it_with_a_door_in_it() {
+        // A room with a partition across it: its one face is drawn to the wall opposite and the other stops 850
+        // short of it, because the piece of wall between the door and the corner is too short to draw as a face.
+        let mut lines = room([0.0, 0.0, 6000.0, 4000.0], 300.0);
+        lines.push(("A", [300.0, 1850.0, 5000.0, 1850.0]));
+        lines.push(("A", [300.0, 1950.0, 5700.0, 1950.0]));
+        let r = reading(&lines);
+        assert_eq!(r.walls.len(), 5, "{:?}", r.walls);
+        let part = r.walls.iter().position(|w| (w.thickness - 100.0).abs() < 1.0).expect("the partition");
+        let wall = &r.walls[part];
+        assert!((wall.length() - 5700.0).abs() < 1e-6, "it should reach the wall opposite: {}", wall.length());
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}: {:?}", r.holes.len(), r.holes) };
+        assert_eq!(hole.wall, part);
+        assert!(!hole.window, "nothing is drawn in it, so it is a door");
+        assert!((hole.width - 700.0).abs() < 1e-6, "to the face of the wall it meets: {}", hole.width);
+        assert!((hole.at - 5200.0).abs() < 1e-6, "at the end of the wall: {}", hole.at);
+        // Asked for walls alone, the drawing is left as it is: the partition stops where it was drawn.
+        let (m, u) = with(&lines);
+        let bare = read(&m, &u, &How { openings: false, ..How::default() }).expect("it reads");
+        let part = bare.walls.iter().find(|w| (w.thickness - 100.0).abs() < 1.0).expect("the partition");
+        assert!((part.length() - 4850.0).abs() < 1e-6, "{}", part.length());
+        // And where neither face is carried across, the wall stops in the room, because that is what was drawn.
+        let mut stops = room([0.0, 0.0, 6000.0, 4000.0], 300.0);
+        stops.push(("A", [300.0, 1850.0, 5000.0, 1850.0]));
+        stops.push(("A", [300.0, 1950.0, 5000.0, 1950.0]));
+        let r = reading(&stops);
+        let part = r.walls.iter().find(|w| (w.thickness - 100.0).abs() < 1.0).expect("the partition");
+        assert!((part.length() - 4850.0).abs() < 1e-6, "nothing was drawn across the gap: {}", part.length());
+        assert!(r.holes.is_empty(), "{:?}", r.holes);
     }
 
     #[test]
@@ -855,11 +1043,12 @@ mod tests {
 
     #[test]
     fn a_gap_too_narrow_or_too_wide_to_walk_through_is_no_opening() {
-        for (a, b) in [(2850.0, 3150.0), (1000.0, 5000.0)] {
-            let r = reading(&doorway(a, b));
-            assert_eq!(r.walls.len(), 2, "two walls with a gap between them, not one with an opening");
-            assert!(r.holes.is_empty());
-        }
+        // Too narrow to walk through is where the drawing broke the line, so it is one wall and no opening...
+        let r = reading(&doorway(2850.0, 3150.0));
+        assert_eq!((r.walls.len(), r.holes.len()), (1, 0), "{r:?}");
+        // ...and too wide is where a wall stops, so it is two walls and no opening.
+        let r = reading(&doorway(1000.0, 5000.0));
+        assert_eq!((r.walls.len(), r.holes.len()), (2, 0), "{r:?}");
     }
 
     #[test]

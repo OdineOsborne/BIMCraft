@@ -155,6 +155,41 @@ fn with_the_openings_unticked_a_doorway_is_left_as_the_drawing_has_it() {
 }
 
 #[test]
+fn the_rooms_the_walls_shut_in_are_placed_with_them_when_the_window_asks_for_them() {
+    let mut lines = one_room("MURI");
+    // A partition across the room, from the one wall to the other: two rooms where there was one.
+    lines.push(("MURI".to_string(), [300.0, 2950.0, 7700.0, 2950.0]));
+    lines.push(("MURI".to_string(), [300.0, 3050.0, 7700.0, 3050.0]));
+    let mut h = linked(&lines, None);
+    shortcut(&mut h, "TW");
+    pick(&mut h, Role::CheckBox, "Place the rooms too");
+    press(&mut h, "Find");
+    press(&mut h, "Build 5");
+    assert_eq!((ids(&h, "wall").len(), ids(&h, "room").len()), (5, 2));
+    assert!(says(&h, "5 walls and 2 rooms built from"), "{}", h.state().status.text);
+}
+
+#[test]
+fn place_rooms_fills_the_plan_on_screen_and_leaves_the_rooms_already_in_it_alone() {
+    let mut lines = one_room("MURI");
+    lines.push(("MURI".to_string(), [300.0, 2950.0, 7700.0, 2950.0]));
+    lines.push(("MURI".to_string(), [300.0, 3050.0, 7700.0, 3050.0]));
+    let mut h = linked(&lines, None);
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    press(&mut h, "Build 5");
+    assert!(ids(&h, "room").is_empty(), "the rooms were not asked for");
+    press(&mut h, "Architecture");
+    press(&mut h, "Place Rooms");
+    assert_eq!(ids(&h, "room").len(), 2);
+    assert!(says(&h, "2 rooms placed."), "{}", h.state().status.text);
+    // Asked again, the areas are those rooms' and nothing is placed twice.
+    press(&mut h, "Place Rooms");
+    assert_eq!(ids(&h, "room").len(), 2);
+    assert!(says(&h, "0 rooms placed."), "{}", h.state().status.text);
+}
+
+#[test]
 fn the_lines_that_stand_alone_are_left_out_and_said_so_and_taken_when_they_are_asked_for() {
     // A survey draws the land around the building too: here the room, and beyond it the boundary of the plot, a pair
     // of lines as far apart as a wall is thick that meets nothing of the building.
