@@ -61,7 +61,10 @@
 //! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
 //! axis it was going to meet — the one the two of them have least to go to meet, and not simply the crossing
 //! nearest the end, which a third wall whose axis runs through that end may hold it at while the corner stays
-//! open.
+//! open. How far short of a corner an axis may stop and still be taken to it is a gap nobody could walk through
+//! ([`NARROWEST`]), because a gap at a corner that no one can pass is no gap but a corner drawn carelessly. And
+//! because a corner is two axes both stopping short of it, taking the one to the other moves the mark the next is
+//! measured from, so it is done again until nothing moves.
 //!
 //! Then what is left is tidied of three things that pair as a wall does and are none ([`tidy`]). A block shorter than
 //! it is thick is no wall, because nothing is a wall across itself: a pier drawn as a box, a plinth, the two jambs of
@@ -672,8 +675,11 @@ fn open_ends(walls: &mut [Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f64
                     continue;
                 };
                 let gap = out.dot(at - p);
+                // Within the other's own stretch, grown by half of each wall, because its axis stops short of its
+                // own corners exactly as this one does.
+                let reach = (mine.thickness + other.thickness) / 2.0;
                 let s = other.dir().dot(at - other.start);
-                if !(NARROWEST..=DOORWAY).contains(&gap) || s < 0.0 || s > other.length() {
+                if !(NARROWEST..=DOORWAY).contains(&gap) || s < -reach || s > other.length() + reach {
                     continue;
                 }
                 if best.is_none_or(|(near, _, _)| gap < near) {
@@ -814,9 +820,31 @@ fn join(walls: &mut Vec<Found>, how: &How) {
 /// wall they run into, and so does the axis between them; an end within the thickness of another wall's axis, which
 /// would cross it, is taken to the crossing.
 fn meet(walls: &mut [Found], how: &How) {
+    // A corner is two axes both stopping short of it, so taking the one to the other moves the mark that the next
+    // is measured from: it is done again until nothing moves. The bound is there because nothing here may run away
+    // with a drawing, not because a drawing is expected to need it.
+    let mut settled = vec![[false; 2]; walls.len()];
+    for _ in 0..ROUNDS {
+        if !met(walls, how, &mut settled) {
+            return;
+        }
+    }
+}
+
+/// The most rounds of [`meet`].
+const ROUNDS: usize = 8;
+
+/// One round of [`meet`]: whether any axis moved. An end that has found its crossing is settled and is not weighed
+/// again, because stretching an axis leaves the line it runs along where it was, so the crossings do not move; what
+/// the next round is for is the ends that found none, which a wall stretched since may now reach.
+fn met(walls: &mut [Found], how: &How, settled: &mut [[bool; 2]]) -> bool {
     let was: Vec<Found> = walls.to_vec();
+    let mut moved = false;
     for (i, wall) in walls.iter_mut().enumerate() {
         for end in [false, true] {
+            if settled.get(i).is_some_and(|ends| ends[usize::from(end)]) {
+                continue;
+            }
             let mine = &was[i];
             let p = if end { mine.end } else { mine.start };
             let mut best: Option<(f64, P2)> = None;
@@ -827,9 +855,12 @@ fn meet(walls: &mut [Found], how: &How) {
                 let Some(at) = crate::geom::line_intersection(mine.start, mine.end, other.start, other.end) else {
                     continue;
                 };
-                // Near this end of mine, and within the other's own stretch, grown by half of each wall.
+                // Near this end of mine, and within the other's own stretch, grown by half of each wall. How near
+                // is near: the faces that made the wall stop half the wall they run into short of the corner, and
+                // where the drawing is looser than that, a gap at a corner that nobody could walk through is no
+                // gap but a corner drawn carelessly.
                 let reach = (mine.thickness + other.thickness) / 2.0;
-                if p.dist(at) > other.thickness / 2.0 + how.slack(other.thickness) {
+                if p.dist(at) > (other.thickness / 2.0 + how.slack(other.thickness)).max(NARROWEST) {
                     continue;
                 }
                 let s = other.dir().dot(at - other.start);
@@ -847,16 +878,21 @@ fn meet(walls: &mut [Found], how: &How) {
             // Stretched, never shortened to nothing: an end taken to a crossing that leaves less than half the
             // wall, or turns it round, is left where it was.
             if let Some((_, at)) = best {
+                if let Some(ends) = settled.get_mut(i) {
+                    ends[usize::from(end)] = true;
+                }
                 let (start, end_at) = match end {
                     true => (wall.start, at),
                     false => (at, wall.end),
                 };
-                if (end_at - start).dot(mine.dir()) >= mine.length() / 2.0 {
+                if (end_at - start).dot(mine.dir()) >= mine.length() / 2.0 && (wall.start, wall.end) != (start, end_at) {
                     (wall.start, wall.end) = (start, end_at);
+                    moved = true;
                 }
             }
         }
     }
+    moved
 }
 
 #[cfg(test)]
@@ -966,6 +1002,17 @@ mod tests {
         let bare = read(&m, &u, &How { openings: false, ..How::default() }).expect("it reads");
         let part = bare.walls.iter().find(|w| (w.thickness - 100.0).abs() < 1.0).expect("the partition");
         assert!((part.length() - 4850.0).abs() < 1e-6, "{}", part.length());
+        // The wall it runs into stops half a wall short of its own corners, so the crossing may lie a little past
+        // the end of it and still be the corner the two make.
+        let mut l = room([0.0, 0.0, 6000.0, 4000.0], 300.0);
+        l.push(("A", [300.0, 1850.0, 3850.0, 1850.0]));
+        l.push(("A", [300.0, 1950.0, 3000.0, 1950.0]));
+        l.push(("A", [3850.0, 1950.0, 3850.0, 3700.0]));
+        l.push(("A", [3950.0, 1950.0, 3950.0, 3700.0]));
+        let r = reading(&l);
+        assert_eq!(r.walls.len(), 6, "{:?}", r.walls);
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}: {:?}", r.holes.len(), r.holes) };
+        assert!((hole.width - 850.0).abs() < 1e-6, "{}", hole.width);
         // And where neither face is carried across, the wall stops in the room, because that is what was drawn.
         let mut stops = room([0.0, 0.0, 6000.0, 4000.0], 300.0);
         stops.push(("A", [300.0, 1850.0, 5000.0, 1850.0]));
@@ -974,6 +1021,25 @@ mod tests {
         let part = r.walls.iter().find(|w| (w.thickness - 100.0).abs() < 1.0).expect("the partition");
         assert!((part.length() - 4850.0).abs() < 1e-6, "nothing was drawn across the gap: {}", part.length());
         assert!(r.holes.is_empty(), "{:?}", r.holes);
+    }
+
+    #[test]
+    fn a_corner_is_closed_though_both_of_its_walls_stop_short_of_it() {
+        // A wall running east that stops 240 short of the axis of the wall it turns into, which itself stops short
+        // of the corner: taking the one to the other moves the mark, so it is done again until nothing moves.
+        let lines = [
+            ("A", [0.0, 0.0, 2000.0, 0.0]),
+            ("A", [0.0, 300.0, 2000.0, 300.0]),
+            ("A", [2180.0, 300.0, 2180.0, 2000.0]),
+            ("A", [2300.0, 300.0, 2300.0, 2000.0]),
+        ];
+        let walls = found(&lines);
+        assert_eq!(walls.len(), 2, "{walls:?}");
+        let east = walls.iter().find(|w| w.dir().1.abs() < 0.5).expect("the wall running east");
+        assert!((east.length() - 2240.0).abs() < 1e-6, "it reaches the axis it turns into: {}", east.length());
+        let up = walls.iter().find(|w| w.dir().1.abs() > 0.5).expect("the wall running north");
+        let low = up.start.1.min(up.end.1);
+        assert!((low - 150.0).abs() < 1e-6, "and it comes down to meet it: {low}");
     }
 
     #[test]

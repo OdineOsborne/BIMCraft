@@ -102,7 +102,13 @@ Six rules keep it from finding walls where there are none, and each of them was 
 
 - **The nearest face across.** In a corridor 600 wide between two walls 100 thick, every distance from 100 to 800 is
   there to be mistaken for a wall. A face's wall is the nearest face across it, within a tenth of that distance, so the
-  far side of a room is never one.
+  far side of a room is never one. What it costs is a face that runs along two walls — on the survey this was written
+  against, the back of the house is one line with a lining 130 thick against the first 1.3 m of it and the wall
+  itself, 300 thick, against the next 1.8 m. The nearer of the two is taken for the whole of it and that 300 wall is
+  lost. Reading each pair over the stretch the two of them share recovers it, and was tried: it also brings back the
+  pairs this rule is here to stop, because a face whose own wall is not drawn over some stretch of it then takes the
+  far side of the room across it — on that survey a wall 790 thick across a corridor, and one 690 thick between the
+  house and the boundary of the plot. It recovered one wall and invented two, so the rule stays as it is.
 - **The faces of a wall keep the same distance apart** over the stretch they share. A pair that splays is a kerb, a
   ditch, a roof's pitch — not a wall.
 - **A ladder is no wall.** A stair's treads, a hatch, a fence and a run of joists are parallel lines evenly spaced,
@@ -133,7 +139,15 @@ Six rules keep it from finding walls where there are none, and each of them was 
   The crossing it is taken to is the one the two walls have least to go to meet, and not simply the one nearest the
   end: on the survey this was written against a wall runs north from 60 inside the north-east corner, so its axis
   passes through the end of the top wall exactly, and taking the nearest crossing held that end 60 short of the
-  corner and left the building open — which is a building with no rooms in it. An end whose crossing would leave
+  corner and left the building open — which is a building with no rooms in it. How far short of a corner an axis may
+  stop and still be taken to it is `NARROWEST`, a gap nobody could walk through, because a gap at a corner that no
+  one can pass is no gap but a corner drawn carelessly; and because a corner is two axes both stopping short of it,
+  taking the one to the other moves the mark the next is measured from, so it is done again until nothing moves (at
+  most `ROUNDS`, which is there so that nothing can run away with a drawing). The two together — a reach of
+  `NARROWEST` and the rounds — take that survey from thirteen open wall ends to eight, and those eight are gaps of
+  645 mm and more. An end that has found
+  its crossing is not weighed again — stretching an axis leaves the line it runs along where it was, so the crossings
+  do not move — which is why the rounds cost nothing on a large plan. An end whose crossing would leave
   less than half the wall, or turn it round, is left where it was.
 
 ## The openings in those walls
@@ -218,9 +232,9 @@ against says `$INSUNITS` millimetres and is drawn in metres, so its longest line
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
-9 ms, finding 20 walls, 5 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
+9 ms, finding 21 walls, 7 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
 so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about
-2.6 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
+2.7 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
 them as well takes it to about 10 s, because `glazed_openings` weighs every line of the drawing against every wall
 found; that is where to look first if a big drawing is ever to be traced quickly.
 
@@ -248,10 +262,11 @@ metre, which is a duct's shaft and the least of a building that is anywhere at a
 sliver two walls leave between their centre lines where one is drawn a hair off the other, and no room.
 
 `trace_walls` takes `rooms` and does the same with the walls it has just built, in the one command, so one undo step
-takes the lot back. On the survey this was written against that gives two rooms, 8.06 m² and 58.56 m², which is the
-main block of the house in two; the rest of it stays open, because the survey draws partitions that stop two metres
-short of the walls they run into and nothing is built across a gap that wide. A wall drawn by hand across one of
-those, and `place_rooms` again, is what finishes it.
+takes the lot back. On the survey this was written against that gives three rooms, 4.37 m², 8.06 m² and 54.19 m²,
+which is the main block of the house in three; the rest of it stays open, because the survey draws partitions that
+stop two metres short of the walls they run into, and the back of the house is a face the nearest-face rule reads as
+a lining for the whole of its length. A wall drawn by hand across one of those, and `place_rooms` again, is what
+finishes it.
 
 ## The window: Trace Walls
 
