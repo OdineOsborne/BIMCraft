@@ -143,6 +143,34 @@ in `too_high`. Each width found, to the nearest 10 mm, comes in as the project's
 tenth of it, or as `Single <w> x 2100` or `Fixed <w> x 1500`, made for it. `openings: false` leaves the drawing as it
 is: two walls with a gap between them.
 
+## The land around the building, and what else is no wall
+
+What the pairing leaves is then tidied of three things that pair as a wall does and are no wall of the building
+(`trace::tidy`). None of them was thought of in advance: each is what the survey this was written against actually
+draws, and together they took 44 walls down to 26.
+
+- **Nothing is a wall across itself.** A pair shorter than it is far apart is a pier drawn as a box, a plinth, a
+  chimney, or the two jambs of an opening read as a pair of faces — on that survey, lines 262 long and 542 apart. The
+  thickness is what the pair measured, so it is the length that has to answer for itself.
+- **Two walls cannot be in the same place.** Where one wall's axis runs inside another over most of the shorter of
+  them, the longer is the wall and the shorter is what the drawing draws in it: a survey draws a window's frame across
+  the opening it fills, from the outside of the wall to the inside, and the wall's own inner face stops at the jambs,
+  so the frame has nothing nearer and reads as a wall 400 thick lying over a wall 100 thick. Four windows of that
+  survey are drawn so.
+- **A wall of a building meets another wall**, at a corner or running into one, and a survey draws the land around the
+  building too: the boundary of the plot, the kerb of the road, the neighbour's wall, the lines the surveyor took his
+  levels along. Those hold on to nothing, so a wall that meets none of the others (`trace::joined`, an end within half
+  the two thicknesses of the other's own stretch, which is where the axes have already been taken) is left out and
+  counted in `alone` — on that survey a boundary 13.6 m long, one 4 m long across the plot, and two lines of the
+  surveyor's own. `alone: true` takes them, for a survey of a garden wall or a boundary to be built. Unless nothing in
+  the drawing meets anything at all, when the drawing is of a wall or two rather than of a building and every one of
+  them is taken.
+
+The three run in that order, and they carry one another: once a symbol's own lines are gone the pair that was drawn
+against them meets nothing either, which is how the two jamb boxes and the frame between them go together. What it
+leaves is the same whether or not the surveyor's symbol layers are turned off in the window, which is the point — a
+reading that needs the layers right to come out right is a reading that cannot be trusted.
+
 Each wall takes the phase the layers of its two faces name, as Link CAD read them (`underlay::phase_across`), so a
 survey's `Stato di fatto` comes in built and its `Progetto` comes in new, from one drawing. A wall whose two layers
 name different phases is left in the project's first and reported in `disagreed`: a wall is not in two moments of a
@@ -156,7 +184,8 @@ against says `$INSUNITS` millimetres and is drawn in metres, so its longest line
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
-9 ms, finding 44 walls, 6 doors and 2 windows. Every pair of faces is weighed, so the work is the square of their
+9 ms, finding 26 walls, 6 doors and 2 windows, of 44 pairs read and 18 of them left out as no walls. Every pair of
+faces is weighed, so the work is the square of their
 number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about 0.9 s, and more than `MAX_FACES`
 (10,000) faces is refused with what to do about it.
 
@@ -176,9 +205,11 @@ wall is in. **Read the Layer Names Again** puts back what the names say, for a c
 is not drawn is not traced either, which is how a surveyor's own layers — levels, GPS points, a north arrow — are kept
 out of the walls.
 
-**Walls** is what to look for (`How`, as above), whether to find the openings as well, the wall type every wall is to
+**Walls** is what to look for (`How`, as above), whether to find the openings as well, whether to take the lines that
+stand alone too, the wall type every wall is to
 come in as or `By thickness`, and two buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
-much it found of what thickness, type and phase and how many doors and windows, and draws it all over the plan — each
+much it found of what thickness, type and phase, how many doors and windows, and how many lines it left out for
+meeting no wall of the building, and draws it all over the plan — each
 wall a band as thick as it measured with its axis down it, each opening a lighter stretch of that band, with a line
 down the middle of a window and none down a door. **Build** builds them and closes. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the

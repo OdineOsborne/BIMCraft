@@ -269,6 +269,26 @@ fn a_preview_says_where_the_openings_are_and_builds_none_of_them() {
 }
 
 #[test]
+fn the_lines_of_the_land_round_a_building_are_left_out_and_counted_and_taken_when_they_are_asked_for() {
+    // The room, and beyond it the boundary of the plot: a pair of lines as far apart as a wall is thick, drawn where
+    // nothing of the building reaches.
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    let boundary = [[-9000.0, -5000.0, 14000.0, -5000.0], [-9000.0, -4800.0, 14000.0, -4800.0]];
+    lines.extend(boundary.into_iter().map(|l| ("CONFINE".to_string(), l)));
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({"preview": true})).expect("it looks");
+    assert_eq!((out["walls"].clone(), out["alone"].clone()), (json!(4), json!(1)), "{out}");
+    // Built, it is the four walls of the room: the boundary is the land, not the building.
+    run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(walls(&s).len(), 4, "{:?}", walls(&s));
+    // And asked for them it takes them, because what it finds is a reading and the user's word is the last one.
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({"alone": true})).expect("it traces");
+    assert_eq!((out["walls"].clone(), out["alone"].clone()), (json!(5), json!(1)), "{out}");
+    assert_eq!(walls(&s).len(), 5);
+}
+
+#[test]
 fn the_walls_it_builds_are_walls_like_any_other() {
     let mut s = linked(&room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0));
     let out = run(&mut s, "trace_walls", json!({})).expect("it traces");

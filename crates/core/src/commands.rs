@@ -187,7 +187,14 @@ pub static ALL: &[Command] = &[
          jambs; glass drawn in an opening makes it a window and an empty one is a door. A plan gives no heights, \
          so a door comes in 2100 high and a window 1500 high on a 900 sill, as the project\'s own starter types \
          are, and an opening that would stand higher than its wall is left out and counted in `too_high`. With \
-         `openings: false` a doorway is left as the drawing has it, two walls with a gap between them. `preview` \
+         `openings: false` a doorway is left as the drawing has it, two walls with a gap between them. What is left \
+         is tidied of what pairs as a wall does and is none: a block shorter than it is thick (a pier drawn as a \
+         box, the two jambs of an opening), and, where two walls would stand in one another, the shorter of them, \
+         which is what the drawing draws in the longer. A survey draws the land around the building too \u{2014} the \
+         boundary of the plot, the kerb of the road, the lines the surveyor took his levels along \u{2014} and a wall \
+         of a building meets another wall, so a wall that meets none of the others is left out and counted in \
+         `alone`; `alone: true` takes them as well, for a survey of a garden wall or a boundary to be built. \
+         `preview` \
          finds and reports and builds nothing, and says in `holes` where each opening runs ({kind, width, \
          thickness, from, to}). Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
          walls, made}, …], `doors`, `windows`, `opening_ids`, `openings` [{kind, width, type, openings, made}, \
@@ -2110,6 +2117,10 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             v if absent(v) => was.openings,
             _ => flag(c, p, "openings")?,
         },
+        alone: match p.get("alone") {
+            v if absent(v) => was.alone,
+            _ => flag(c, p, "alone")?,
+        },
     };
     let given = string(c, p, "type")?;
     if let Some(name) = &given
@@ -2192,6 +2203,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         "doors": reading.holes.iter().filter(|h| !h.window).count(),
         "windows": reading.holes.iter().filter(|h| h.window).count(),
         "openings": openings,
+        "alone": reading.alone,
     });
     if !disagreed.is_empty() {
         out["disagreed"] = json!(disagreed);

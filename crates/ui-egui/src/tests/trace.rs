@@ -155,6 +155,26 @@ fn with_the_openings_unticked_a_doorway_is_left_as_the_drawing_has_it() {
 }
 
 #[test]
+fn the_lines_that_stand_alone_are_left_out_and_said_so_and_taken_when_they_are_asked_for() {
+    // A survey draws the land around the building too: here the room, and beyond it the boundary of the plot, a pair
+    // of lines as far apart as a wall is thick that meets nothing of the building.
+    let mut lines = one_room("MURI");
+    let boundary = [[-9000.0, -5000.0, 14000.0, -5000.0], [-9000.0, -4800.0, 14000.0, -4800.0]];
+    lines.extend(boundary.into_iter().map(|l| ("CONFINE".to_string(), l)));
+    let mut h = linked(&lines, None);
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the room's walls, not the boundary");
+    assert!(says(&h, "1 lines met no wall of the building and were left out."), "and it says so");
+    // Asked for them, it gives them: what it found is a reading, and the user's word is the last one.
+    pick(&mut h, Role::CheckBox, "Take the lines that stand alone too");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(5));
+    press(&mut h, "Build 5");
+    assert_eq!(ids(&h, "wall").len(), 5);
+}
+
+#[test]
 fn a_layers_phase_is_put_right_in_the_window_and_the_walls_come_in_it() {
     // A layer whose name says nothing of the project's history: the walls on it would come in the first phase.
     let mut h = linked(&one_room("Quote"), None);

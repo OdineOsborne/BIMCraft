@@ -37,6 +37,18 @@
 //!
 //! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
 //! axis it was going to meet.
+//!
+//! Then what is left is tidied of three things that pair as a wall does and are none ([`tidy`]). A block shorter than
+//! it is thick is no wall, because nothing is a wall across itself: a pier drawn as a box, a plinth, the two jambs of
+//! an opening taken for a pair of faces. Two walls cannot be in the same place, so where one axis runs inside
+//! another the longer of the two is the wall and the shorter is what the drawing draws in it — the frame of a window,
+//! drawn across the opening it fills from the outside of the wall to the inside. And a survey draws the building and,
+//! around it, the land: the boundary of the plot, the kerb of the road, the lines the surveyor took his levels along.
+//! A pair of those measures a wall's thickness like any other pair, and what tells them apart is that the building
+//! holds together: a wall meets another wall at a corner or runs into one, and the land's lines hold on to nothing.
+//! So a wall that meets none of the others is left out and counted ([`Reading::alone`]), which [`How::alone`] asks
+//! for back — unless nothing in the drawing meets anything, when the drawing is of a wall or two rather than of a
+//! building and every one of them is taken.
 
 use crate::geom::P2;
 use crate::model::{Model, Underlay};
@@ -69,13 +81,16 @@ pub struct How {
     /// Whether to look for the openings in the walls as well. Without it a doorway leaves two walls with a gap
     /// between them, which is what the drawing shows and not what the building is.
     pub openings: bool,
+    /// Whether to take the walls that stand alone too: a line that meets no wall of the building is the land around
+    /// it, so they are left out, and a survey of a garden wall or a boundary to be built asks for them back.
+    pub alone: bool,
 }
 
 impl Default for How {
     /// What a building is drawn with: walls from a 60 mm lining to an 800 mm stone wall, nothing shorter than a
     /// doorway's width, drawn square to a couple of degrees.
     fn default() -> How {
-        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0, openings: true }
+        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0, openings: true, alone: false }
     }
 }
 
@@ -83,7 +98,7 @@ impl How {
     /// Itself, where a drawing could be read with it; else what is wrong with it. Numbers come from the user, so one
     /// that is no measure of a wall is refused here rather than finding everything or nothing further down.
     fn checked(&self) -> Result<How, String> {
-        let How { thin, thick, shortest, skew, openings: _ } = *self;
+        let How { thin, thick, shortest, skew, openings: _, alone: _ } = *self;
         if ![thin, thick, shortest, skew].iter().all(|v| v.is_finite()) {
             return Err("every measure of a wall must be a number".into());
         }
@@ -145,6 +160,9 @@ pub struct Reading {
     pub holes: Vec<Hole>,
     pub faces: usize,
     pub longest: f64,
+    /// How many of the walls it found met no other wall: the land around the building rather than the building. They
+    /// are left out of `walls` unless [`How::alone`] asked for them, and counted here either way.
+    pub alone: usize,
 }
 
 /// One face of a wall: a straight run of the drawing, long enough to be one.
@@ -210,8 +228,8 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
             faces.push(Face { layer: at, dir: (b - a).unit(), at: a, len });
         }
     }
-    let (walls, holes) = pair_up(&faces, &names, &how, &marks);
-    Ok(Reading { walls, holes, faces: faces.len(), longest })
+    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks);
+    Ok(Reading { walls, holes, faces: faces.len(), longest, alone })
 }
 
 /// What the two faces of one wall would measure: how far `b` lies to the left of `a`, and the stretch of `a` the two
@@ -282,8 +300,9 @@ fn inside(faces: &[Face], how: &How) -> Vec<bool> {
         .collect()
 }
 
-/// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them.
-fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (Vec<Found>, Vec<Hole>) {
+/// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them and
+/// how many of them stood alone.
+fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (Vec<Found>, Vec<Hole>, usize) {
     let inside = inside(faces, how);
     let mut pairs: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
     let mut nearest = vec![f64::INFINITY; faces.len()];
@@ -341,8 +360,68 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
         holes.extend(glazed_openings(&walls, marks, how));
     }
     meet(&mut walls, how);
+    let alone = tidy(&mut walls, how);
     let holes = placed(&walls, &holes, how);
-    (walls, holes)
+    (walls, holes, alone)
+}
+
+/// What a survey draws that pairs as a wall does and is no wall of the building, taken out of the walls found: a
+/// block shorter than it is thick, a wall drawn over a longer one, and a line that meets no wall at all. Gives back
+/// how many stood alone, which is what the user is told, because that one is theirs to ask back for.
+fn tidy(walls: &mut Vec<Found>, how: &How) -> usize {
+    // Nothing is a wall across itself: a pier drawn as a box, a plinth, the two jambs of an opening read as a pair
+    // of faces. The thickness is what the pair measured, so it is the length that has to answer for itself.
+    walls.retain(|w| w.length() > w.thickness);
+    // Two walls cannot be in the same place. The longer is the wall; the shorter is what the drawing draws in it.
+    let mut over = vec![false; walls.len()];
+    for i in 0..walls.len() {
+        for j in (i + 1)..walls.len() {
+            if over[i] || over[j] || !same_place(&walls[i], &walls[j], how) {
+                continue;
+            }
+            over[if walls[i].length() <= walls[j].length() { i } else { j }] = true;
+        }
+    }
+    *walls = kept(walls, &over.iter().map(|over| !over).collect::<Vec<bool>>());
+    // A wall of a building meets another wall. A line that meets none of them is the land around the building —
+    // unless nothing in the drawing meets anything, when the drawing is of a wall or two and not of a building.
+    let met: Vec<bool> = (0..walls.len()).map(|i| walls.iter().enumerate().any(|(j, w)| j != i && joined(&walls[i], w))).collect();
+    let alone = met.iter().filter(|met| !**met).count();
+    if met.iter().any(|met| *met) && !how.alone {
+        *walls = kept(walls, &met);
+    }
+    alone
+}
+
+/// The walls their place in `keep` says to keep.
+fn kept(walls: &[Found], keep: &[bool]) -> Vec<Found> {
+    walls.iter().zip(keep).filter(|(_, keep)| **keep).map(|(wall, _)| wall.clone()).collect()
+}
+
+/// Whether these two walls meet: an end of either within half of the two thicknesses of the other's own stretch,
+/// which is where [`meet`] has already taken the axes that cross. A corner, a T, or one running into another.
+fn joined(a: &Found, b: &Found) -> bool {
+    let reach = (a.thickness + b.thickness) / 2.0;
+    let close = |w: &Found, p: P2| {
+        let (along, off) = on(w, p);
+        off.abs() <= reach && (-reach..=w.length() + reach).contains(&along)
+    };
+    [a.start, a.end].iter().any(|p| close(b, *p)) || [b.start, b.end].iter().any(|p| close(a, *p))
+}
+
+/// Whether one of these walls is drawn in the place of the other: alongside it over most of the shorter of them, with
+/// the one axis inside the other's thickness, so that the two would stand in one another.
+fn same_place(a: &Found, b: &Found, how: &How) -> bool {
+    if a.dir().cross(b.dir()).abs() > how.skew.to_radians().sin() {
+        return false;
+    }
+    let ((s0, o0), (s1, o1)) = (on(a, b.start), on(a, b.end));
+    let (lo, hi) = (s0.min(s1).max(0.0), s0.max(s1).min(a.length()));
+    if hi - lo < a.length().min(b.length()) * 0.8 {
+        return false;
+    }
+    let apart = ((o0 + o1) / 2.0).abs();
+    [a, b].iter().any(|w| apart <= w.thickness / 2.0 + how.slack(w.thickness))
 }
 
 /// How far along a wall's axis a point lies, and how far off it.
@@ -599,6 +678,16 @@ mod tests {
         reading(lines).walls
     }
 
+    /// The four sides of a rectangle, as a draughtsman draws them.
+    fn rect([x0, y0, x1, y1]: [f64; 4]) -> Vec<(&'static str, [f64; 4])> {
+        vec![("A", [x0, y0, x1, y0]), ("A", [x1, y0, x1, y1]), ("A", [x1, y1, x0, y1]), ("A", [x0, y1, x0, y0])]
+    }
+
+    /// A room drawn as a survey draws one: four walls `t` thick, from the outside of it.
+    fn room([x0, y0, x1, y1]: [f64; 4], t: f64) -> Vec<(&'static str, [f64; 4])> {
+        rect([x0, y0, x1, y1]).into_iter().chain(rect([x0 + t, y0 + t, x1 - t, y1 - t])).collect()
+    }
+
     /// One wall 6 m long and 300 thick, its faces broken from `a` to `b`: a doorway, as a drawing leaves one.
     fn doorway(a: f64, b: f64) -> Vec<(&'static str, [f64; 4])> {
         vec![("A", [0.0, 0.0, a, 0.0]), ("A", [b, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, a, 300.0]), ("A", [b, 300.0, 6000.0, 300.0])]
@@ -783,6 +872,67 @@ mod tests {
         for wall in &walls {
             assert!(wall.length() > 1.0, "{wall:?} is no wall at all");
         }
+    }
+
+    #[test]
+    fn a_line_that_meets_no_wall_is_the_land_round_the_building_and_no_wall_of_it() {
+        // A survey draws the building and, around it, the land: the boundary of the plot, the kerb of the road, the
+        // lines the surveyor took his levels along. Drawn as a pair they measure a wall's thickness like any other
+        // pair, and what tells them from the building is that the building holds together and they hold on to
+        // nothing.
+        let mut lines = room([0.0, 0.0, 8000.0, 6000.0], 300.0);
+        lines.extend([("CONFINE", [-9000.0, -5000.0, 14000.0, -5000.0]), ("CONFINE", [-9000.0, -4800.0, 14000.0, -4800.0])]);
+        let r = reading(&lines);
+        assert_eq!(r.walls.len(), 4, "the room's four walls and not the boundary: {:?}", r.walls);
+        assert_eq!(r.alone, 1, "and it says one line stood alone");
+        // Asked for them, it gives them: what it finds is a reading, and the user's word is the last one.
+        let (m, u) = with(&lines);
+        let all = read(&m, &u, &How { alone: true, ..How::default() }).expect("it reads");
+        assert_eq!((all.walls.len(), all.alone), (5, 1), "{:?}", all.walls);
+    }
+
+    #[test]
+    fn a_drawing_of_a_wall_on_its_own_is_that_wall() {
+        // Nothing in it meets anything, so it is a drawing of a wall and not of a building, and the wall is taken.
+        let one = found(&[("A", [0.0, 0.0, 5000.0, 0.0]), ("A", [0.0, 300.0, 5000.0, 300.0])]);
+        assert_eq!(one.len(), 1, "{one:?}");
+        // Two that keep apart are two walls still: a corridor is not a building that one of them is outside of.
+        let two = found(&[
+            ("A", [0.0, 0.0, 5000.0, 0.0]),
+            ("A", [0.0, 300.0, 5000.0, 300.0]),
+            ("A", [0.0, 2000.0, 5000.0, 2000.0]),
+            ("A", [0.0, 2300.0, 5000.0, 2300.0]),
+        ]);
+        assert_eq!(two.len(), 2, "{two:?}");
+    }
+
+    #[test]
+    fn a_block_shorter_than_it_is_thick_is_no_wall() {
+        // Two lines 500 long and 700 apart: as far apart as a stone wall is thick and shorter than that, which is a
+        // pier drawn as a box, a plinth, or the two jambs of an opening read as a pair of faces. Nothing is a wall
+        // across itself.
+        assert!(found(&[("A", [0.0, 0.0, 500.0, 0.0]), ("A", [0.0, 700.0, 500.0, 700.0])]).is_empty());
+        // The same two lines turned the other way about are a wall: 700 long and 500 thick.
+        let walls = found(&[("A", [0.0, 0.0, 700.0, 0.0]), ("A", [0.0, 500.0, 700.0, 500.0])]);
+        let [wall] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((wall.thickness - 500.0).abs() < 1e-9, "{}", wall.thickness);
+        assert!((wall.length() - 700.0).abs() < 1e-6, "{}", wall.length());
+    }
+
+    #[test]
+    fn two_walls_in_the_same_place_are_one_wall_and_the_longer_of_them_is_it() {
+        // A survey draws a window's frame across the opening it fills, from the outside of the wall to the inside:
+        // the frame's two lines are 400 apart where the wall is 100 thick, and the wall's own inner face stops at
+        // the jambs, so the frame has nothing nearer and reads as a wall 400 thick lying over a wall 100 thick.
+        let wall = [("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, 100.0, 2600.0, 100.0]), ("A", [3400.0, 100.0, 6000.0, 100.0])];
+        let frame = [("F", [2600.0, 0.0, 3400.0, 0.0]), ("F", [2600.0, 400.0, 3400.0, 400.0])];
+        let lines: Vec<(&str, [f64; 4])> = wall.into_iter().chain(frame).collect();
+        let r = reading(&lines);
+        let [one] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((one.thickness - 100.0).abs() < 1e-9, "the wall, not the frame over it: {}", one.thickness);
+        assert!((one.length() - 6000.0).abs() < 1e-6, "{}", one.length());
+        let [hole] = &r.holes[..] else { panic!("the opening the frame fills, not {}", r.holes.len()) };
+        assert!((hole.width - 800.0).abs() < 1e-6, "{}", hole.width);
     }
 
     #[test]

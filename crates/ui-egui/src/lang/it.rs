@@ -1958,6 +1958,12 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "{} openings stood higher than the wall they are in and were left out.",
         "{} aperture erano più alte del muro in cui stanno e sono state lasciate fuori.",
     ],
+    ["Take the lines that stand alone too", "Prendi anche le linee che stanno da sole"],
+    [
+        "{} lines met no wall of the building and were left out.",
+        "{} linee non incontrano nessun muro dell'edificio e sono state lasciate fuori.",
+    ],
+    ["{} of them meet no wall of the building.", "{} di queste non incontrano nessun muro dell'edificio."],
 ];
 
 /// `english` in Italian, when this table has it.

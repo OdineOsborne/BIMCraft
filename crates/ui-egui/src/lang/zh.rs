@@ -1667,6 +1667,9 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Find the openings too", "同时查找洞口"],
     ["{} {} and {} {}.", "{} {}，{} {}。"],
     ["{} openings stood higher than the wall they are in and were left out.", "{} 个洞口高过所在的墙，已被略去。"],
+    ["Take the lines that stand alone too", "连独自存在的线也一并取用"],
+    ["{} lines met no wall of the building and were left out.", "{} 条线未与建筑的任何墙相接，已被略去。"],
+    ["{} of them meet no wall of the building.", "其中 {} 条未与建筑的任何墙相接。"],
 ];
 
 /// The core's words (`bimcraft_core::language`) that the window shows too, in English and Simplified Chinese: after [`WORDS`], which wins.

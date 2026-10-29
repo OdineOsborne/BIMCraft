@@ -67,6 +67,7 @@ impl TraceDialog {
             "shortest": self.how.shortest,
             "skew": self.how.skew,
             "openings": self.how.openings,
+            "alone": self.how.alone,
         });
         if let Some(kind) = &self.kind {
             p["type"] = json!(kind);
@@ -216,6 +217,9 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     });
     ui.add_space(6.0);
     changed |= ui.checkbox(&mut d.how.openings, t("Find the openings too")).changed();
+    // A survey draws the land around the building as well, and its lines pair as a wall's faces do: the boundary of
+    // the plot, the kerb of the road. What tells them apart is that they meet no wall of the building.
+    changed |= ui.checkbox(&mut d.how.alone, t("Take the lines that stand alone too")).changed();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let by = t("By thickness").to_string();
@@ -242,11 +246,12 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
         ui.label(RichText::new(said).color(pal().muted));
         return;
     };
-    found_shown(ui, report);
+    found_shown(ui, report, d.how.alone);
 }
 
-/// What the last Find found: how much, of what thickness and type, in which phase, and the layers that disagreed.
-fn found_shown(ui: &mut Ui, report: &Value) {
+/// What the last Find found: how much, of what thickness and type, in which phase, what it left out, and the layers
+/// that disagreed. `alone` is whether the lines that stand alone were asked for, because then none was left out.
+fn found_shown(ui: &mut Ui, report: &Value, alone: bool) {
     let number = |key: &str| report[key].as_u64().unwrap_or(0).to_string();
     let metres = format!("{:.2}", report["length"].as_f64().unwrap_or(0.0) / 1000.0);
     ui.label(
@@ -270,6 +275,17 @@ fn found_shown(ui: &mut Ui, report: &Value) {
     if let Some(left) = report["too_high"].as_u64() {
         let said = tf("{} openings stood higher than the wall they are in and were left out.", &[&left.to_string()]);
         ui.label(RichText::new(said).color(pal().error));
+    }
+    match report["alone"].as_u64().unwrap_or(0) {
+        0 => {}
+        left if alone => {
+            let said = tf("{} of them meet no wall of the building.", &[&left.to_string()]);
+            ui.label(RichText::new(said).color(pal().muted));
+        }
+        left => {
+            let said = tf("{} lines met no wall of the building and were left out.", &[&left.to_string()]);
+            ui.label(RichText::new(said).color(pal().muted));
+        }
     }
     ScrollArea::vertical().max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
         for row in report["thicknesses"].as_array().into_iter().flatten() {

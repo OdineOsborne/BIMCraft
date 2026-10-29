@@ -2727,6 +2727,17 @@ const WORDS: &[[&str; 3]] = &[
         "{} aberturas ficavam mais altas que a parede em que estão e foram deixadas de fora.",
         "{} vanos quedaban más altos que el muro en que están y se dejaron fuera.",
     ],
+    ["Take the lines that stand alone too", "Pegar também as linhas que ficam sozinhas", "Tomar también las líneas que quedan solas"],
+    [
+        "{} lines met no wall of the building and were left out.",
+        "{} linhas não encontraram nenhuma parede do edifício e foram deixadas de fora.",
+        "{} líneas no encontraron ningún muro del edificio y se dejaron fuera.",
+    ],
+    [
+        "{} of them meet no wall of the building.",
+        "{} delas não encontram nenhuma parede do edifício.",
+        "{} de ellas no encuentran ningún muro del edificio.",
+    ],
 ];
 
 #[cfg(test)]
