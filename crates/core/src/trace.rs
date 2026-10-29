@@ -27,13 +27,25 @@
 //! them that is the wall. Hatching, a cavity's lining and a duct read the same way, and a wall with a cavity behind
 //! it now comes in as one wall as thick as both.
 //!
+//! Third, and the same thing a step further out, is the line between a wall's two leaves. A survey draws a wall of a
+//! hundred of facing on three hundred of wall as three lines, and the middle one has a face 100 away on the one side
+//! and 300 on the other, which is too far for [`INSIDE`] and too near for the pair to be a room. The nearest-face
+//! rule then takes the facing for the wall and leaves the inside of the wall over, and a line left over is the sign
+//! of a wrong reading: the wall is the two outer lines and the one between them is the leaves' own. It is taken as
+//! that only where neither of the two has anything beyond it that would make a thinner wall with it — otherwise that
+//! is the wall and this line is a face like any other — and where it does not lie halfway between them, which is a
+//! ladder's rung. A lining and a cavity's inner leaf read the same way.
+//!
 //! Pieces of one wall, where the drawing broke a face in two, are joined where they touch. A gap that is left is a
 //! doorway, and [`Hole`] is what becomes of it: the two pieces are made one wall with an opening in it, which is what
 //! a building is — a wall with a door in it, not two walls with a space between them. A survey marks an opening the
 //! other way too, carrying the wall's faces across it and drawing the glass down the middle between two lines at the
-//! jambs, and that is read as well. Glass drawn in an opening makes it a window; an opening with nothing in it is a
-//! door, because a hole you can walk through is a door. A plan says nothing of heights, so what is built takes the
-//! project's own door and window sizes.
+//! jambs, and that is read as well: a jamb is drawn from the one face of the wall to the other, so it is as long as
+//! the wall is thick, and a mark half as long again is the survey's own — which way the door opens, where the sill
+//! is. Glass drawn in an opening makes it a window; an opening with nothing in it is a door, because a hole you can
+//! walk through is a door. What runs the length of the wall is the wall's own line and no glass, or the pier between
+//! two windows would be a window itself. A plan says nothing of heights, so what is built takes the project's own
+//! door and window sizes.
 //!
 //! Last, an axis, which stops half a wall short of a corner because the faces that made it do, is stretched to the
 //! axis it was going to meet.
@@ -264,8 +276,9 @@ fn across(a: &Face, b: &Face, how: &How) -> Option<(f64, f64, f64)> {
     Some((d, s0, s1))
 }
 
-/// How far `b` lies to the left of `a`, and how much of `a` it runs alongside, whatever the distance between them:
-/// what [`inside`] needs, where [`across`] would have thrown the pair away for being too close or too far.
+/// How far `b` lies to the left of `a`, and how far along `a` the two run alongside one another, whatever the
+/// distance between them: what [`inside`] needs, where [`across`] would have thrown the pair away for being too
+/// close or too far.
 fn alongside(a: &Face, b: &Face, how: &How) -> Option<(f64, f64)> {
     if (a.dir.cross(b.dir)).abs() > how.skew.to_radians().sin() {
         return None;
@@ -276,26 +289,76 @@ fn alongside(a: &Face, b: &Face, how: &How) -> Option<(f64, f64)> {
     if s1 - s0 <= 0.0 || a.len <= 0.0 {
         return None;
     }
-    Some(((off(b.at) + off(b.end())) / 2.0, (s1 - s0) / a.len))
+    Some(((off(b.at) + off(b.end())) / 2.0, s1 - s0))
 }
 
-/// Which faces are marks inside a wall and not a wall's own: a face with another face closer than [`INSIDE`] on both
-/// sides of it, over the whole of it. A line drawn on top of another is neither side of it and says nothing here.
+/// The faces within `reach` across `a`, leaving out those `skip` says to: how far each lies to the left of it, and
+/// how far along `a` they run alongside it. Faces at the same distance are one face the drawing broke in two — at an
+/// opening, at a corner, where another wall runs into it — so what they run is counted together. A line drawn on top
+/// of another is to neither side of it and says nothing. Only what is near enough to be looked at is weighed, or a
+/// plan of a thousand rooms would weigh every face against the whole row it stands in.
+fn across_from(faces: &[Face], i: usize, how: &How, skip: &[bool], reach: f64) -> Vec<(f64, f64)> {
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for (j, b) in faces.iter().enumerate() {
+        if j == i || skip.get(j) == Some(&true) {
+            continue;
+        }
+        let Some((d, along)) = alongside(&faces[i], b, how) else { continue };
+        if d == 0.0 || d.abs() > reach {
+            continue;
+        }
+        match out.iter_mut().find(|(at, _)| (*at - d).abs() <= how.slack(d)) {
+            Some((_, run)) => *run += along,
+            None => out.push((d, along)),
+        }
+    }
+    out
+}
+
+/// Which faces are no faces of a wall but lines drawn inside one, in two passes.
+///
+/// First the marks: a face with a face closer than [`INSIDE`] on both sides of it, over the whole of it — a window's
+/// glass, hatching, a duct's lining. Then, with the marks out of the way, the line between a wall's two leaves. It
+/// lies between two faces no farther apart than a wall is thick, neither of which has anything beyond it to be a
+/// wall with, so that taking the near pair for the wall would leave the far face over — and a line over is the sign
+/// of a wrong reading. It must not lie halfway between the two, because that is a ladder's rung and not a leaf: the
+/// asymmetry again. What counts as being alongside here is a stretch as long as a wall ([`How::shortest`]) and not a
+/// share of the face's length, because the inside of a wall stops short of the corners it turns and so is shorter
+/// than the line between the leaves, which runs the length of the wall.
 fn inside(faces: &[Face], how: &How) -> Vec<bool> {
+    let nothing = Vec::new();
+    let marks: Vec<bool> = (0..faces.len())
+        .map(|i| {
+            let across = across_from(faces, i, how, &nothing, INSIDE);
+            let near = |up: bool| {
+                across.iter().filter(|(d, run)| (*d > 0.0) == up && *run >= faces[i].len * 0.9).map(|(d, _)| d.abs()).min_by(f64::total_cmp)
+            };
+            matches!((near(true), near(false)), (Some(up), Some(down)) if up <= INSIDE && down <= INSIDE)
+        })
+        .collect();
     (0..faces.len())
         .map(|i| {
-            let (mut up, mut down) = (f64::INFINITY, f64::INFINITY);
-            for (j, b) in faces.iter().enumerate() {
-                let Some((d, over)) = (j != i).then(|| alongside(&faces[i], b, how)).flatten() else { continue };
-                if over < 0.9 || d == 0.0 {
-                    continue;
-                }
-                match d > 0.0 {
-                    true => up = up.min(d),
-                    false => down = down.min(-d),
-                }
+            if marks[i] {
+                return true;
             }
-            up <= INSIDE && down <= INSIDE
+            let across = across_from(faces, i, how, &marks, how.thick * 2.0);
+            let along = |d: &f64, run: &f64, up: bool| (*d > 0.0) == up && *run >= how.shortest;
+            let near = |up: bool| across.iter().filter(|(d, run)| along(d, run, up)).map(|(d, _)| d.abs()).min_by(f64::total_cmp);
+            let (Some(up), Some(down)) = (near(true), near(false)) else { return false };
+            if up + down > how.thick || (up - down).abs() <= how.slack(up.min(down)) {
+                return false;
+            }
+            // Beyond either of the two, a face that would make a thinner wall with it than this reading does: then
+            // that is its wall, by the same rule that takes the nearest face across, nothing is left over, and this
+            // line is a face of a wall itself.
+            let wall = up + down;
+            let beyond = |at: f64, side: f64| {
+                across.iter().any(|(d, run)| {
+                    let pair = d.abs() - at;
+                    *run >= how.shortest && d * side > at && pair <= wall && (how.thin..=how.thick).contains(&pair)
+                })
+            };
+            !beyond(up, 1.0) && !beyond(down, -1.0)
         })
         .collect()
 }
@@ -404,7 +467,7 @@ fn joined(a: &Found, b: &Found) -> bool {
     let reach = (a.thickness + b.thickness) / 2.0;
     let close = |w: &Found, p: P2| {
         let (along, off) = on(w, p);
-        off.abs() <= reach && (-reach..=w.length() + reach).contains(&along)
+        off.hypot((-along).max(along - w.length()).max(0.0)) <= reach
     };
     [a.start, a.end].iter().any(|p| close(b, *p)) || [b.start, b.end].iter().any(|p| close(a, *p))
 }
@@ -430,23 +493,53 @@ fn on(wall: &Found, p: P2) -> (f64, f64) {
     (d.dot(p - wall.start), d.perp().dot(p - wall.start))
 }
 
+/// A line of the drawing as the wall sees it: how far it lies off the axis at each end, and the stretch of the axis
+/// it runs along. None where it is not drawn alongside the wall at all.
+fn axiswise(wall: &Found, p: P2, q: P2, how: &How) -> Option<(f64, f64, f64, f64)> {
+    if wall.dir().cross((q - p).unit()).abs() > how.skew.to_radians().sin() {
+        return None;
+    }
+    let ((t0, o0), (t1, o1)) = (on(wall, p), on(wall, q));
+    Some((o0, o1, t0.min(t1), t0.max(t1)))
+}
+
 /// Whether the drawing draws glass in the stretch `a..b` of `wall`: a line alongside the wall, inside its thickness
 /// and not on a face of it, over most of that stretch. A window is drawn with its glass and a doorway is drawn empty,
 /// which is the whole of what tells the two apart in a plan.
+///
+/// A line drawn the length of the wall at that distance off its axis is the wall's own and not glass: the line
+/// between a wall's two leaves lies inside its thickness from end to end, broken only at the openings, so without
+/// this every pier between two windows is read as a window itself.
 fn glazed(wall: &Found, marks: &[(P2, P2)], a: f64, b: f64, how: &How) -> bool {
     let room = wall.thickness / 2.0 - how.slack(wall.thickness);
-    let square = how.skew.to_radians().sin();
     marks.iter().any(|(p, q)| {
-        if wall.dir().cross((*q - *p).unit()).abs() > square {
+        let Some((o0, o1, lo, hi)) = axiswise(wall, *p, *q, how) else { return false };
+        if o0.abs() > room || o1.abs() > room || hi.min(b) - lo.max(a) < (b - a) * 0.8 {
             return false;
         }
-        let ((t0, o0), (t1, o1)) = (on(wall, *p), on(wall, *q));
-        if o0.abs() > room || o1.abs() > room {
-            return false;
-        }
-        let (lo, hi) = (t0.min(t1).max(a), t0.max(t1).min(b));
-        hi - lo >= (b - a) * 0.8
+        runs_along(wall, marks, (o0 + o1) / 2.0, how) <= wall.length() / 2.0
     })
+}
+
+/// How much of the wall the drawing draws a line along, `off` from its axis: every stretch at that distance, counted
+/// once however many times it is drawn.
+fn runs_along(wall: &Found, marks: &[(P2, P2)], off: f64, how: &How) -> f64 {
+    let mut spans: Vec<(f64, f64)> = marks
+        .iter()
+        .filter_map(|(r, s)| {
+            let (f0, f1, from, to) = axiswise(wall, *r, *s, how)?;
+            let at = (f0 + f1) / 2.0;
+            ((at - off).abs() <= how.slack(wall.thickness)).then(|| (from.max(0.0), to.min(wall.length())))
+        })
+        .filter(|(from, to)| to > from)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut run, mut far) = (0.0, f64::NEG_INFINITY);
+    for (from, to) in spans {
+        run += (to - from.max(far)).max(0.0);
+        far = far.max(to);
+    }
+    run
 }
 
 /// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
@@ -510,7 +603,9 @@ fn glazed_openings(walls: &[Found], marks: &[(P2, P2)], how: &How) -> Vec<(P2, f
             .iter()
             .filter_map(|(p, q)| {
                 let v = *q - *p;
-                if !(t * 0.6..=t * 1.6).contains(&v.length()) || v.unit().cross(wall.dir().perp()).abs() > square {
+                // A jamb is drawn across the wall, from the one face to the other, so it is as long as the wall is
+                // thick. A mark half as long again is the survey's own: which way the door opens, where the sill is.
+                if !(t * 0.8..=t * 1.3).contains(&v.length()) || v.unit().cross(wall.dir().perp()).abs() > square {
                     return None;
                 }
                 let (along, off) = on(wall, *p + v * 0.5);
@@ -735,6 +830,30 @@ mod tests {
     }
 
     #[test]
+    fn the_pier_between_two_windows_is_no_window_though_the_wall_draws_a_line_through_it() {
+        // A wall 400 thick of two leaves, its faces carried across two windows, with the jambs drawn across it and
+        // the glass between them. The line between the leaves lies inside the thickness and runs the whole of the
+        // pier between the two windows, so it would be read as glass there and the pier as a third window.
+        let mut lines = vec![("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, 400.0, 6000.0, 400.0])];
+        for [from, to] in [[0.0, 1000.0], [2000.0, 3500.0], [4500.0, 6000.0]] {
+            lines.push(("A", [from, 100.0, to, 100.0]));
+        }
+        for at in [1000.0, 2000.0, 3500.0, 4500.0] {
+            lines.push(("A", [at, 0.0, at, 400.0]));
+        }
+        for [from, to] in [[1000.0, 2000.0], [3500.0, 4500.0]] {
+            lines.push(("A", [from, 180.0, to, 180.0]));
+            lines.push(("A", [from, 220.0, to, 220.0]));
+        }
+        let r = reading(&lines);
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}: {:?}", r.walls.len(), r.walls) };
+        assert!((wall.thickness - 400.0).abs() < 1e-9, "{}", wall.thickness);
+        let widths: Vec<f64> = r.holes.iter().map(|h| h.width).collect();
+        assert_eq!(widths.len(), 2, "two windows and no pier between them: {:?}", r.holes);
+        assert!(r.holes.iter().all(|h| h.window && (h.width - 1000.0).abs() < 1e-6), "{:?}", r.holes);
+    }
+
+    #[test]
     fn a_gap_too_narrow_or_too_wide_to_walk_through_is_no_opening() {
         for (a, b) in [(2850.0, 3150.0), (1000.0, 5000.0)] {
             let r = reading(&doorway(a, b));
@@ -872,6 +991,35 @@ mod tests {
         for wall in &walls {
             assert!(wall.length() > 1.0, "{wall:?} is no wall at all");
         }
+    }
+
+    #[test]
+    fn a_wall_of_two_leaves_is_one_wall_as_thick_as_both_of_them() {
+        // Three lines: the outside of the wall, the line between its leaves, and the inside of it.
+        let three = |a: f64, b: f64| found(&[("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, a, 6000.0, a]), ("A", [0.0, b, 6000.0, b])]);
+        // A hundred of facing on three hundred of wall, which is how the survey this was written against draws
+        // every wall of its outside: one wall 400 thick, and the line between the leaves is the face of neither.
+        let walls = three(100.0, 400.0);
+        let [wall] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((wall.thickness - 400.0).abs() < 1e-9, "{}", wall.thickness);
+        assert!((wall.start.1 - 200.0).abs() < 1e-9, "down the middle of both: {}", wall.start.1);
+        // The same the other way about: a wall 300 thick with a 50 lining against it is one wall 350 thick.
+        let walls = three(300.0, 350.0);
+        let [wall] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((wall.thickness - 350.0).abs() < 1e-9, "{}", wall.thickness);
+        // Evenly spaced, the three are a ladder and no wall of two leaves: it is the asymmetry that tells them
+        // apart, here as with a stair's treads.
+        assert!(three(280.0, 560.0).is_empty(), "{:?}", three(280.0, 560.0));
+        // And a duct between two walls is two walls: the far face has a face of its own beyond it, so taking the
+        // near pair leaves nothing over and there is nothing to put right.
+        let duct = found(&[
+            ("A", [0.0, 0.0, 6000.0, 0.0]),
+            ("A", [0.0, 100.0, 6000.0, 100.0]),
+            ("A", [0.0, 400.0, 6000.0, 400.0]),
+            ("A", [0.0, 500.0, 6000.0, 500.0]),
+        ]);
+        assert_eq!(duct.len(), 2, "{duct:?}");
+        assert!(duct.iter().all(|w| (w.thickness - 100.0).abs() < 1e-9), "{duct:?}");
     }
 
     #[test]

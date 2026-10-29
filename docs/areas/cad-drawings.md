@@ -98,7 +98,7 @@ project's millimetres: `thin` and `thick` (60 and 800) bound a wall's thickness,
 thickness or a hatch and a farther one is a room; `shortest` (400) is the shortest face, and the shortest stretch two
 faces must run alongside one another; `skew` (2 degrees) is how far out of parallel a wall's faces may be drawn.
 
-Five rules keep it from finding walls where there are none, and each of them was put there by a real survey.
+Six rules keep it from finding walls where there are none, and each of them was put there by a real survey.
 
 - **The nearest face across.** In a corridor 600 wide between two walls 100 thick, every distance from 100 to 800 is
   there to be mistaken for a wall. A face's wall is the nearest face across it, within a tenth of that distance, so the
@@ -118,6 +118,16 @@ Five rules keep it from finding walls where there are none, and each of them was
   that has it between them is the wall. Hatching, a cavity's lining and a duct read the same way, and a wall with a
   cavity behind it now comes in as one wall as thick as both. What it costs is two walls less than 200 mm apart,
   which come in as one wall as thick as the pair of them: a space narrower than that is not a room.
+- **A wall of two leaves is one wall.** The same thing a step further out. The survey this was written against draws
+  every wall of its outside as three lines — the outside of it, a line 100 in, and the inside at 400 — which is a
+  hundred of facing on three hundred of wall. The middle line has a face 100 away on the one side and 300 on the
+  other, too far for `INSIDE` and too near for the pair to be a room, so the nearest-face rule takes the facing for
+  the wall and leaves the inside of the wall over. A line left over is the sign of a wrong reading: the wall is the
+  two outer lines, 400 thick, and the one between them is the leaves' own. It is read so only where neither of the
+  two has anything beyond it that would make a thinner wall with it — on that survey the plot's boundary runs 590
+  outside the east wall, which is why that one wall needs the tightest-wall test to come out right — and where it
+  does not lie halfway between them, which is a ladder's rung and not a leaf. A lining and a cavity's inner leaf read
+  the same way. What it costs is the wall of two equal leaves, which stays what the nearest pair makes of it.
 - **An axis is stretched, never shortened to nothing.** The faces that make a wall stop half a wall short of a corner,
   so the axis between them does too; an end within half the thickness of another wall's axis is taken to the crossing.
   An end whose crossing would leave less than half the wall, or turn it round, is left where it was.
@@ -130,10 +140,15 @@ pieces are made one wall and `Hole` records the opening in it. A survey marks an
 the wall's faces across it and drawing two lines across the wall at the jambs, and that is read as well — but only
 with the glass between them, because the space between two windows is a pair of lines at a pair of jambs as well.
 
+A jamb is drawn from the one face of the wall to the other, so it is as long as the wall is thick (`t * 0.8..=t *
+1.3`); a mark half as long again is the survey's own — which way the door opens, where the sill is — and is no jamb.
+
 **Glass is what tells a window from a door.** A line drawn alongside the wall inside an opening, clear of both faces,
 is glass or a sill, and the opening is a window; an opening with nothing drawn in it is a hole you can walk through,
 which is a door. Nothing else in a plan says which it is: the survey this was written against draws no door swings at
-all, so an arc is not looked for.
+all, so an arc is not looked for. A line that runs more than half the length of the wall at that distance off its
+axis is the wall's own and no glass (`runs_along`): the line between a wall's two leaves lies inside its thickness
+from end to end, so without that the pier between two windows reads as a window itself.
 
 An opening is between `NARROWEST` (500 mm) and `WIDEST` (3,000 mm) wide — narrower is where the drawing broke a line,
 wider is where a wall stops — and those, like `INSIDE`, are measures of buildings and not the user's to set. A plan
@@ -147,7 +162,7 @@ is: two walls with a gap between them.
 
 What the pairing leaves is then tidied of three things that pair as a wall does and are no wall of the building
 (`trace::tidy`). None of them was thought of in advance: each is what the survey this was written against actually
-draws, and together they took 44 walls down to 26.
+draws, and together they take 30 pairs down to 24 walls.
 
 - **Nothing is a wall across itself.** A pair shorter than it is far apart is a pier drawn as a box, a plinth, a
   chimney, or the two jambs of an opening read as a pair of faces — on that survey, lines 262 long and 542 apart. The
@@ -184,10 +199,11 @@ against says `$INSUNITS` millimetres and is drawn in metres, so its longest line
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
-9 ms, finding 26 walls, 6 doors and 2 windows, of 44 pairs read and 18 of them left out as no walls. Every pair of
-faces is weighed, so the work is the square of their
-number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about 0.9 s, and more than `MAX_FACES`
-(10,000) faces is refused with what to do about it.
+9 ms, finding 24 walls, 3 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
+so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) traces 4,800 walls in about
+2.1 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it. Looking for the openings in
+them as well takes it to about 10 s, because `glazed_openings` weighs every line of the drawing against every wall
+found; that is where to look first if a big drawing is ever to be traced quickly.
 
 ## The window: Trace Walls
 
