@@ -26,8 +26,9 @@ could not read.
 
 **What it reads.** `LINE`, `LWPOLYLINE`, `POLYLINE` with the `VERTEX` entities that follow it to its `SEQEND`, `ARC` and
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).
-`TEXT` and `MTEXT` come in as the words the drawing says (below). Everything else is counted by its own name and listed
-in `left_out`, the most of a kind first: `415 HATCH`, `4 SPLINE`; hatches and splines are listed so. A polyline's bulge is read as the straight line between its points and
+`TEXT` and `MTEXT` come in as the words the drawing says, `DIMENSION` as what it measures and `HATCH` as what it
+fills with (all below). Everything else is counted by its own name and listed
+in `left_out`, the most of a kind first: `3251 POINT`, `4 SPLINE`. A polyline's bulge is read as the straight line between its points and
 said to be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a
 drawing is worse than none of it.
 
@@ -111,6 +112,31 @@ counted by what they measure (`1 DIMENSION of an angle`) and never guessed at. T
 something else of another entity, and both were read as that other thing before they were read as a dimension's: code
 3 is the style it is drawn in, where an `MTEXT`'s is a chunk of what it says, and code 42 is what it measures, where a
 polyline's is an arc read straight. A drawing of 601 dimensions reported 601 arcs it had read straight.
+
+**What a drawing fills an area with.** A survey hatches to say what something is: this wall is brick, this is the
+ground, this is the roof. A `HATCH` comes in as `Shape::Fill` — the name its pattern goes by, whether it is filled
+solid, the areas it fills, and the families of parallel lines that pattern is drawn with.
+
+It is read out of its group codes in the order the specification gives them, and not gathered code by code as every
+other entity is, because the same code says a different thing at each turn of a hatch: after the number of boundary
+loops (91) each loop says what kind it is (92) and then either the points of a polyline or one edge after another,
+each saying its own kind first. Line edges and arc edges are read, an arc as the points along it; a loop drawn with a
+spline or an ellipse is not read and is counted, because half a boundary is a ring that is not the shape it fills.
+Only the loops the file marks as a boundary of their own — external, or outermost — are filled: a loop that is
+neither is an island left out of the hatch, and filling one would fill what the drawing left empty.
+
+The pattern is drawn as the file draws it and not as the nearest of our own, so a pattern this has no name for comes
+out right. The file gives each family of lines its angle (53) and the offset from one line of it to the next (45 and
+46), turned as the family itself is: how far apart the lines are is the part of that offset lying across them, and
+the rest is how far along itself each line stands from the one before it. It gives the dashes the lines are drawn
+with, too (79 and 49), and those matter: that survey's ground is `AR-CONC`, thirteen families of dashes, and drawn
+with unbroken lines instead it came out a dense web of crossings where the drawing shows a stipple. A dash of no
+length is a dot, which is not drawn.
+
+A fill is drawn and nothing else: `underlay::lines` leaves it out, so nothing snaps to a hatch and no wall is traced
+from one. A hatch runs along the faces of the wall it fills, and read as geometry it would draw every one of them
+twice. Of that survey's 415 hatches — `ANSI31`, `SOLID`, `AR-CONC`, `AR-RSHKE`, `HONEY`, `AR-SAND`, `ANSI37` — two are
+not read and four boundaries are drawn with a spline or an ellipse.
 
 **The unit.** The file says its own in `$INSUNITS`, and inches, feet, millimetres, centimetres and metres are read from
 it. A file that says nothing, or says something else, is read as millimetres, which a drawing of a building nearly
@@ -434,6 +460,7 @@ drawn under a dim box that stands in the middle of them and cannot be moved are 
 its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
 while it is open, and the only typing it takes is into numbers.
 
-**What is still missing**: a survey's hatches are counted and not read, so what a drawing says a wall is made of by
-hatching it says to nobody here. What a dimension measures is read but not yet used: the walls a trace builds are
-built from the geometry alone, and a measurement that disagrees with the geometry is reported and nothing more.
+**What is still missing**: what a drawing says is read and drawn but not yet used. A wall is traced from the
+geometry alone — the measurement written over it and the hatch filling it are reported and drawn and go no further,
+so a wall that a survey hatches `AR-CONC` does not come out concrete, and one a surveyor wrote `870` over comes out
+the 8800 it is drawn.

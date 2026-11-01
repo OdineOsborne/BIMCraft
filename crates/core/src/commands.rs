@@ -105,8 +105,9 @@ pub static ALL: &[Command] = &[
          `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
          `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
          POLYLINE, ARC and CIRCLE, each on the layer it names, TEXT and MTEXT as the words the drawing says, and \
-         DIMENSION as what it measures; it opens a block where it is put, bringing in what it holds on the layer the \
-         block stands on; hatches, splines and the dimensions of an angle or a radius are counted and named, never \
+         DIMENSION as what it measures and HATCH as the areas it fills and the pattern it fills them with; it opens \
+         a block where it is put, bringing in what it holds on the layer the \
+         block stands on; splines and the dimensions of an angle or a radius are counted and named, never \
          guessed at. `measures` holds what the drawing's measurements say, held against what it draws: how many were \
          `read` with a figure that is a number, what one of those figures' units is in millimetres (`unit`: 10 where \
          a drawing prints centimetres, taken from what most of its figures agree on), how many `disagree` — say a \

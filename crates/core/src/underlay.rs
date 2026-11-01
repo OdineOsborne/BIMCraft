@@ -10,12 +10,6 @@
 use crate::geom::P2;
 use crate::model::{Model, Underlay};
 
-/// How far apart, in degrees, the points along an arc are: a circle becomes 72 lines, which is round at any scale a
-/// plan is read at.
-const ARC_STEP: f64 = 5.0;
-/// The most points one arc becomes, whatever its angle says.
-const ARC_POINTS: usize = 721;
-
 /// The lines the underlay draws, in this project's millimetres: each a run of points and whether it closes. An underlay
 /// whose drawing is not loaded draws nothing, as a link that is not loaded shows nothing.
 pub fn lines(m: &Model, u: &Underlay) -> Vec<(Vec<P2>, bool)> {
@@ -37,7 +31,11 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                     out.push((layer.name.clone(), points.iter().map(|p| place(*p)).collect(), *closed))
                 }
                 crate::dxf::Shape::Arc { at, radius, from, to } => {
-                    out.push((layer.name.clone(), along(*at, *radius, *from, *to).into_iter().map(place).collect(), false));
+                    out.push((
+                        layer.name.clone(),
+                        crate::geom::along_arc(*at, *radius, *from, *to).into_iter().map(place).collect(),
+                        false,
+                    ));
                 }
                 // A word is what the drawing says and no line of the building: it is drawn ([`words`]) and never
                 // traced over or snapped to, or a survey's lettering would come in as walls.
@@ -45,6 +43,9 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                 // Nor is a measurement: the two lines it takes its figure out along are a pair of parallel lines a
                 // wall's thickness apart, which is the very thing a trace looks for. It is drawn ([`measures`]).
                 crate::dxf::Shape::Measure { .. } => {}
+                // Nor is a hatch: its boundary runs along the faces of the wall it fills, and traced it would draw
+                // every one of them twice. It is drawn ([`fills`]).
+                crate::dxf::Shape::Fill { .. } => {}
             }
         }
     }
@@ -144,6 +145,28 @@ pub fn measures(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
     out
 }
 
+/// The areas the underlay fills, each with the layer it is filled on, the ring it fills, whether it is filled solid
+/// and the families of lines its pattern is drawn with, in this project's millimetres. One for every area a hatch
+/// fills, so a hatch that fills two stands twice. They are drawn and nothing else: [`lines`] leaves them out.
+pub fn fills(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool, Vec<crate::dxf::Ruling>)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Fill { solid, rings, rulings, .. } = shape else { continue };
+            // The underlay is turned as a whole, so the pattern turns with it.
+            let turned: Vec<crate::dxf::Ruling> =
+                rulings.iter().map(|r| crate::dxf::Ruling { angle: r.angle + u.angle, ..r.clone() }).collect();
+            for ring in rings {
+                out.push((layer.name.clone(), ring.iter().map(|p| place(*p)).collect(), *solid, turned.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// What the underlay says, and where: the middle of each word, how tall it is, and what it reads, in this project's
 /// millimetres. The middle of a word and not its start, because that is the point of it that stands in the room it
 /// names: a long name written across a small room begins outside it.
@@ -161,22 +184,6 @@ pub fn said(m: &Model, u: &Underlay) -> Vec<(P2, f64, String)> {
         }
     }
     out
-}
-
-/// The points along an arc of `radius` about `at`, from `from` to `to`, degrees counter-clockwise from east. An arc
-/// whose end is before its start runs the long way round, as a drawing reads one.
-fn along(at: P2, radius: f64, from: f64, to: f64) -> Vec<P2> {
-    let sweep = {
-        let turn = to - from;
-        if turn <= 0.0 { turn + 360.0 } else { turn }
-    };
-    let steps = ((sweep / ARC_STEP).ceil() as usize).clamp(1, ARC_POINTS - 1);
-    (0..=steps)
-        .map(|i| {
-            let a = (from + sweep * i as f64 / steps as f64).to_radians();
-            P2(at.0 + radius * a.cos(), at.1 + radius * a.sin())
-        })
-        .collect()
 }
 
 /// What a layer's own name says it is of the project's history. A survey says it in words (`Stato di fatto`,

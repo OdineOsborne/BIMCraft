@@ -325,7 +325,7 @@ fn underlay(s: &mut Scene, m: &Model, u: &crate::model::Underlay, near: &dyn Fn(
                 }
                 // A word of the drawing is no line of the building, and nothing snaps to lettering, nor to the lines
                 // a dimension takes its figure out along.
-                crate::dxf::Shape::Words { .. } | crate::dxf::Shape::Measure { .. } => {}
+                crate::dxf::Shape::Words { .. } | crate::dxf::Shape::Measure { .. } | crate::dxf::Shape::Fill { .. } => {}
                 crate::dxf::Shape::Path { points, closed } => {
                     if !reaches(points) {
                         continue;

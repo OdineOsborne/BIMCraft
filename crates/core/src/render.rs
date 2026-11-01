@@ -1279,6 +1279,21 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
                 }
             }
         };
+        // What the drawing fills an area with, under its lines: a hatch is a survey saying what something is made
+        // of, and it is drawn with its own pattern — one family of parallel lines at a time, at the angle and the
+        // spacing the file gives, so a pattern this has no name for is drawn as well as one it has.
+        for (layer, ring, solid, rulings) in crate::underlay::fills(m, u) {
+            let Some((color, _)) = pen(&layer) else { continue };
+            if solid {
+                hatch(&mut d, &ring, Lay::of(Pattern::Solid, P2(1.0, 0.0), 1.0), color);
+            }
+            for ruling in rulings {
+                let (sin, cos) = ruling.angle.to_radians().sin_cos();
+                let lay =
+                    Lay { pattern: Pattern::Horizontal, u: P2(cos, sin), gap: ruling.gap, dashes: &ruling.dashes, shift: ruling.shift };
+                hatch(&mut d, &ring, lay, color);
+            }
+        }
         for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
             let Some((color, dash)) = pen(&layer) else { continue };
             match dash {
@@ -1628,7 +1643,7 @@ fn cut_layer(d: &mut Drawing, m: &Model, layer: &Layer, ring: &[P2], u: P2, room
     if pattern != Pattern::None && room >= PATTERN_ROOM && d.detail == Detail::Fine {
         d.fill(&[ring.to_vec()], PAPER);
         let gap = GAP / d.view.scale;
-        hatch(d, ring, pattern, u, INK, gap);
+        hatch(d, ring, Lay::of(pattern, u, gap), INK);
     } else if layer.function != Function::Structure {
         d.fill(&[ring.to_vec()], LIGHT_POCHE);
     }
@@ -1637,19 +1652,41 @@ fn cut_layer(d: &mut Drawing, m: &Model, layer: &Layer, ring: &[P2], u: P2, room
 /// A surface pattern over `ring`, where its lines are far enough apart to read.
 fn surface(d: &mut Drawing, ring: &[P2], pattern: Pattern, color: Rgb) {
     if MODULE * d.view.scale >= GAP / 2.0 {
-        hatch(d, ring, pattern, P2(1.0, 0.0), color, MODULE);
+        hatch(d, ring, Lay::of(pattern, P2(1.0, 0.0), MODULE), color);
     }
 }
 
-/// `pattern` over `ring` (model mm), as far as the view shows it: its lines `gap` mm apart, thin,
-/// its courses along unit `u`; an insulation's zigzag along the ring's length, side to side.
-fn hatch(d: &mut Drawing, ring: &[P2], pattern: Pattern, u: P2, color: Rgb, gap: f64) {
+/// How a pattern is laid over a ring: which pattern, its courses along unit `u`, its lines `gap` mm apart, and —
+/// where a drawing of its own says so — the dashes those lines are drawn with and how far each line stands along
+/// itself from the one before it. Our own patterns have no dashes.
+struct Lay<'a> {
+    pattern: Pattern,
+    u: P2,
+    gap: f64,
+    dashes: &'a [f64],
+    shift: f64,
+}
+
+impl Lay<'_> {
+    /// Our own pattern, drawn with unbroken lines.
+    fn of(pattern: Pattern, u: P2, gap: f64) -> Lay<'static> {
+        Lay { pattern, u, gap, dashes: &[], shift: 0.0 }
+    }
+}
+
+/// The most dashes one line of a pattern is chopped into before it is drawn unbroken instead.
+const DASHES: f64 = 2000.0;
+
+/// `lay` over `ring` (model mm), as far as the view shows it, thin; an insulation's zigzag along the ring's length,
+/// side to side.
+fn hatch(d: &mut Drawing, ring: &[P2], lay: Lay, color: Rgb) {
     let part = std::mem::replace(&mut d.part, Part::Pattern);
-    hatching(d, ring, pattern, u, color, gap);
+    hatching(d, ring, lay, color);
     d.part = part;
 }
 
-fn hatching(d: &mut Drawing, ring: &[P2], pattern: Pattern, u: P2, color: Rgb, gap: f64) {
+fn hatching(d: &mut Drawing, ring: &[P2], lay: Lay, color: Rgb) {
+    let Lay { pattern, u, gap, .. } = lay;
     let (w, h) = (d.view.width as f32, d.view.height as f32);
     let (lo, hi) = (d.view.mm((0.0, h)), d.view.mm((w, 0.0)));
     let ring = [(P2(1.0, 0.0), lo.0), (P2(-1.0, 0.0), -hi.0), (P2(0.0, 1.0), lo.1), (P2(0.0, -1.0), -hi.1)]
@@ -1664,12 +1701,31 @@ fn hatching(d: &mut Drawing, ring: &[P2], pattern: Pattern, u: P2, color: Rgb, g
     }
     let span = |dir: P2| ring.iter().map(|q| q.dot(dir)).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)));
     let n = u.perp();
+    let cycle: f64 = lay.dashes.iter().map(|d| d.abs()).sum();
     let mut segment = |d: &mut Drawing, from: P2, dir: P2, s0: f64, s1: f64| {
         for (a, b) in view3d::crossings(&ring, from, dir) {
             let (a, b) = (a.max(s0), b.min(s1));
-            if b > a {
-                d.line(&[from + dir * a, from + dir * b], Pen::FINE, color, false);
+            if b <= a {
+                continue;
             }
+            // A line of a drawing's own pattern is drawn with the dashes that pattern says: a length drawn and a
+            // negative one left, over and over along the line, and the cycle shifted along by `shift` from the line
+            // before it, which is what staggers a stipple instead of lining it up in rows.
+            if cycle > 0.0 && (b - a) / cycle <= DASHES {
+                let k = (from.dot(dir.perp()) / gap).round();
+                let mut t = a - (a - k * lay.shift).rem_euclid(cycle);
+                while t < b {
+                    for length in lay.dashes {
+                        let (from_, to_) = (t.max(a), (t + length.abs()).min(b));
+                        if *length > 0.0 && to_ > from_ {
+                            d.line(&[from + dir * from_, from + dir * to_], Pen::FINE, color, false);
+                        }
+                        t += length.abs();
+                    }
+                }
+                continue;
+            }
+            d.line(&[from + dir * a, from + dir * b], Pen::FINE, color, false);
         }
     };
     // Lines along `dir`, `step` apart across it, `shift` along it from line to line.

@@ -3,9 +3,13 @@
 //!
 //! It reads what a record says and no more. `LINE`, `LWPOLYLINE`, `POLYLINE` with its `VERTEX`, `ARC` and `CIRCLE`, each
 //! on the layer it names (group code 8), come in, and `TEXT` and `MTEXT` as the words the drawing says, where it says
-//! them; everything else is counted by its own name and listed, never guessed
+//! them; `DIMENSION` as what the drawing measures and the figure it writes over it, and `HATCH` as the areas it
+//! fills and the pattern it fills them with. Everything else is counted by its own name and listed, never guessed
 //! at. A polyline's bulge (an arc between two of its points) is read as the straight line between them and said to
 //! be, and one of more points than `MAX_VERTICES` is left out whole rather than cut short.
+//! What a drawing says of itself is drawn and is no line of the building: a word, a measurement and a hatch are
+//! drawn with the plan and left out of the lines traced and snapped to, or a survey's lettering would come in as
+//! walls, a dimension's two lines as a wall's two faces, and a hatch's boundary as the faces it runs along.
 //! A block is opened where it is put: a survey draws its doors, its windows and its furniture as blocks, so an
 //! `INSERT` brings in what the `BLOCK` of that name holds, from its base point, turned and scaled as the insert
 //! says and as many times as its grid of copies says. What a block draws on layer `0` comes in on the layer the
@@ -38,6 +42,13 @@ pub const MAX_WORD: usize = 256;
 const NAMED: usize = 12;
 /// How many of a drawing's figures are tried as the unit the rest are held against ([`measured`]).
 const TRIED: usize = 64;
+/// The most group codes one hatch is read out of.
+const MAX_RAW: usize = 200_000;
+/// The most areas one hatch fills, and the most families of lines its pattern is drawn with.
+const MAX_RINGS: usize = 256;
+const MAX_RULINGS: usize = 64;
+/// The most dashes one family of a pattern's lines is drawn with.
+const MAX_DASHES: usize = 64;
 
 /// How a file's numbers become millimetres.
 #[derive(Clone, Copy, Debug, Default)]
@@ -66,6 +77,25 @@ pub enum Shape {
     /// The drawing's own word on a distance, and no line of the building: a plan draws it and the walls are not read
     /// from it, or the two lines a dimension takes its measurement out along would be read as a wall.
     Measure { from: P2, to: P2, line: [P2; 2], text: String, height: f64 },
+    /// What a drawing fills an area with to say what it is of: the name its pattern goes by, whether it is filled
+    /// solid, the areas it fills, and the families of parallel lines that pattern is drawn with, which the file
+    /// gives whether or not this knows the name.
+    ///
+    /// A fill is drawn and no line of the building: a hatch runs along the faces of the wall it fills, and read as
+    /// geometry it would draw every one of them twice.
+    Fill { pattern: String, solid: bool, rings: Vec<Vec<P2>>, rulings: Vec<Ruling> },
+}
+
+/// One family of a hatch pattern's lines: how far it is turned, degrees counter-clockwise from east, how far apart
+/// its lines are across themselves, how far along itself each line stands from the one before it, and the dashes it
+/// is drawn with, mm — a length to draw and a negative one to leave, over and over, and none for a line with no
+/// break in it. A pattern of dashes drawn without them is a web of lines and not the stipple a drawing shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ruling {
+    pub angle: f64,
+    pub gap: f64,
+    pub shift: f64,
+    pub dashes: Vec<f64>,
 }
 
 /// A layer of a drawing: the name the file gives it, and what is drawn on it.
@@ -261,6 +291,10 @@ struct Entity {
     align: (Option<i64>, Option<i64>),
     /// The two points a `DIMENSION` measures between, under codes 13 and 23 and 14 and 24.
     between: (Option<P2>, Option<P2>),
+    /// Every group code of a `HATCH`, in the order the file gives them. A hatch's boundary is loops of edges and its
+    /// pattern is families of lines, and neither can be read out of the codes gathered one by one: the same code
+    /// says a different thing at each turn, and what it says is the turn it comes at.
+    raw: Vec<(i64, String)>,
 }
 
 /// A block put into the drawing by an `INSERT`: which block, on what layer, where, turned and scaled how, and how
@@ -409,6 +443,9 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             // A dimension says in 3 what it is drawn in and in 42 what it measures, where the one is a chunk of what
             // an `MTEXT` says and the other an arc of a polyline read straight.
             let dim = kind == "DIMENSION";
+            if kind == "HATCH" && e.raw.len() < MAX_RAW {
+                e.raw.push((code, value.to_string()));
+            }
             match code {
                 1 => e.text.push_str(value),
                 3 if !dim => e.text.push_str(value),
@@ -507,6 +544,9 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             // What the drawing measures. The figure it prints is read out of the picture a CAD drew it as, which is a
             // block of its own, so this is here and not in `finish`, where the blocks are not to hand.
             "DIMENSION" => measurement(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)),
+            // What the drawing fills an area with. Its boundary and its pattern are read out of its group codes in
+            // the order they come, so this is here with the dimension and not in `finish`.
+            "HATCH" => filled(&e, d.scale, &mut left_out).map(|shape| (e.layer.clone(), shape)),
             "SEQEND" => open.take().and_then(|mut o| {
                 bulges += o.bulges;
                 let layer = o.layer.clone();
@@ -597,6 +637,9 @@ fn from_base(shape: Shape, base: P2) -> Shape {
         Shape::Words { at, text, height, angle } => Shape::Words { at: off(at), text, height, angle },
         Shape::Measure { from, to, line, text, height } => {
             Shape::Measure { from: off(from), to: off(to), line: [off(line[0]), off(line[1])], text, height }
+        }
+        Shape::Fill { pattern, solid, rings, rulings } => {
+            Shape::Fill { pattern, solid, rings: rings.into_iter().map(|r| r.into_iter().map(off).collect()).collect(), rulings }
         }
     }
 }
@@ -742,6 +785,26 @@ fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
             let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && height <= MAX_COORD;
             ok.then_some(Shape::Measure { from, to, line, text: text.clone(), height }).ok_or(far)
         }
+        Shape::Fill { pattern, solid, rings, rulings } => {
+            // A pattern goes with the block: its lines turn with it and spread as it is scaled. Scaled unevenly
+            // they would be a family of lines no longer evenly apart, which is no pattern this draws.
+            let spread = placed.round().ok_or("hatches in a block scaled into ellipses")?;
+            let (turn, over) = placed.turn();
+            let rings: Vec<Vec<P2>> = rings.iter().map(|r| r.iter().map(|p| placed.point(*p)).collect()).collect();
+            let rulings = rulings
+                .iter()
+                .map(|r| Ruling {
+                    angle: if over { turn - r.angle } else { r.angle + turn },
+                    gap: r.gap * spread,
+                    shift: r.shift * spread,
+                    dashes: r.dashes.iter().map(|d| d * spread).collect(),
+                })
+                .collect();
+            match rings.iter().flatten().all(sane) {
+                true => Ok(Shape::Fill { pattern: pattern.clone(), solid: *solid, rings, rulings }),
+                false => Err(far),
+            }
+        }
     }
 }
 
@@ -793,6 +856,123 @@ fn measurement(e: &Entity, scale: f64, blocks: &std::collections::HashMap<String
     };
     let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && (0.0..=MAX_COORD).contains(&height);
     (ok && text.chars().count() <= MAX_WORD).then_some(Shape::Measure { from, to, line, text, height })
+}
+
+/// What a `HATCH` fills, in millimetres, or none where it fills nothing this can read.
+///
+/// A hatch is read out of its group codes in the order the specification gives them, because the same code says a
+/// different thing at each turn of it: after the number of boundary loops (91) each loop says what kind it is (92)
+/// and then either the points of a polyline or one edge after another, and after the boundary the pattern says how
+/// many families of lines it is drawn with (78) and then each family's angle and offset.
+///
+/// Only the loops the file marks as a boundary of their own — external, or outermost — are filled. A loop that is
+/// neither is an island left out of the hatch, and filling one would fill what the drawing left empty. A loop drawn
+/// with a spline or an ellipse is not read and is counted: half a boundary is a ring that is not the shape it fills.
+fn filled(e: &Entity, scale: f64, left_out: &mut std::collections::BTreeMap<String, usize>) -> Option<Shape> {
+    let raw = &e.raw;
+    let at = |i: usize| raw.get(i).map(|(code, _)| *code);
+    let num = |i: usize| raw.get(i).and_then(|(_, v)| v.trim().parse::<f64>().ok());
+    let int = |i: usize| raw.get(i).and_then(|(_, v)| v.trim().parse::<i64>().ok()).unwrap_or(0);
+    let find = |from: usize, code: i64| (from..raw.len()).find(|i| at(*i) == Some(code));
+    // A point under `x` and the code after it: a hatch writes its y under the x, always.
+    let point = |i: usize, x: i64, y: i64| match (num(i), at(i + 1) == Some(y) && at(i) == Some(x)) {
+        (Some(px), true) => num(i + 1).map(|py| P2(px * scale, py * scale)),
+        _ => None,
+    };
+    let mut rings: Vec<Vec<P2>> = Vec::new();
+    let mut unread = 0usize;
+    let mut i = find(0, 91)?;
+    let loops = int(i).clamp(0, MAX_RINGS as i64) as usize;
+    i += 1;
+    for _ in 0..loops {
+        let Some(f) = find(i, 92) else { break };
+        let (kind, mut ring, mut whole) = (int(f), Vec::new(), true);
+        i = f + 1;
+        let Some(n) = find(i, 93) else { break };
+        let count = int(n).clamp(0, MAX_VERTICES as i64) as usize;
+        i = n + 1;
+        // A polyline boundary is its points; any other is one edge after another, each saying its own kind first.
+        if kind & 2 != 0 {
+            for _ in 0..count {
+                let Some(x) = find(i, 10) else { break };
+                i = x + 2;
+                ring.extend(point(x, 10, 20));
+            }
+        } else {
+            for _ in 0..count {
+                let Some(t) = find(i, 72) else { break };
+                i = t + 1;
+                match int(t) {
+                    1 => {
+                        let (from, to) = (find(i, 10).and_then(|x| point(x, 10, 20)), find(i, 11).and_then(|x| point(x, 11, 21)));
+                        match (from, to) {
+                            (Some(from), Some(to)) => {
+                                ring.push(from);
+                                ring.push(to);
+                            }
+                            _ => whole = false,
+                        }
+                        i = find(i, 11).map_or(i, |x| x + 2);
+                    }
+                    2 => {
+                        let centre = find(i, 10).and_then(|x| point(x, 10, 20));
+                        let radius = find(i, 40).and_then(num).map(|r| r * scale);
+                        let (from, to) = (find(i, 50).map(|x| num(x).unwrap_or(0.0)), find(i, 51).map(|x| num(x).unwrap_or(360.0)));
+                        match (centre, radius, from, to) {
+                            (Some(centre), Some(radius), Some(from), Some(to)) if radius > 0.0 => {
+                                ring.extend(crate::geom::along_arc(centre, radius, from, to));
+                            }
+                            _ => whole = false,
+                        }
+                        i = find(i, 51).map_or(i, |x| x + 1);
+                    }
+                    // An ellipse or a spline: a shape this does not draw, so the ring it is part of is not the
+                    // shape the drawing fills and is left out whole.
+                    _ => whole = false,
+                }
+            }
+        }
+        let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
+        ring.dedup();
+        match whole && ring.len() >= 3 && ring.iter().all(sane) {
+            true if kind & 1 != 0 || kind & 16 != 0 => rings.push(ring),
+            true => {}
+            false => unread += 1,
+        }
+    }
+    if unread > 0 {
+        *left_out.entry("hatch boundaries drawn with a spline or an ellipse".into()).or_default() += unread;
+    }
+    // The families of lines the pattern is drawn with. The offset (45 and 46) is the way one line of a family stands
+    // from the next, turned as the family itself is, so how far apart they are across themselves is the part of it
+    // that lies across the line — the rest is how far the dashes along one are shifted from those along the next.
+    let mut rulings = Vec::new();
+    if let Some(n) = find(0, 78) {
+        let mut i = n + 1;
+        for _ in 0..int(n).clamp(0, MAX_RULINGS as i64) {
+            let Some(a) = find(i, 53) else { break };
+            let angle = num(a).unwrap_or(0.0);
+            let Some(o) = find(a, 45) else { break };
+            i = o + 2;
+            let (Some(across), Some(up)) = (num(o), num(o + 1).filter(|_| at(o + 1) == Some(46))) else { continue };
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let gap = (cos * up - sin * across).abs() * scale;
+            let shift = (cos * across + sin * up) * scale;
+            // The dashes the lines of this family are drawn with, under 49, as many as 79 says.
+            let dashes: Vec<f64> = match find(o, 79) {
+                Some(n) => (0..int(n).clamp(0, MAX_DASHES as i64))
+                    .filter_map(|k| find(n + 1 + k as usize, 49).filter(|d| *d == n + 1 + k as usize).and_then(num))
+                    .map(|d| d * scale)
+                    .collect(),
+                None => Vec::new(),
+            };
+            if angle.is_finite() && gap.is_finite() && gap > 0.0 && shift.is_finite() && dashes.iter().all(|d| d.is_finite()) {
+                rulings.push(Ruling { angle, gap, shift, dashes });
+            }
+        }
+    }
+    let solid = e.flags & 1 != 0;
+    (!rings.is_empty()).then(|| Shape::Fill { pattern: e.name.clone(), solid, rings, rulings })
 }
 
 /// What a dimension this does not read measures, to be counted by: a count of them says what they were, where a count
@@ -963,6 +1143,7 @@ fn extent(layers: &[Layer]) -> Option<[P2; 2]> {
                     grow(P2(at.0 + x * cos - y * sin, at.1 + x * sin + y * cos));
                 }
             }
+            Shape::Fill { rings, .. } => rings.iter().flatten().for_each(|p| grow(*p)),
             // The points of a measurement, and how far its figure is written beyond the line it is written along.
             Shape::Measure { from, to, line, height, .. } => {
                 [*from, *to, line[0], line[1]].iter().for_each(|p| grow(*p));

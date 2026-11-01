@@ -493,3 +493,98 @@ fn a_figure_written_with_a_comma_for_its_decimal_point_is_a_number() {
     assert_eq!((held.read, held.disagree.len()), (2, 0), "{:?}", held.disagree);
     assert!((held.unit - 1000.0).abs() < 1e-6, "its figures are in metres: {} mm to one", held.unit);
 }
+
+/// A `HATCH` on `layer`, filled with the pattern `name`, over `ring` as a closed polyline boundary, with the lines
+/// its pattern is drawn with after it.
+fn hatch(layer: &str, name: &str, solid: bool, ring: &[(f64, f64)], rulings: &[(f64, f64)]) -> String {
+    let points: String = ring.iter().map(|(x, y)| format!("10\n{x}\n20\n{y}\n")).collect();
+    let lines: String = rulings
+        .iter()
+        .map(|(angle, gap)| {
+            // The offset a pattern's lines repeat by, which the file gives turned as the lines themselves are.
+            let (sin, cos) = (angle + 90.0).to_radians().sin_cos();
+            format!("53\n{angle}\n43\n0\n44\n0\n45\n{}\n46\n{}\n79\n0\n", gap * cos, gap * sin)
+        })
+        .collect();
+    format!(
+        "0\nHATCH\n8\n{layer}\n10\n0\n20\n0\n2\n{name}\n70\n{}\n71\n0\n91\n1\n92\n3\n72\n0\n73\n1\n93\n{}\n{points}97\n0\n75\n1\n76\n1\n52\n0\n41\n1\n77\n0\n78\n{}\n{lines}",
+        u8::from(solid),
+        ring.len(),
+        rulings.len(),
+    )
+}
+
+/// A square of `side`, from the origin: what a survey hatches when it says a wall is brick.
+fn square(side: f64) -> Vec<(f64, f64)> {
+    vec![(0.0, 0.0), (side, 0.0), (side, side), (0.0, side)]
+}
+
+#[test]
+fn a_hatch_comes_in_as_what_a_drawing_fills_an_area_with() {
+    // A survey hatches a wall to say what it is made of: the pattern it fills with, the area it fills, and the lines
+    // that pattern is drawn with — one family at 45 degrees, 3.175 apart, which is what ANSI31 is.
+    let d = read_ok(&dxf("", &hatch("retini", "ANSI31", false, &square(1000.0), &[(45.0, 3.175)])));
+    assert_eq!(d.layers[0].name, "retini");
+    let Shape::Fill { pattern, solid, rings, rulings } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!((pattern.as_str(), *solid), ("ANSI31", false));
+    assert_eq!(rings.len(), 1, "{rings:?}");
+    assert_eq!(rings[0], [P2(0.0, 0.0), P2(1000.0, 0.0), P2(1000.0, 1000.0), P2(0.0, 1000.0)]);
+    assert_eq!(rulings.len(), 1, "{rulings:?}");
+    assert!((rulings[0].angle - 45.0).abs() < 1e-9 && (rulings[0].gap - 3.175).abs() < 1e-9, "{:?}", rulings[0]);
+    assert!(d.left_out.is_empty(), "{:?}", d.left_out);
+}
+
+#[test]
+fn a_hatch_filled_solid_says_so_and_is_drawn_with_no_lines() {
+    let d = read_ok(&dxf("", &hatch("retini", "SOLID", true, &square(500.0), &[])));
+    let Shape::Fill { pattern, solid, rulings, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!((pattern.as_str(), *solid, rulings.len()), ("SOLID", true, 0));
+}
+
+#[test]
+fn a_hatch_bounded_by_lines_and_arcs_comes_in_as_the_ring_they_draw() {
+    // A boundary that is no polyline is the edges it is drawn with, one after another: here a line and the half
+    // circle back over it.
+    let edges = "92\n1\n93\n2\n72\n1\n10\n0\n20\n0\n11\n1000\n21\n0\n72\n2\n10\n500\n20\n0\n40\n500\n50\n0\n51\n180\n73\n1\n97\n0\n";
+    let ents = format!("0\nHATCH\n8\nretini\n10\n0\n20\n0\n2\nANSI31\n70\n0\n71\n0\n91\n1\n{edges}78\n0\n");
+    let d = read_ok(&dxf("", &ents));
+    let Shape::Fill { rings, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!(rings.len(), 1, "{rings:?}");
+    assert!(rings[0].len() > 10, "the arc comes in as the points along it: {}", rings[0].len());
+    assert!(rings[0][0].dist(P2(0.0, 0.0)) < 1e-9, "{:?}", rings[0][0]);
+    assert!(rings[0].iter().any(|p| p.dist(P2(500.0, 500.0)) < 1.0), "the top of the half circle: {:?}", rings[0]);
+}
+
+#[test]
+fn a_hatch_boundary_this_does_not_read_is_counted_and_the_hatch_keeps_the_rest() {
+    // A boundary drawn with a spline is one this does not read, so that ring is left out and said; the others stand.
+    let spline = "92\n1\n93\n1\n72\n4\n94\n3\n97\n0\n";
+    let ring = "92\n3\n72\n0\n73\n1\n93\n3\n10\n0\n20\n0\n10\n100\n20\n0\n10\n100\n20\n100\n97\n0\n";
+    let ents = format!("0\nHATCH\n8\nretini\n10\n0\n20\n0\n2\nANSI31\n70\n0\n71\n0\n91\n2\n{spline}{ring}78\n0\n");
+    let d = read_ok(&dxf("", &ents));
+    let Shape::Fill { rings, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!(rings.len(), 1, "the one it can read: {rings:?}");
+    assert_eq!(d.left_out, ["1 hatch boundaries drawn with a spline or an ellipse"]);
+}
+
+#[test]
+fn a_hatch_is_drawn_under_the_plan_and_is_no_line_of_the_building() {
+    // A hatch's boundary runs along the faces of the wall it fills, so read as geometry it would double them.
+    let mut m = crate::model::Model::new("Test");
+    let layers = vec![crate::dxf::Layer {
+        name: "retini".into(),
+        shapes: vec![Shape::Fill {
+            pattern: "ANSI31".into(),
+            solid: false,
+            rings: vec![vec![P2(0.0, 0.0), P2(1000.0, 0.0), P2(1000.0, 300.0), P2(0.0, 300.0)]],
+            rulings: vec![crate::dxf::Ruling { angle: 45.0, gap: 100.0, shift: 0.0, dashes: Vec::new() }],
+        }],
+    }];
+    m.drawings.insert("rilievo.dxf".into(), std::sync::Arc::new(crate::dxf::Drawing { layers, scale: 1.0, ..Default::default() }));
+    let u = crate::model::Underlay { name: "Rilievo".into(), path: "rilievo.dxf".into(), scale: 1.0, ..Default::default() };
+    assert!(crate::underlay::lines(&m, &u).is_empty(), "a hatch is no wall face to trace or snap to");
+    let filled = crate::underlay::fills(&m, &u);
+    assert_eq!(filled.len(), 1, "{filled:?}");
+    assert_eq!(filled[0].0, "retini");
+    assert_eq!(filled[0].1[0], P2(0.0, 0.0), "where the underlay stands");
+}

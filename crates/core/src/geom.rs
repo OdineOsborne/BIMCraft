@@ -72,6 +72,28 @@ pub fn move_edge([lo, hi]: [P2; 2], k: usize, p: P2) -> [P2; 2] {
     }
 }
 
+/// How far apart, in degrees, the points along an arc are: a circle becomes 72 lines, which is round at any scale a
+/// plan is read at.
+const ARC_STEP: f64 = 5.0;
+/// The most points one arc becomes, whatever its angle says.
+const ARC_POINTS: usize = 721;
+
+/// The points along an arc of `radius` about `at`, from `from` to `to`, degrees counter-clockwise from east: what a
+/// plan draws a curve as. An arc whose end is before its start runs the long way round, as a drawing reads one.
+pub fn along_arc(at: P2, radius: f64, from: f64, to: f64) -> Vec<P2> {
+    let sweep = {
+        let turn = to - from;
+        if turn <= 0.0 { turn + 360.0 } else { turn }
+    };
+    let steps = ((sweep / ARC_STEP).ceil() as usize).clamp(1, ARC_POINTS - 1);
+    (0..=steps)
+        .map(|i| {
+            let a = (from + sweep * i as f64 / steps as f64).to_radians();
+            P2(at.0 + radius * a.cos(), at.1 + radius * a.sin())
+        })
+        .collect()
+}
+
 pub fn ring_edges(ring: &[P2]) -> impl Iterator<Item = (P2, P2)> + '_ {
     ring.iter().copied().zip(ring.iter().copied().cycle().skip(1))
 }
