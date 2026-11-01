@@ -1288,7 +1288,7 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
         }
         // What the drawing says is drawn with what it draws: a survey's room names, the figures of its dimensions,
         // the letter on its north point. They are its lettering and never dashed, whatever the phase says.
-        for (layer, stroke) in crate::underlay::words(m, u) {
+        for (layer, stroke) in crate::underlay::words(m, u).into_iter().chain(crate::underlay::measures(m, u)) {
             let Some((color, _)) = pen(&layer) else { continue };
             d.line(&stroke, Pen::HAIRLINE, color, false);
         }

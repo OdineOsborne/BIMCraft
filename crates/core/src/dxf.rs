@@ -57,6 +57,13 @@ pub enum Shape {
     /// capitals are, and how far it is turned, degrees counter-clockwise from east. It is what the drawing says and
     /// no line of the building, so a plan draws it and the walls are not read from it.
     Words { at: P2, text: String, height: f64, angle: f64 },
+    /// What a survey measures on its drawing: the two points it measures between, the line it writes the measurement
+    /// along — those two points brought onto it, so that how long it is is what the drawing measured — and the figure
+    /// it writes there, with how tall that figure is written (zero where the drawing does not say).
+    ///
+    /// The drawing's own word on a distance, and no line of the building: a plan draws it and the walls are not read
+    /// from it, or the two lines a dimension takes its measurement out along would be read as a wall.
+    Measure { from: P2, to: P2, line: [P2; 2], text: String, height: f64 },
 }
 
 /// A layer of a drawing: the name the file gives it, and what is drawn on it.
@@ -147,6 +154,8 @@ struct Entity {
     /// What a `TEXT`'s point is the point of, under codes 72 and 73, and what an `MTEXT`'s is, under 71: a word is
     /// written from its left, from its middle or from its right, and the file says which.
     align: (Option<i64>, Option<i64>),
+    /// The two points a `DIMENSION` measures between, under codes 13 and 23 and 14 and 24.
+    between: (Option<P2>, Option<P2>),
 }
 
 /// A block put into the drawing by an `INSERT`: which block, on what layer, where, turned and scaled how, and how
@@ -292,8 +301,12 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             // A code says different things of different entities: 42 is a polyline's bulge and an insert's scale
             // across, 70 a polyline's closing and an insert's count across.
             let put = kind == "INSERT";
+            // A dimension says in 3 what it is drawn in and in 42 what it measures, where the one is a chunk of what
+            // an `MTEXT` says and the other an arc of a polyline read straight.
+            let dim = kind == "DIMENSION";
             match code {
-                1 | 3 => e.text.push_str(value),
+                1 => e.text.push_str(value),
+                3 if !dim => e.text.push_str(value),
                 2 => e.name = value.to_string(),
                 8 => e.layer = value.to_string(),
                 10 => {
@@ -307,9 +320,22 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                         e.second = Some(P2(x, y));
                     }
                 }
+                13 => e.between.0 = value.parse().ok().map(|x| P2(x, 0.0)),
+                23 => {
+                    if let (Some(P2(x, _)), Ok(y)) = (e.between.0, value.parse::<f64>()) {
+                        e.between.0 = Some(P2(x, y));
+                    }
+                }
+                14 => e.between.1 = value.parse().ok().map(|x| P2(x, 0.0)),
+                24 => {
+                    if let (Some(P2(x, _)), Ok(y)) = (e.between.1, value.parse::<f64>()) {
+                        e.between.1 = Some(P2(x, y));
+                    }
+                }
                 40 => e.radius = value.parse().ok(),
                 41 if put => e.scale.0 = value.parse().ok(),
                 42 if put => e.scale.1 = value.parse().ok(),
+                42 if dim => {}
                 42 => {
                     if value.parse::<f64>().is_ok_and(|b| b != 0.0) {
                         e.bulges += 1;
@@ -373,6 +399,9 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                 }
                 None
             }
+            // What the drawing measures. The figure it prints is read out of the picture a CAD drew it as, which is a
+            // block of its own, so this is here and not in `finish`, where the blocks are not to hand.
+            "DIMENSION" => measured(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)),
             "SEQEND" => open.take().and_then(|mut o| {
                 bulges += o.bulges;
                 let layer = o.layer.clone();
@@ -403,7 +432,13 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                     )
                     && (section == "ENTITIES" || block.is_some()) =>
             {
-                *left_out.entry(kind.clone()).or_default() += 1;
+                // A dimension is counted by what it measures, because the kinds of it this does not read measure
+                // something else entirely and a count of them says so.
+                let what = match kind.as_str() {
+                    "DIMENSION" => unread_dimension(&e),
+                    _ => kind.clone(),
+                };
+                *left_out.entry(what).or_default() += 1;
             }
             (None, None) => {}
         }
@@ -455,6 +490,9 @@ fn from_base(shape: Shape, base: P2) -> Shape {
         Shape::Path { points, closed } => Shape::Path { points: points.into_iter().map(off).collect(), closed },
         Shape::Arc { at, radius, from, to } => Shape::Arc { at: off(at), radius, from, to },
         Shape::Words { at, text, height, angle } => Shape::Words { at: off(at), text, height, angle },
+        Shape::Measure { from, to, line, text, height } => {
+            Shape::Measure { from: off(from), to: off(to), line: [off(line[0]), off(line[1])], text, height }
+        }
     }
 }
 
@@ -590,7 +628,79 @@ fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
             let ok = sane(&at) && height.is_finite() && height > 0.0 && height <= MAX_COORD;
             ok.then_some(Shape::Words { at, text: text.clone(), height, angle: angle + turn }).ok_or(far)
         }
+        Shape::Measure { from, to, line, text, height } => {
+            // A measurement goes where the block puts it, and its figure is as tall as the block makes it: what it
+            // says of a distance is the whole of what it is for.
+            let height = height * placed.y.0.hypot(placed.y.1);
+            let (from, to) = (placed.point(*from), placed.point(*to));
+            let line = [placed.point(line[0]), placed.point(line[1])];
+            let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && height <= MAX_COORD;
+            ok.then_some(Shape::Measure { from, to, line, text: text.clone(), height }).ok_or(far)
+        }
     }
+}
+
+/// What a `DIMENSION` measures, in millimetres, or none where it is a kind of dimension that measures no length
+/// between two points.
+///
+/// A dimension is written along a line of its own, and that line is not always the line between the two points it
+/// measures: a surveyor measuring the width of a room between two corners that are not level with one another writes
+/// the width. A linear dimension says how far that line is turned (code 50); an aligned one runs along its two
+/// points. So the two points are brought onto it, and how long it is between them is what the drawing measured.
+///
+/// What it says there is its own word on it (code 1), where a survey writes one over the figure, and otherwise the
+/// figure the picture a CAD drew it as prints. The figure is read where it was written and never worked out again from
+/// what was measured: a drawing prints in units and to a precision of its own — this one prints centimetres — and
+/// keeps them in its dimension style, not in the dimension.
+fn measured(e: &Entity, scale: f64, blocks: &std::collections::HashMap<String, Vec<Drawn>>) -> Option<Shape> {
+    let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
+    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
+    let (from, to) = (mm(e.between.0?), mm(e.between.1?));
+    let at = mm(*e.points.first()?);
+    let along = match e.flags & 7 {
+        0 => {
+            let turn = e.from.unwrap_or(0.0);
+            let (sin, cos) = turn.to_radians().sin_cos();
+            turn.is_finite().then_some(P2(cos, sin))?
+        }
+        1 => {
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let len = dx.hypot(dy);
+            (len > 0.0).then_some(P2(dx / len, dy / len))?
+        }
+        _ => return None,
+    };
+    let onto = |p: P2| {
+        let out = (p.0 - at.0) * along.0 + (p.1 - at.1) * along.1;
+        P2(at.0 + along.0 * out, at.1 + along.1 * out)
+    };
+    let line = [onto(from), onto(to)];
+    // The figure, as the picture prints it. A word written over the figure may have the figure in it, written `<>`.
+    let printed = blocks.get(&e.name).into_iter().flatten().find_map(|drawn| match drawn {
+        Drawn::Shape(_, Shape::Words { text, height, .. }) => Some((text.clone(), *height)),
+        _ => None,
+    });
+    let (figure, height) = printed.unwrap_or_default();
+    let over = e.text.trim();
+    let text = match over.is_empty() {
+        true => figure,
+        false => over.replace("<>", &figure),
+    };
+    let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && (0.0..=MAX_COORD).contains(&height);
+    (ok && text.chars().count() <= MAX_WORD).then_some(Shape::Measure { from, to, line, text, height })
+}
+
+/// What a dimension this does not read measures, to be counted by: a count of them says what they were, where a count
+/// of `DIMENSION` would say only that a drawing has some.
+fn unread_dimension(e: &Entity) -> String {
+    match e.flags & 7 {
+        2 | 5 => "DIMENSION of an angle",
+        3 => "DIMENSION of a diameter",
+        4 => "DIMENSION of a radius",
+        6 => "DIMENSION of a coordinate",
+        _ => "DIMENSION",
+    }
+    .to_string()
 }
 
 /// The shape an entity of `kind` makes, in millimetres, or none where it makes none: a kind this does not read, or one
@@ -746,6 +856,15 @@ fn extent(layers: &[Layer]) -> Option<[P2; 2]> {
                 let (sin, cos) = angle.to_radians().sin_cos();
                 for (x, y) in [(0.0, 0.0), (wide, 0.0), (wide, *height), (0.0, *height)] {
                     grow(P2(at.0 + x * cos - y * sin, at.1 + x * sin + y * cos));
+                }
+            }
+            // The points of a measurement, and how far its figure is written beyond the line it is written along.
+            Shape::Measure { from, to, line, height, .. } => {
+                [*from, *to, line[0], line[1]].iter().for_each(|p| grow(*p));
+                let out = height * 2.0;
+                for p in [line[0], line[1]] {
+                    grow(P2(p.0 - out, p.1 - out));
+                    grow(P2(p.0 + out, p.1 + out));
                 }
             }
         }

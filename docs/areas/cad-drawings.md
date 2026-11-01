@@ -55,6 +55,42 @@ scales unevenly, which is an ellipse and no shape this draws: those are counted 
 at all is bounded by `MAX_SHAPES`, and not only how many shapes it brings in, because a block holding nothing draws
 nothing however many million times over a grid asks for it.
 
+**The measurements a survey writes.** A survey measures on its drawing, and what it measured is often the only place a
+length is said exactly: the drawing is drawn to what was surveyed, and the figure beside it is what was read off the
+tape. A `DIMENSION` comes in as `Shape::Measure`: the two points it measures between (codes 13 and 14), the line it
+writes the measurement along, and the figure it writes there.
+
+The line is not always the line between those two points, and this is the whole of why the two are kept apart. A
+linear dimension is written along a line turned as its code 50 says, and measures what falls on it: a surveyor
+measuring the width of a room between two corners that are not level with one another writes the width, not the way
+between the corners. So the two points are brought onto that line, and how long it is between them is what the drawing
+measured. On the survey this was built against, 124 of its 566 dimensions measure along a line the two points do not
+lie on, 108 of them by more than a degree, so taking the distance between the points instead would have said the wrong
+length for one dimension in five.
+
+The figure is read where it was written and never worked out again from what was measured. A drawing prints a length
+in units and to a precision of its own, kept in its dimension style and not in the dimension: that survey is drawn in
+metres and prints centimetres, so a wall 2.795 drawn says `280`. Its code 42, the measurement, is in those printed
+units too and not in the drawing's, which is why it is not read as a length. What is read is what is written: the
+drawing's own word on it (code 1) where a surveyor wrote one over the figure, and otherwise the figure the picture a
+CAD drew the dimension as prints — that picture is a block of its own, holding the lines, the ticks and the figure as
+an `MTEXT`, and the figure is taken out of it. Where a survey writes its own word over the figure, the geometry is
+still there beside it to be held against what it says: 167 of those 566 have one, and one of them says `870` over a
+line drawn 8800 long.
+
+A dimension is drawn in our own style, as a survey's words are drawn in our own lettering — the two lines out to where
+the measurement is written, the line it is written along, a tick at each end and the figure, which stands a quarter of
+its own height clear of the line, where a CAD writes it (`underlay::measures`). And it is nothing else: `underlay::lines`
+leaves it out, so nothing snaps to a dimension and no wall is traced from one. That matters more here than it does for
+lettering — the two lines a dimension takes its figure out along are a pair of parallel lines a wall's thickness apart,
+square to a third, which is exactly what a trace looks for.
+
+The kinds of dimension that measure no length between two points — an angle, a diameter, a radius, a coordinate — are
+counted by what they measure (`1 DIMENSION of an angle`) and never guessed at. Two of a dimension's group codes say
+something else of another entity, and both were read as that other thing before they were read as a dimension's: code
+3 is the style it is drawn in, where an `MTEXT`'s is a chunk of what it says, and code 42 is what it measures, where a
+polyline's is an arc read straight. A drawing of 601 dimensions reported 601 arcs it had read straight.
+
 **The unit.** The file says its own in `$INSUNITS`, and inches, feet, millimetres, centimetres and metres are read from
 it. A file that says nothing, or says something else, is read as millimetres, which a drawing of a building nearly
 always is; a caller who knows better gives `Options::scale`, millimetres to one of the file's units, and that wins.

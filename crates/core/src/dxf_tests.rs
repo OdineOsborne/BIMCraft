@@ -339,3 +339,111 @@ fn a_session_with_one_reads_a_dwg_wherever_it_reads_a_dxf() {
     assert_eq!(out["layers"][0]["name"], "MURI");
     assert_eq!(out["converted"], serde_json::json!(["3 PROXY left out"]), "what the DWG reader said it could not read");
 }
+
+/// A linear `DIMENSION` on `layer`: the two points it measures between, a point on the line it writes the
+/// measurement along, how far that line is turned, and the block a CAD drew its picture as. Its group code 3 is its
+/// style and its 42 what it measures, both of which say something else of another entity, so both are here.
+fn dimension(layer: &str, picture: &str, from: (f64, f64), to: (f64, f64), at: (f64, f64), angle: f64) -> String {
+    format!(
+        "0\nDIMENSION\n8\n{layer}\n2\n{picture}\n70\n32\n3\nARIAL\n42\n1\n10\n{}\n20\n{}\n13\n{}\n23\n{}\n14\n{}\n24\n{}\n50\n{angle}\n",
+        at.0, at.1, from.0, from.1, to.0, to.1
+    )
+}
+
+/// The picture a CAD draws a dimension as: a block of its own, holding the figure it prints.
+fn picture(name: &str, says: &str, height: f64) -> String {
+    block(name, (0.0, 0.0), &format!("0\nMTEXT\n8\n0\n10\n0\n20\n0\n40\n{height}\n1\n\\A1;{says}\n"))
+}
+
+#[test]
+fn a_dimension_comes_in_as_the_measure_a_survey_writes() {
+    // A survey measures a room 3500 wide and writes 350 along a line 500 below it, because it prints centimetres.
+    let d =
+        read_ok(&with_blocks(&picture("*D1", "350", 200.0), &dimension("QUOTE", "*D1", (0.0, 0.0), (3500.0, 0.0), (1000.0, -500.0), 0.0)));
+    assert_eq!(d.layers.len(), 1, "{:?}", d.layers);
+    assert_eq!(d.layers[0].name, "QUOTE");
+    assert_eq!(
+        d.layers[0].shapes[0],
+        Shape::Measure {
+            from: P2(0.0, 0.0),
+            to: P2(3500.0, 0.0),
+            line: [P2(0.0, -500.0), P2(3500.0, -500.0)],
+            text: "350".into(),
+            height: 200.0,
+        },
+        "{:?}",
+        d.layers[0].shapes[0]
+    );
+    // Its picture is a block of its own and is never put anywhere, so the figure comes in once, as what it says.
+    assert_eq!(d.shapes(), 1, "{:?}", d.layers);
+    // Group code 3 is the style it is drawn in and not a word of it, and 42 is what it measures and not an arc read
+    // straight: read as the other, a drawing of 600 dimensions says it has 600 arcs and that a room is called ARIAL.
+    assert!(d.left_out.is_empty(), "{:?}", d.left_out);
+}
+
+#[test]
+fn a_dimension_measures_along_its_own_line_and_not_between_its_two_points() {
+    // A surveyor measures the width of a room between two corners that are not level with one another: what the
+    // dimension says is the width, along the line it is written on, and not the 3132 between the two points.
+    let d =
+        read_ok(&with_blocks(&picture("*D1", "300", 200.0), &dimension("QUOTE", "*D1", (0.0, 0.0), (3000.0, 900.0), (0.0, -500.0), 0.0)));
+    let Shape::Measure { line, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!(*line, [P2(0.0, -500.0), P2(3000.0, -500.0)], "the two points brought onto the line it is written on");
+    assert!((line[0].dist(line[1]) - 3000.0).abs() < 1e-9, "what it measured: {line:?}");
+}
+
+#[test]
+fn an_aligned_dimension_writes_along_the_two_points_it_measures_between() {
+    // The other kind that measures a length: its line runs parallel to the way between its points, so what it says
+    // is the whole of that way, 5000 across a room's diagonal.
+    let aligned = dimension("QUOTE", "*D1", (0.0, 0.0), (3000.0, 4000.0), (-400.0, 300.0), 0.0).replace("70\n32\n", "70\n33\n");
+    let d = read_ok(&with_blocks(&picture("*D1", "500", 200.0), &aligned));
+    let Shape::Measure { line, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert!(line[0].dist(P2(-400.0, 300.0)) < 1e-9 && line[1].dist(P2(2600.0, 4300.0)) < 1e-9, "{line:?}");
+    assert!((line[0].dist(line[1]) - 5000.0).abs() < 1e-9, "the whole way between them: {line:?}");
+}
+
+#[test]
+fn what_a_survey_writes_over_a_dimension_is_what_the_dimension_says() {
+    // 870 written over a line drawn 8800 long: the surveyor's own word on it, which is the one the drawing says, and
+    // the geometry is still there to be held against it.
+    let over = format!("{}1\n870\n", dimension("QUOTE", "*D1", (0.0, 0.0), (8800.0, 0.0), (0.0, -500.0), 0.0));
+    let d = read_ok(&with_blocks(&picture("*D1", "880", 200.0), &over));
+    let Shape::Measure { line, text, height, .. } = &d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert_eq!((text.as_str(), *height), ("870", 200.0), "the word over it, as tall as the figure it stands for");
+    assert!((line[0].dist(line[1]) - 8800.0).abs() < 1e-9, "and what the drawing is drawn: {line:?}");
+}
+
+#[test]
+fn a_dimension_that_measures_no_length_between_two_points_is_counted_and_not_guessed_at() {
+    // An angle, a diameter, a radius: each says something this does not read, so each is counted by what it is.
+    let angle = dimension("QUOTE", "*D1", (0.0, 0.0), (1000.0, 0.0), (0.0, 0.0), 0.0).replace("70\n32\n", "70\n34\n");
+    let d = read_ok(&with_blocks(&picture("*D1", "90", 200.0), &angle));
+    assert_eq!(d.shapes(), 0);
+    assert_eq!(d.left_out, ["1 DIMENSION of an angle"]);
+}
+
+#[test]
+fn a_dimension_is_drawn_under_the_plan_and_is_no_line_of_the_building() {
+    // Two lines a wall's thickness apart, square to a third: read as geometry a dimension is the very thing a trace
+    // looks for, so it is drawn and nothing else.
+    let mut m = crate::model::Model::new("Test");
+    let layers = vec![crate::dxf::Layer {
+        name: "QUOTE".into(),
+        shapes: vec![Shape::Measure {
+            from: P2(0.0, 0.0),
+            to: P2(3500.0, 0.0),
+            line: [P2(0.0, -500.0), P2(3500.0, -500.0)],
+            text: "350".into(),
+            height: 200.0,
+        }],
+    }];
+    m.drawings.insert("rilievo.dxf".into(), std::sync::Arc::new(crate::dxf::Drawing { layers, scale: 1.0, ..Default::default() }));
+    let u = crate::model::Underlay { name: "Rilievo".into(), path: "rilievo.dxf".into(), scale: 1.0, ..Default::default() };
+    assert!(crate::underlay::lines(&m, &u).is_empty(), "a measurement is no line to trace or snap to");
+    let drawn = crate::underlay::measures(&m, &u);
+    assert!(drawn.len() >= 4, "the two lines out to it, the line it is written along and the figure: {}", drawn.len());
+    // The figure is written beside the line and reads the right way up, so its strokes stand above it.
+    let above = drawn.iter().flat_map(|(_, points)| points).filter(|p| p.1 < -500.0).count();
+    assert!(above > 0, "the figure stands beyond the line it is written along: {drawn:?}");
+}

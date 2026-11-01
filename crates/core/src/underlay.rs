@@ -42,6 +42,9 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                 // A word is what the drawing says and no line of the building: it is drawn ([`words`]) and never
                 // traced over or snapped to, or a survey's lettering would come in as walls.
                 crate::dxf::Shape::Words { .. } => {}
+                // Nor is a measurement: the two lines it takes its figure out along are a pair of parallel lines a
+                // wall's thickness apart, which is the very thing a trace looks for. It is drawn ([`measures`]).
+                crate::dxf::Shape::Measure { .. } => {}
             }
         }
     }
@@ -63,6 +66,78 @@ pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
             let turn = |x: f64, y: f64| place(P2(at.0 + x * c - y * s, at.1 + x * s + y * c));
             for stroke in crate::font::strokes(text, 0.0, 0.0, *height as f32) {
                 out.push((layer.name.clone(), stroke.into_iter().map(|(x, y)| turn(f64::from(x), f64::from(-y))).collect()));
+            }
+        }
+    }
+    out
+}
+
+/// The measurements the underlay writes, each with the layer it is written on, as the strokes they are drawn with, in
+/// this project's millimetres: the two lines that take the measurement out from the points it was taken between, the
+/// line it is written along, a tick at each end of that line, and the figure itself in our own lettering.
+///
+/// A survey's dimensions are drawn in our own style, as its words are drawn in our own lettering: what is read of a
+/// dimension is what it measures and what it says, and the picture a CAD drew it as is the CAD's. Where the drawing
+/// does not say how tall the figure is written, the lines of the measurement are drawn and the figure is not. They are
+/// drawn and nothing else: [`lines`] leaves them out.
+pub fn measures(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out: Vec<(String, Vec<P2>)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Measure { from, to, line, text, height } = shape else { continue };
+            let height = *height;
+            let mut stroke = |points: [P2; 2]| out.push((layer.name.clone(), points.into_iter().map(place).collect()));
+            stroke([*from, line[0]]);
+            stroke([*to, line[1]]);
+            stroke([line[0], line[1]]);
+            let (dx, dy) = (line[1].0 - line[0].0, line[1].1 - line[0].1);
+            let len = dx.hypot(dy);
+            if len <= 0.0 || height <= 0.0 {
+                continue;
+            }
+            let along = P2(dx / len, dy / len);
+            // Which side of the line the figure is written on: the side away from the points it was measured between.
+            let off = P2(line[0].0 - from.0, line[0].1 - from.1);
+            let gap = off.0.hypot(off.1);
+            let side = match gap > 0.0 {
+                true => P2(off.0 / gap, off.1 / gap),
+                false => P2(-along.1, along.0),
+            };
+            // A tick where the measurement ends, slanted across the line as a drawing of a building slants one.
+            let tick = height / 4.0;
+            let slant = P2((along.0 + side.0) * tick, (along.1 + side.1) * tick);
+            for p in [line[0], line[1]] {
+                stroke([P2(p.0 - slant.0, p.1 - slant.1), P2(p.0 + slant.0, p.1 + slant.1)]);
+            }
+            if text.is_empty() {
+                continue;
+            }
+            // The figure reads the right way up whichever way the line runs, and stands a quarter of its own height
+            // clear of it, which puts the middle of it three quarters out: where a CAD writes it.
+            let read = match along.0 > 0.0 || (along.0 == 0.0 && along.1 > 0.0) {
+                true => along,
+                false => P2(-along.0, -along.1),
+            };
+            let up = P2(-read.1, read.0);
+            let wide = f64::from(crate::font::width(text, height as f32));
+            let mid = P2((line[0].0 + line[1].0) / 2.0, (line[0].1 + line[1].1) / 2.0);
+            let base = P2(
+                mid.0 + side.0 * height * 0.75 - read.0 * wide / 2.0 - up.0 * height / 2.0,
+                mid.1 + side.1 * height * 0.75 - read.1 * wide / 2.0 - up.1 * height / 2.0,
+            );
+            // Our lettering is drawn with y down, from the left of the line it stands on; a drawing has y up.
+            for drawn in crate::font::strokes(text, 0.0, 0.0, height as f32) {
+                let points: Vec<P2> = drawn
+                    .into_iter()
+                    .map(|(x, y)| {
+                        let (x, y) = (f64::from(x), f64::from(y));
+                        place(P2(base.0 + read.0 * x - up.0 * y, base.1 + read.1 * x - up.1 * y))
+                    })
+                    .collect();
+                out.push((layer.name.clone(), points));
             }
         }
     }
