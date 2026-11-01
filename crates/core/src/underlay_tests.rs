@@ -159,6 +159,22 @@ fn nothing_snaps_to_a_layer_left_out_or_to_a_drawing_on_another_level() {
 }
 
 #[test]
+fn what_a_survey_writes_is_drawn_under_the_plan_and_snapped_to_by_nothing() {
+    let path = drawing("scritte.dxf");
+    let text = std::fs::read_to_string(&path).expect("the drawing");
+    let with = text.replace("0\nENDSEC\n0\nEOF\n", "0\nTEXT\n8\nTESTI\n1\nSoggiorno\n10\n1000\n20\n2000\n40\n250\n0\nENDSEC\n0\nEOF\n");
+    std::fs::write(&path, with).expect("the drawing again");
+    let mut s = Session::new();
+    let bare = drawn(&s);
+    run(&mut s, "underlay", json!({"path": path, "name": "Rilievo"})).expect("it comes in");
+    assert!(drawn(&s) > bare + 3, "the word is drawn with the drawing: {} over {bare}", drawn(&s));
+    // It is lettering and no line of the building: nothing snaps to it, and the walls are not traced from it.
+    assert_eq!(snapped(&s, P2(1010.0, 2010.0)).kind, crate::snap::Kind::Free);
+    let out = run(&mut s, "trace_walls", json!({"preview": true})).expect("it traces");
+    assert_eq!(out["faces"], json!(2), "the drawing's own two lines, and nothing of the word: {out}");
+}
+
+#[test]
 fn it_snaps_where_the_drawing_stands_not_where_the_file_drew_it() {
     let path = drawing("rilievo.dxf");
     let mut s = Session::new();

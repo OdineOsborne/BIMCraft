@@ -104,9 +104,10 @@ pub static ALL: &[Command] = &[
          many shapes are on each, the `shapes` in all, the `extent` it lies in (mm, south-west and north-east), the \
          `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
          `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
-         POLYLINE, ARC and CIRCLE, each on the layer it names, and opens a block where it is put, bringing in what \
-         it holds on the layer the block stands on; text, dimensions, hatches and splines are counted and named, \
-         never guessed at. A DWG is turned into DXF first, by the dependency `bimcraft-dwg` holds \
+         POLYLINE, ARC and CIRCLE, each on the layer it names, TEXT and MTEXT as the words the drawing says, and \
+         opens a block where it is put, bringing in what it holds on the layer the block stands on; dimensions, \
+         hatches and splines are counted and named, never guessed at. A DWG is turned into DXF first, by the \
+         dependency `bimcraft-dwg` holds \
          (Autodesk publishes no specification for it), and `converted` is what that reader said it could not read",
         dxf_read,
     ),
@@ -379,7 +380,7 @@ pub static ALL: &[Command] = &[
         "Place Rooms Automatically",
         // No shortcut: Revit gives this one none either, and `RM` belongs to Room, which places one by hand.
         &[],
-        "{level?, name?} a room in every area the walls of a level shut in that has none: the rooms of a building,          from the walls of it. An area a room stands in already is that room's and is counted in `held`, so asking          again places the rooms of the walls just built and leaves the rest alone; one too small to be anywhere a          person can be is no room and is counted in `small`, which is the sliver two walls leave between their          centre lines where one is drawn a hair off the other. Each room is `name` (the project's word for a room          unless it says) and numbered from the back of the plan to the front and from the left across, and measured          at the wall centre lines as a room is, less any island standing in it. Returns `rooms`, `ids`, `areas_m2`          and `area_m2`, all of them together",
+        "{level?, name?} a room in every area the walls of a level shut in that has none: the rooms of a building,          from the walls of it. An area a room stands in already is that room's and is counted in `held`, so asking          again places the rooms of the walls just built and leaves the rest alone; one too small to be anywhere a          person can be is no room and is counted in `small`, which is the sliver two walls leave between their          centre lines where one is drawn a hair off the other. Each room is `name`; where that is not said, a room          takes the name the survey under the plan writes inside it (what it writes nearest the middle of the area,          because that is where a room's name is written, and the bigger where two are as near), and the project's          own word for a room where the survey writes nothing. They are numbered from the back of the plan to the          front and from the left across, and measured          at the wall centre lines as a room is, less any island standing in it. Returns `rooms`, `ids`, `areas_m2`          and `area_m2`, all of them together",
         place_rooms,
     ),
     edit(
@@ -2347,8 +2348,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     }
     // The rooms the walls just built shut in, placed with them: one command, so one undo step takes the lot back.
     if rooms {
-        let name = s.model.language.word("Room").to_string();
-        let (ids, areas, _, _) = fill_rooms(s, level, &name);
+        let (ids, areas, _, _) = fill_rooms(s, level, None);
         let total: f64 = areas.iter().sum();
         out["rooms"] = json!(ids.len());
         out["room_ids"] = json!(ids);
@@ -4419,11 +4419,8 @@ const SMALLEST_ROOM: f64 = 250_000.0;
 fn place_rooms(s: &mut Session, p: &Value) -> R {
     let c = "place_rooms";
     let level = level_param(c, &s.model, p, "level")?;
-    let name = match string(c, p, "name")? {
-        Some(n) => n,
-        None => s.model.language.word("Room").to_string(),
-    };
-    let (ids, areas, held, small) = fill_rooms(s, level, &name);
+    let name = string(c, p, "name")?;
+    let (ids, areas, held, small) = fill_rooms(s, level, name.as_deref());
     let total: f64 = areas.iter().sum();
     let areas: Vec<f64> = areas.iter().map(|a| m2(*a)).collect();
     Ok(json!({"rooms": ids.len(), "ids": ids, "areas_m2": areas, "area_m2": m2(total), "held": held, "small": small}))
@@ -4432,8 +4429,25 @@ fn place_rooms(s: &mut Session, p: &Value) -> R {
 /// A room in every area the walls of `level` shut in that holds none: what Place Rooms Automatically does, and what
 /// Trace Walls does with the walls it has just built. Gives back what it made, what each measures, and how many
 /// areas it left to the rooms already standing in them or passed over as too small to be a room.
-fn fill_rooms(s: &mut Session, level: Guid, name: &str) -> (Vec<Id>, Vec<f64>, usize, usize) {
+///
+/// Every room comes in called `name`. Where the caller says none, a room takes the name the survey under the plan
+/// writes inside it, because that is why a surveyor writes it there, and the project's own word for a room where
+/// the survey writes nothing.
+fn fill_rooms(s: &mut Session, level: Guid, name: Option<&str>) -> (Vec<Id>, Vec<f64>, usize, usize) {
     let m = &s.model;
+    let plain = name.map(str::to_string).unwrap_or_else(|| m.language.word("Room").to_string());
+    let said: Vec<(P2, f64, String)> = match name {
+        Some(_) => Vec::new(),
+        None => m
+            .elements
+            .values()
+            .filter_map(|e| match e {
+                Element::Underlay(u) if m.same(u.level, level) => Some(u),
+                _ => None,
+            })
+            .flat_map(|u| crate::underlay::said(m, u))
+            .collect(),
+    };
     let rooms = || {
         m.elements.values().filter_map(|e| match e {
             Element::Room(r) => Some(r),
@@ -4454,7 +4468,7 @@ fn fill_rooms(s: &mut Session, level: Guid, name: &str) -> (Vec<Id>, Vec<f64>, u
         .collect();
     found.sort_by(|(_, a), (_, b)| b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0)));
     let (mut held, mut small) = (0usize, 0usize);
-    let mut placing: Vec<(P2, String, f64)> = Vec::new();
+    let mut placing: Vec<(P2, String, f64, String)> = Vec::new();
     for (region, point) in &found {
         if standing.iter().any(|q| region.holds(*q)) {
             held += 1;
@@ -4467,13 +4481,23 @@ fn fill_rooms(s: &mut Session, level: Guid, name: &str) -> (Vec<Id>, Vec<f64>, u
         }
         let number = next_number(numbers.iter().map(String::as_str));
         numbers.push(number.clone());
-        placing.push((*point, number, area));
+        // What the survey writes in the area is what the room is called. Where it writes more than one thing — the
+        // name, what the room measures, a mark of its own — the name is the one written nearest the middle of the
+        // area, because that is where a room's name is written; where two are as near, the bigger of them, because
+        // a name is written larger than a note. On the survey this was written against, the big room holds its
+        // name and a surveyor's single letter `K` off in the corner of it, both the same size.
+        let called = said
+            .iter()
+            .filter(|(p, _, _)| region.holds(*p))
+            .min_by(|a, b| point.dist(a.0).total_cmp(&point.dist(b.0)).then(b.1.total_cmp(&a.1)))
+            .map(|(_, _, text)| text.clone());
+        placing.push((*point, number, area, called.unwrap_or_else(|| plain.clone())));
     }
-    let areas: Vec<f64> = placing.iter().map(|(_, _, a)| *a).collect();
+    let areas: Vec<f64> = placing.iter().map(|(_, _, a, _)| *a).collect();
     let m = s.model_mut();
     let ids: Vec<Id> = placing
         .into_iter()
-        .map(|(point, number, _)| m.insert(Element::Room(Room { params: Default::default(), level, point, name: name.into(), number })))
+        .map(|(point, number, _, name)| m.insert(Element::Room(Room { params: Default::default(), level, point, name, number })))
         .collect();
     (ids, areas, held, small)
 }

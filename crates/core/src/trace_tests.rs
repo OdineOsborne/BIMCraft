@@ -318,6 +318,27 @@ fn a_window_a_survey_draws_as_a_block_is_read_like_any_other() {
 }
 
 #[test]
+fn a_room_takes_the_name_the_survey_writes_in_it() {
+    // A surveyor writes a room's name in the room, larger than what he writes under it.
+    let walls = room("MURI", [0.0, 0.0, 6000.0, 5000.0], 300.0);
+    let words = "0\nTEXT\n8\nTESTI\n1\nSoggiorno\n10\n2000\n20\n2600\n40\n250\n\
+                 0\nTEXT\n8\nTESTI\n1\nmq 24,20\n10\n2000\n20\n2000\n40\n120\n";
+    let mut s = linked_with_blocks(&walls, "", words);
+    let out = run(&mut s, "trace_walls", json!({"rooms": true})).expect("it traces");
+    assert_eq!(out["rooms"], json!(1), "{out}");
+    let rooms = ids(&s, "room");
+    let Some(Element::Room(r)) = s.model.elements.get(rooms[0]) else { panic!("a room") };
+    assert_eq!(r.name, "Soggiorno", "the biggest of what is written in it, and not what it measures");
+    // A name the caller says is the name, whatever the drawing writes.
+    let mut s = linked_with_blocks(&walls, "", words);
+    run(&mut s, "trace_walls", json!({})).expect("it traces");
+    run(&mut s, "place_rooms", json!({"name": "Ufficio"})).expect("it places");
+    let rooms = ids(&s, "room");
+    let Some(Element::Room(r)) = s.model.elements.get(rooms[0]) else { panic!("a room") };
+    assert_eq!(r.name, "Ufficio");
+}
+
+#[test]
 fn a_preview_says_where_the_openings_are_and_builds_none_of_them() {
     let mut s = linked(&doorway());
     let out = run(&mut s, "trace_walls", json!({"preview": true})).expect("it looks");

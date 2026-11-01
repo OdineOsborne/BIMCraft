@@ -39,7 +39,50 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                 crate::dxf::Shape::Arc { at, radius, from, to } => {
                     out.push((layer.name.clone(), along(*at, *radius, *from, *to).into_iter().map(place).collect(), false));
                 }
+                // A word is what the drawing says and no line of the building: it is drawn ([`words`]) and never
+                // traced over or snapped to, or a survey's lettering would come in as walls.
+                crate::dxf::Shape::Words { .. } => {}
             }
+        }
+    }
+    out
+}
+
+/// The words the underlay writes, each with the layer it is written on, as the strokes our own lettering draws them
+/// with, in this project's millimetres. They are drawn and nothing else: [`lines`] leaves them out.
+pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out: Vec<(String, Vec<P2>)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Words { at, text, height, angle } = shape else { continue };
+            // Our lettering is drawn with y down, from the left of the line it stands on; a drawing has y up.
+            let (s, c) = angle.to_radians().sin_cos();
+            let turn = |x: f64, y: f64| place(P2(at.0 + x * c - y * s, at.1 + x * s + y * c));
+            for stroke in crate::font::strokes(text, 0.0, 0.0, *height as f32) {
+                out.push((layer.name.clone(), stroke.into_iter().map(|(x, y)| turn(f64::from(x), f64::from(-y))).collect()));
+            }
+        }
+    }
+    out
+}
+
+/// What the underlay says, and where: the middle of each word, how tall it is, and what it reads, in this project's
+/// millimetres. The middle of a word and not its start, because that is the point of it that stands in the room it
+/// names: a long name written across a small room begins outside it.
+pub fn said(m: &Model, u: &Underlay) -> Vec<(P2, f64, String)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out: Vec<(P2, f64, String)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Words { at, text, height, angle } = shape else { continue };
+            let (s, c) = angle.to_radians().sin_cos();
+            let (x, y) = (f64::from(crate::font::width(text, *height as f32)) / 2.0, height / 2.0);
+            out.push((place(P2(at.0 + x * c - y * s, at.1 + x * s + y * c)), *height, text.clone()));
         }
     }
     out

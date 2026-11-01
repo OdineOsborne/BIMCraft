@@ -1265,25 +1265,32 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
             continue;
         }
         d.owner = Some(id);
-        for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
-            // A layer stands in the project's history as an element does, and the view's phase and filter say the same
-            // of it: what is not there in this phase is not drawn, and what the filter overrides is drawn as the
-            // project's override for that status says — dashed and red for what comes down, by default.
-            let Some(status) = crate::underlay::status(m, u, &layer, look.at) else { continue };
-            let shown = look.filter.as_ref().map_or(crate::phasing::Presentation::ByCategory, |f| f.of(status));
-            let (color, dash) = match shown {
-                crate::phasing::Presentation::NotDisplayed => continue,
-                crate::phasing::Presentation::ByCategory => (FAINT, None),
+        // A layer stands in the project's history as an element does, and the view's phase and filter say the same
+        // of it: what is not there in this phase is not drawn, and what the filter overrides is drawn as the
+        // project's override for that status says — dashed and red for what comes down, by default.
+        let pen = |layer: &str| {
+            let status = crate::underlay::status(m, u, layer, look.at)?;
+            match look.filter.as_ref().map_or(crate::phasing::Presentation::ByCategory, |f| f.of(status)) {
+                crate::phasing::Presentation::NotDisplayed => None,
+                crate::phasing::Presentation::ByCategory => Some((FAINT, None)),
                 crate::phasing::Presentation::Overridden => {
                     let o = m.phase_overrides.get(&status).cloned().unwrap_or_default();
-                    let color = o.projection.color.map_or(FAINT, |[r, g, b]| Rgb(r, g, b));
-                    (color, o.projection.dash)
+                    Some((o.projection.color.map_or(FAINT, |[r, g, b]| Rgb(r, g, b)), o.projection.dash))
                 }
-            };
+            }
+        };
+        for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
+            let Some((color, dash)) = pen(&layer) else { continue };
             match dash {
                 Some(_) => d.dashed(&points, Pen::HAIRLINE, color, closed),
                 None => d.line(&points, Pen::HAIRLINE, color, closed),
             }
+        }
+        // What the drawing says is drawn with what it draws: a survey's room names, the figures of its dimensions,
+        // the letter on its north point. They are its lettering and never dashed, whatever the phase says.
+        for (layer, stroke) in crate::underlay::words(m, u) {
+            let Some((color, _)) = pen(&layer) else { continue };
+            d.line(&stroke, Pen::HAIRLINE, color, false);
         }
     }
     d.owner = None;

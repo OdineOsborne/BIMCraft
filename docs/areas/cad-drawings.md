@@ -26,10 +26,23 @@ could not read.
 
 **What it reads.** `LINE`, `LWPOLYLINE`, `POLYLINE` with the `VERTEX` entities that follow it to its `SEQEND`, `ARC` and
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).
-Everything else is counted by its own name and listed in `left_out`, the most of a kind first: `312 TEXT`, `4 SPLINE`;
-hatches, dimensions and splines are listed so. A polyline's bulge is read as the straight line between its points and
+`TEXT` and `MTEXT` come in as the words the drawing says (below). Everything else is counted by its own name and listed
+in `left_out`, the most of a kind first: `12 DIMENSION`, `4 SPLINE`; hatches, dimensions and splines are listed so. A polyline's bulge is read as the straight line between its points and
 said to be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a
 drawing is worse than none of it.
+
+**The words a survey writes.** A survey writes on its drawing — the name of each room, what it measures, the height of
+a sill — and a plan that shows none of that is half a plan. A `TEXT` or an `MTEXT` comes in as `Shape::Words`: what it
+says, the left of the line it stands on, how tall its capitals are and how far it is turned. The file says where a word
+stands under its own justification (an `MTEXT` hangs from its top left unless it says otherwise, and a `TEXT` not
+written from the left of its line gives that point under codes 11 and 21), and it is brought back to the left of the
+line with the width our own lettering gives it, which is the lettering it will be drawn in. An `MTEXT`'s formatting —
+the font, the colour, the height, the paragraph breaks — is not what it says, so it is stripped and what is left is one
+line. A word longer than `MAX_WORD` is left out whole, as a polyline of too many points is.
+
+They are drawn with the drawing, as the strokes our own lettering draws them with (`underlay::words`), and they are
+nothing else: `underlay::lines` leaves them out, so nothing snaps to lettering and no wall is ever traced from it — a
+survey's title, drawn 500 mm tall, would otherwise pair with itself as walls.
 
 **Blocks.** A survey draws its doors, its windows and its furniture as blocks, so a block is opened where it is put: an
 `INSERT` brings in what the `BLOCK` of that name holds, measured from the block's base point, turned and scaled as the
@@ -308,6 +321,15 @@ on it — the middle of the largest triangle its outline cuts into, and failing 
 which is what is left of a room that runs all the way round a core. They are numbered from the back of the plan to
 the front and from the left across, as a plan is read.
 
+A room is called what the survey writes inside it, because that is why a surveyor writes it there: of the words
+standing in the area (above), the name is the one written nearest the middle of it, and the bigger of two as near.
+Nearest the middle and not the biggest, because a survey writes more in a room than its name: on the one this was
+written against the big room holds `Soggiorno/Cucina` across the middle of it and a surveyor's single `K` in a corner,
+both the same size, and `Camera 1`, `Camera 2` and two `Bagno` fall where they should. What it costs is a note written
+across the middle of a room, which would be taken for its name. A room an area holds nothing written in takes the
+project's own word for a room, and a `name` the caller gives is the name of every room it places, whatever the drawing
+says.
+
 Two things are passed over and counted rather than placed. An area that already holds a room is that room's
 (`held`), so the command can be asked again after a wall is drawn by hand and only the new rooms appear — which is
 how a survey that leaves a gap is finished off. And an area smaller than `SMALLEST_ROOM` (a quarter of a square
@@ -355,5 +377,5 @@ drawn under a dim box that stands in the middle of them and cannot be moved are 
 its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
 while it is open, and the only typing it takes is into numbers.
 
-**What is still missing**: a survey's text (`TEXT`, `MTEXT`) is not read, so what the drawing calls its rooms is not
-read either, and a room this places is numbered and not named.
+**What is still missing**: a survey's dimensions and hatches are counted and not read, so a drawing that says a wall's
+thickness in a dimension rather than by drawing its two faces says it to nobody here.

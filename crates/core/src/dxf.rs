@@ -2,7 +2,8 @@
 //! 2D a building is modelled over — what this reads is the geometry, layer by layer, in millimetres.
 //!
 //! It reads what a record says and no more. `LINE`, `LWPOLYLINE`, `POLYLINE` with its `VERTEX`, `ARC` and `CIRCLE`, each
-//! on the layer it names (group code 8), come in; everything else is counted by its own name and listed, never guessed
+//! on the layer it names (group code 8), come in, and `TEXT` and `MTEXT` as the words the drawing says, where it says
+//! them; everything else is counted by its own name and listed, never guessed
 //! at. A polyline's bulge (an arc between two of its points) is read as the straight line between them and said to
 //! be, and one of more points than `MAX_VERTICES` is left out whole rather than cut short.
 //! A block is opened where it is put: a survey draws its doors, its windows and its furniture as blocks, so an
@@ -31,6 +32,8 @@ pub const MAX_VERTICES: usize = 20_000;
 pub const MAX_COORD: f64 = 1e9;
 /// How many blocks deep a block may put another: past that a drawing is drawing itself.
 pub const MAX_NESTING: usize = 8;
+/// The most letters one word of a drawing brings in.
+pub const MAX_WORD: usize = 256;
 /// How many kinds of thing left out are named, the most of each first.
 const NAMED: usize = 12;
 
@@ -50,6 +53,10 @@ pub enum Shape {
     Path { points: Vec<P2>, closed: bool },
     /// A centre, a radius, and the angles it runs between, degrees counter-clockwise from east. A circle runs 0 to 360.
     Arc { at: P2, radius: f64, from: f64, to: f64 },
+    /// What a survey writes on its drawing, where it writes it: the left of the line it stands on, how tall its
+    /// capitals are, and how far it is turned, degrees counter-clockwise from east. It is what the drawing says and
+    /// no line of the building, so a plan draws it and the walls are not read from it.
+    Words { at: P2, text: String, height: f64, angle: f64 },
 }
 
 /// A layer of a drawing: the name the file gives it, and what is drawn on it.
@@ -129,11 +136,17 @@ struct Entity {
     bulges: usize,
     /// The name a `BLOCK` gives itself and an `INSERT` names, under code 2.
     name: String,
+    /// What a `TEXT` or an `MTEXT` says, under code 1, with the chunks a long `MTEXT` is cut into under code 3
+    /// before it.
+    text: String,
     /// What an `INSERT` scales a block by, under codes 41 and 42, and the grid of copies it stands for, under 70
     /// and 71 with their spacings under 44 and 45. A block put once at its own size says none of them.
     scale: (Option<f64>, Option<f64>),
     grid: (Option<i64>, Option<i64>),
     spacing: (Option<f64>, Option<f64>),
+    /// What a `TEXT`'s point is the point of, under codes 72 and 73, and what an `MTEXT`'s is, under 71: a word is
+    /// written from its left, from its middle or from its right, and the file says which.
+    align: (Option<i64>, Option<i64>),
 }
 
 /// A block put into the drawing by an `INSERT`: which block, on what layer, where, turned and scaled how, and how
@@ -280,6 +293,7 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             // across, 70 a polyline's closing and an insert's count across.
             let put = kind == "INSERT";
             match code {
+                1 | 3 => e.text.push_str(value),
                 2 => e.name = value.to_string(),
                 8 => e.layer = value.to_string(),
                 10 => {
@@ -308,6 +322,8 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                 70 if put => e.grid.0 = value.parse().ok(),
                 71 if put => e.grid.1 = value.parse().ok(),
                 70 => e.flags = value.parse().unwrap_or(0),
+                71 | 72 => e.align.0 = value.parse().ok(),
+                73 => e.align.1 = value.parse().ok(),
                 _ => {}
             }
             continue;
@@ -438,6 +454,7 @@ fn from_base(shape: Shape, base: P2) -> Shape {
         Shape::Line([a, b]) => Shape::Line([off(a), off(b)]),
         Shape::Path { points, closed } => Shape::Path { points: points.into_iter().map(off).collect(), closed },
         Shape::Arc { at, radius, from, to } => Shape::Arc { at: off(at), radius, from, to },
+        Shape::Words { at, text, height, angle } => Shape::Words { at: off(at), text, height, angle },
     }
 }
 
@@ -564,6 +581,15 @@ fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
             let ok = sane(&at) && radius.is_finite() && radius > 0.0 && radius <= MAX_COORD && from.is_finite() && to.is_finite();
             ok.then_some(Shape::Arc { at, radius, from, to }).ok_or(far)
         }
+        Shape::Words { at, text, height, angle } => {
+            // A word is as tall as the block makes it and turned with it, however unevenly the block is scaled:
+            // what it says is the whole of what it is for, and a word is no shape to come out wrong.
+            let (turn, _) = placed.turn();
+            let height = height * placed.y.0.hypot(placed.y.1);
+            let at = placed.point(*at);
+            let ok = sane(&at) && height.is_finite() && height > 0.0 && height <= MAX_COORD;
+            ok.then_some(Shape::Words { at, text: text.clone(), height, angle: angle + turn }).ok_or(far)
+        }
     }
 }
 
@@ -590,6 +616,65 @@ fn finish(kind: &str, e: &mut Entity, scale: f64) -> Option<Shape> {
             }
             Some(Shape::Path { points, closed: e.flags & 1 == 1 })
         }
+        "TEXT" | "MTEXT" => {
+            // A word is what it says, so one that says nothing is none; one longer than a drawing writes is left out
+            // whole, as a polyline of too many points is.
+            let text = match kind {
+                "MTEXT" => plain(&e.text),
+                _ => e.text.trim().to_string(),
+            };
+            if text.is_empty() || text.chars().count() > MAX_WORD {
+                return None;
+            }
+            let height = e.radius? * scale;
+            let angle = e.from.unwrap_or(0.0);
+            // Where the file says the word stands is the point it is written from, which it says under its
+            // justification: a `TEXT` not written from the left of its line gives that point under codes 11 and 21.
+            let (across, up) = match kind {
+                "MTEXT" => {
+                    let at = e.align.0.unwrap_or(1).clamp(1, 9) - 1;
+                    (at % 3, 2 - at / 3)
+                }
+                _ => (
+                    match e.align.0.unwrap_or(0) {
+                        1 | 4 => 1,
+                        2 => 2,
+                        _ => 0,
+                    },
+                    match e.align.1.unwrap_or(0) {
+                        2 => 1,
+                        3 => 2,
+                        _ => 0,
+                    },
+                ),
+            };
+            let point = match (kind, across + up > 0, e.second) {
+                ("TEXT", true, Some(p)) => p,
+                _ => *e.points.first()?,
+            };
+            let at = mm(point);
+            // Back to the left of the line it stands on, which is where a word is drawn from. How wide it is is our
+            // own lettering's width, which is the lettering it will be drawn in.
+            let wide = f64::from(crate::font::width(&text, height as f32));
+            let (dx, dy) = (
+                match across {
+                    1 => -wide / 2.0,
+                    2 => -wide,
+                    _ => 0.0,
+                },
+                match up {
+                    1 => -height / 2.0,
+                    2 => -height,
+                    _ => 0.0,
+                },
+            );
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let at = P2(at.0 + dx * cos - dy * sin, at.1 + dx * sin + dy * cos);
+            if !sane(&at) || !height.is_finite() || height <= 0.0 || height > MAX_COORD || !angle.is_finite() {
+                return None;
+            }
+            Some(Shape::Words { at, text, height, angle })
+        }
         "ARC" | "CIRCLE" => {
             let at = mm(*e.points.first()?);
             let radius = e.radius? * scale;
@@ -604,6 +689,39 @@ fn finish(kind: &str, e: &mut Entity, scale: f64) -> Option<Shape> {
         }
         _ => None,
     }
+}
+
+/// What an `MTEXT` says, without the formatting it says it in: a survey writes a room's name in a paragraph with a
+/// font, a colour and a height of its own in it, and none of that is the name. What is left of the paragraph is one
+/// line, because a drawing's words are read for what they say and not for how they are set.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text.chars();
+    while let Some(c) = rest.next() {
+        match c {
+            // The braces a paragraph groups its runs with say nothing themselves.
+            '{' | '}' => {}
+            '\\' => match rest.next() {
+                // A new paragraph, and the spaces a drawing writes with a mark of their own.
+                Some('P' | 'X' | '~') => out.push(' '),
+                // What a run is set in, which runs to a semicolon.
+                Some(c) if "fFHCcAQWTpS".contains(c) => {
+                    for c in rest.by_ref() {
+                        if c == ';' {
+                            break;
+                        }
+                    }
+                }
+                // Underlining, overlining and the like, which is the one letter and nothing more.
+                Some(c) if "LlOoKkNn".contains(c) => {}
+                // A brace or a backslash of its own, written with one before it.
+                Some(c) => out.push(c),
+                None => {}
+            },
+            c => out.push(c),
+        }
+    }
+    out.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// The box `layers` lie in, mm.
@@ -622,6 +740,13 @@ fn extent(layers: &[Layer]) -> Option<[P2; 2]> {
             Shape::Arc { at, radius, .. } => {
                 grow(P2(at.0 - radius, at.1 - radius));
                 grow(P2(at.0 + radius, at.1 + radius));
+            }
+            Shape::Words { at, text, height, angle } => {
+                let wide = f64::from(crate::font::width(text, *height as f32));
+                let (sin, cos) = angle.to_radians().sin_cos();
+                for (x, y) in [(0.0, 0.0), (wide, 0.0), (wide, *height), (0.0, *height)] {
+                    grow(P2(at.0 + x * cos - y * sin, at.1 + x * sin + y * cos));
+                }
             }
         }
     }

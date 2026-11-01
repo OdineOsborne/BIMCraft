@@ -238,6 +238,58 @@ fn a_block_that_holds_another_is_opened_too_and_one_that_holds_itself_does_not_r
 }
 
 #[test]
+fn the_words_a_survey_writes_come_in_where_it_writes_them() {
+    // A `TEXT`: what it says under code 1, where it stands under 10 and 20, how tall under 40, turned by 50.
+    let words = "0\nTEXT\n8\nTESTI\n1\nSoggiorno\n10\n1000\n20\n2000\n40\n250\n50\n90\n";
+    let d = read_ok(&dxf("", words));
+    assert_eq!(d.layers[0].name, "TESTI");
+    assert_eq!(d.layers[0].shapes[0], Shape::Words { at: P2(1000.0, 2000.0), text: "Soggiorno".into(), height: 250.0, angle: 90.0 });
+    assert!(d.left_out.is_empty(), "{:?}", d.left_out);
+    // One that says nothing, or stands nowhere, is no word of the drawing and is counted like anything else.
+    let bare = read_ok(&dxf("", "0\nTEXT\n8\nTESTI\n1\nCucina\n0\nTEXT\n8\nTESTI\n10\n0\n20\n0\n40\n250\n"));
+    assert_eq!(bare.shapes(), 0);
+    assert_eq!(bare.left_out, ["2 TEXT"]);
+    // An `MTEXT` says the same thing with the paragraph it is written in: the formatting is not read, and what it
+    // says is.
+    // Its point is where it hangs from, the top left of it unless it says otherwise, so the line it stands on is a
+    // word's height under that.
+    let para = "0\nMTEXT\n8\nTESTI\n10\n0\n20\n0\n40\n200\n1\n{\\fArial|b1;Camera}\\Pmatrimoniale\n";
+    let d = read_ok(&dxf("", para));
+    assert_eq!(d.layers[0].shapes[0], Shape::Words { at: P2(0.0, -200.0), text: "Camera matrimoniale".into(), height: 200.0, angle: 0.0 });
+}
+
+#[test]
+fn a_word_inside_a_block_is_written_where_the_block_puts_it() {
+    // A survey draws a window as a block and writes its size in it, so a block's words come in with its lines: as
+    // tall as the block makes them and turned with it.
+    let blocks = block("FINESTRA", (0.0, 0.0), "0\nTEXT\n8\n0\n1\nF1\n10\n0\n20\n0\n40\n100\n");
+    let d = read_ok(&with_blocks(&blocks, &insert("TESTI", "FINESTRA", (3000.0, 1000.0), 90.0, (2.0, 2.0))));
+    assert_eq!(
+        d.layers[0].shapes[0],
+        Shape::Words { at: P2(3000.0, 1000.0), text: "F1".into(), height: 200.0, angle: 90.0 },
+        "{:?}",
+        d.layers[0].shapes[0]
+    );
+}
+
+#[test]
+fn the_words_of_a_drawing_are_drawn_under_the_plan_and_are_no_lines_of_the_building() {
+    // A word is drawn with the strokes its letters are drawn with, so it is seen under a plan like everything else.
+    let m = crate::model::Model::new("Test");
+    let mut m = m;
+    let layers = vec![crate::dxf::Layer {
+        name: "TESTI".into(),
+        shapes: vec![Shape::Words { at: P2(0.0, 0.0), text: "AB".into(), height: 1000.0, angle: 0.0 }],
+    }];
+    m.drawings.insert("rilievo.dxf".into(), std::sync::Arc::new(crate::dxf::Drawing { layers, scale: 1.0, ..Default::default() }));
+    let u = crate::model::Underlay { name: "Rilievo".into(), path: "rilievo.dxf".into(), scale: 1.0, ..Default::default() };
+    assert!(crate::underlay::lines(&m, &u).is_empty(), "a word is no line to snap to or to trace");
+    let drawn = crate::underlay::words(&m, &u);
+    assert!(drawn.len() >= 4, "A and B are drawn with four strokes between them: {}", drawn.len());
+    assert!(drawn.iter().flat_map(|(_, points)| points).all(|p| p.1 >= -1.0), "a word stands on its line, y up: {drawn:?}");
+}
+
+#[test]
 fn a_block_put_a_million_times_over_a_million_stops_at_what_a_drawing_holds() {
     // A grid of copies of a block that holds nothing draws nothing, so nothing in the drawing would ever stop it:
     // how many times a block is opened at all is what is bounded.
