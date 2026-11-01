@@ -104,8 +104,9 @@ pub static ALL: &[Command] = &[
          many shapes are on each, the `shapes` in all, the `extent` it lies in (mm, south-west and north-east), the \
          `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
          `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
-         POLYLINE, ARC and CIRCLE, each on the layer it names; blocks, text, dimensions, hatches and splines are \
-         counted and named, never guessed at. A DWG is turned into DXF first, by the dependency `bimcraft-dwg` holds \
+         POLYLINE, ARC and CIRCLE, each on the layer it names, and opens a block where it is put, bringing in what \
+         it holds on the layer the block stands on; text, dimensions, hatches and splines are counted and named, \
+         never guessed at. A DWG is turned into DXF first, by the dependency `bimcraft-dwg` holds \
          (Autodesk publishes no specification for it), and `converted` is what that reader said it could not read",
         dxf_read,
     ),

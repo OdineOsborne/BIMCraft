@@ -5,8 +5,12 @@
 //! on the layer it names (group code 8), come in; everything else is counted by its own name and listed, never guessed
 //! at. A polyline's bulge (an arc between two of its points) is read as the straight line between them and said to
 //! be, and one of more points than `MAX_VERTICES` is left out whole rather than cut short.
-//! Blocks are not opened: an `INSERT` is listed with the rest, because what it stands for is a definition this does not
-//! read yet.
+//! A block is opened where it is put: a survey draws its doors, its windows and its furniture as blocks, so an
+//! `INSERT` brings in what the `BLOCK` of that name holds, from its base point, turned and scaled as the insert
+//! says and as many times as its grid of copies says. What a block draws on layer `0` comes in on the layer the
+//! block is put on, as a drawing has it; what it draws on a layer of its own keeps that one. A block holds blocks,
+//! `MAX_NESTING` deep, past which a drawing is drawing itself; an insert of a block the file does not hold is
+//! counted like anything else left out, and so is a round thing a block is scaled unevenly into an ellipse.
 //!
 //! The file says its own unit in `$INSUNITS` (inches, feet, millimetres, centimetres, metres); where it says nothing,
 //! or something else, its numbers are read as millimetres, which is what a CAD drawing of a building is usually in. A
@@ -25,6 +29,8 @@ pub const MAX_SHAPES: usize = 500_000;
 pub const MAX_VERTICES: usize = 20_000;
 /// How far a drawing's points may lie from its origin, mm.
 pub const MAX_COORD: f64 = 1e9;
+/// How many blocks deep a block may put another: past that a drawing is drawing itself.
+pub const MAX_NESTING: usize = 8;
 /// How many kinds of thing left out are named, the most of each first.
 const NAMED: usize = 12;
 
@@ -121,6 +127,84 @@ struct Entity {
     flags: i64,
     /// How many of its points were an arc this read straight.
     bulges: usize,
+    /// The name a `BLOCK` gives itself and an `INSERT` names, under code 2.
+    name: String,
+    /// What an `INSERT` scales a block by, under codes 41 and 42, and the grid of copies it stands for, under 70
+    /// and 71 with their spacings under 44 and 45. A block put once at its own size says none of them.
+    scale: (Option<f64>, Option<f64>),
+    grid: (Option<i64>, Option<i64>),
+    spacing: (Option<f64>, Option<f64>),
+}
+
+/// A block put into the drawing by an `INSERT`: which block, on what layer, where, turned and scaled how, and how
+/// many copies of it stand across and up from there.
+#[derive(Clone, Default)]
+struct Put {
+    name: String,
+    layer: String,
+    at: P2,
+    scale: P2,
+    angle: f64,
+    grid: (i64, i64),
+    spacing: P2,
+}
+
+/// What a block holds: a shape, on the layer it is drawn on, or another block put inside it.
+enum Drawn {
+    Shape(String, Shape),
+    Put(Put),
+}
+
+/// Where the points of a block land in the drawing: where its own two axes point, and where its base point goes. A
+/// block put inside a block turns and scales what is turned and scaled already, which is no turn and scale of its
+/// own any more, so this is kept as the two axes and not as an angle.
+#[derive(Clone, Copy)]
+struct Placed {
+    x: P2,
+    y: P2,
+    at: P2,
+}
+
+impl Placed {
+    /// The drawing's own axes: where a block stands that is put nowhere, which is where the drawing's own entities
+    /// stand.
+    const SAME: Placed = Placed { x: P2(1.0, 0.0), y: P2(0.0, 1.0), at: P2(0.0, 0.0) };
+
+    /// Where the `col`th copy across and the `row`th up of a block put so lands.
+    fn of(put: &Put, col: f64, row: f64) -> Placed {
+        let (sin, cos) = put.angle.to_radians().sin_cos();
+        let (x, y) = (put.spacing.0 * col, put.spacing.1 * row);
+        Placed {
+            x: P2(cos * put.scale.0, sin * put.scale.0),
+            y: P2(-sin * put.scale.1, cos * put.scale.1),
+            at: P2(put.at.0 + x * cos - y * sin, put.at.1 + x * sin + y * cos),
+        }
+    }
+
+    /// Where a point of the block lands.
+    fn point(&self, p: P2) -> P2 {
+        P2(self.at.0 + self.x.0 * p.0 + self.y.0 * p.1, self.at.1 + self.x.1 * p.0 + self.y.1 * p.1)
+    }
+
+    /// This placing, done inside `outer`: the block put inside the block put there.
+    fn inside(&self, outer: &Placed) -> Placed {
+        let axis = |a: P2| P2(outer.x.0 * a.0 + outer.y.0 * a.1, outer.x.1 * a.0 + outer.y.1 * a.1);
+        Placed { x: axis(self.x), y: axis(self.y), at: outer.point(self.at) }
+    }
+
+    /// What a radius is multiplied by where a round thing stays round — the two axes as long as each other and
+    /// square to one another — and none where it would come out an ellipse, which is no shape this draws.
+    fn round(&self) -> Option<f64> {
+        let (x, y) = (self.x.0.hypot(self.x.1), self.y.0.hypot(self.y.1));
+        let square = self.x.0 * self.y.0 + self.x.1 * self.y.1;
+        (x > 0.0 && (x - y).abs() <= x * 1e-9 && square.abs() <= x * y * 1e-9).then_some(x)
+    }
+
+    /// Where the angle zero of a circle lands, in degrees, and whether the placing turns it over, which runs an arc
+    /// the other way round.
+    fn turn(&self) -> (f64, bool) {
+        (self.x.1.atan2(self.x.0).to_degrees(), self.x.0 * self.y.1 - self.x.1 * self.y.0 < 0.0)
+    }
 }
 
 impl Entity {
@@ -167,6 +251,11 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
     // A POLYLINE being read, while its VERTEX entities come in.
     let mut open: Option<Entity> = None;
     let mut capped = false;
+    // The blocks the file holds, and the one being read: its name, its base point, and what has been drawn in it so
+    // far. A block is kept as it is drawn and opened where it is put, because a block may put a block the file
+    // holds after it, and because the same block is put in many places.
+    let mut blocks: std::collections::HashMap<String, Vec<Drawn>> = std::collections::HashMap::new();
+    let mut block: Option<(String, P2, Vec<Drawn>)> = None;
 
     let mut pairs = Pairs { lines: text.lines() }.peekable();
     while let Some((code, value)) = pairs.next() {
@@ -183,10 +272,15 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             }
         }
         if code != 0 {
-            if section != "ENTITIES" {
+            // What a block is drawn out of is read as the drawing's own entities are, because that is what it is.
+            if section != "ENTITIES" && section != "BLOCKS" {
                 continue;
             }
+            // A code says different things of different entities: 42 is a polyline's bulge and an insert's scale
+            // across, 70 a polyline's closing and an insert's count across.
+            let put = kind == "INSERT";
             match code {
+                2 => e.name = value.to_string(),
                 8 => e.layer = value.to_string(),
                 10 => {
                     e.point();
@@ -200,13 +294,19 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                     }
                 }
                 40 => e.radius = value.parse().ok(),
+                41 if put => e.scale.0 = value.parse().ok(),
+                42 if put => e.scale.1 = value.parse().ok(),
                 42 => {
                     if value.parse::<f64>().is_ok_and(|b| b != 0.0) {
                         e.bulges += 1;
                     }
                 }
+                44 if put => e.spacing.0 = value.parse().ok(),
+                45 if put => e.spacing.1 = value.parse().ok(),
                 50 => e.from = value.parse().ok(),
                 51 => e.to = value.parse().ok(),
+                70 if put => e.grid.0 = value.parse().ok(),
+                71 if put => e.grid.1 = value.parse().ok(),
                 70 => e.flags = value.parse().unwrap_or(0),
                 _ => {}
             }
@@ -217,9 +317,37 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
         bulges += e.bulges;
         // A POLYLINE is a header, and its points are the VERTEX entities that follow it, to its SEQEND. Anything else
         // holds its own points and is finished where it ends.
+        let mut put: Option<Put> = None;
         let done: Option<(String, Shape)> = match kind.as_str() {
             "POLYLINE" => {
                 open = Some(std::mem::take(&mut e));
+                None
+            }
+            // A block opens where it is named and holds what is drawn until its end. Its base point is the point
+            // of it that lands where it is put, so what it holds is kept from there.
+            "BLOCK" => {
+                let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
+                block = Some((e.name.clone(), P2(at.0 * d.scale, at.1 * d.scale), Vec::new()));
+                None
+            }
+            "ENDBLK" => {
+                if let Some((name, _, held)) = block.take() {
+                    blocks.insert(name, held);
+                }
+                None
+            }
+            "INSERT" => {
+                let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
+                let across = e.grid.0.unwrap_or(1).clamp(0, MAX_SHAPES as i64);
+                put = Some(Put {
+                    name: e.name.clone(),
+                    layer: e.layer.clone(),
+                    at: P2(at.0 * d.scale, at.1 * d.scale),
+                    scale: P2(e.scale.0.unwrap_or(1.0), e.scale.1.unwrap_or(1.0)),
+                    angle: e.from.unwrap_or(0.0),
+                    grid: (across, e.grid.1.unwrap_or(1).clamp(0, MAX_SHAPES as i64)),
+                    spacing: P2(e.spacing.0.unwrap_or(0.0) * d.scale, e.spacing.1.unwrap_or(0.0) * d.scale),
+                });
                 None
             }
             "VERTEX" => {
@@ -236,29 +364,32 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             }),
             other => finish(other, &mut e, d.scale).map(|shape| (e.layer.clone(), shape)),
         };
-        match done {
-            Some(_) if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => capped = true,
-            Some((layer, shape)) => {
-                let name = if layer.trim().is_empty() { "0" } else { layer.trim() };
-                match layers.iter_mut().find(|l| l.name == name) {
-                    Some(l) => l.shapes.push(shape),
-                    None => layers.push(Layer { name: name.to_string(), shapes: vec![shape] }),
-                }
-            }
+        // What was read is drawn into the block being read, where there is one, and into the drawing otherwise.
+        match (done, put) {
+            (_, Some(put)) => match &mut block {
+                Some((_, _, held)) => held.push(Drawn::Put(put)),
+                None => open_up(&put, &blocks, &mut layers, &mut left_out, &mut capped),
+            },
+            (Some((layer, shape)), None) => match &mut block {
+                Some((_, base, held)) => held.push(Drawn::Shape(layer, from_base(shape, *base))),
+                None if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => capped = true,
+                None => draw(&mut layers, &layer, shape),
+            },
             // What it does not read: named by its own kind, once for each of them. A POLYLINE is left out where its
             // vertices made no path, and its VERTEX and SEQEND are parts of it, not kinds of their own.
             // The words that hold a file together are no kind of thing: a section opens while its name is still being
             // read, so its own marker would otherwise be counted among what was left out.
-            None if !kind.is_empty()
-                && !matches!(
-                    kind.as_str(),
-                    "VERTEX" | "SEQEND" | "POLYLINE" | "SECTION" | "ENDSEC" | "EOF" | "TABLE" | "ENDTAB" | "BLOCK" | "ENDBLK" | "CLASS"
-                )
-                && section == "ENTITIES" =>
+            (None, None)
+                if !kind.is_empty()
+                    && !matches!(
+                        kind.as_str(),
+                        "VERTEX" | "SEQEND" | "POLYLINE" | "SECTION" | "ENDSEC" | "EOF" | "TABLE" | "ENDTAB" | "BLOCK" | "ENDBLK" | "CLASS"
+                    )
+                    && (section == "ENTITIES" || block.is_some()) =>
             {
                 *left_out.entry(kind.clone()).or_default() += 1;
             }
-            None => {}
+            (None, None) => {}
         }
         e = Entity::default();
         kind = value.to_string();
@@ -287,6 +418,153 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
     d.extent = extent(&layers);
     d.layers = layers;
     Ok(d)
+}
+
+/// `shape` drawn on `layer`, which the drawing holds already or gains here, so that the layers stand in the order
+/// they were first drawn on.
+fn draw(layers: &mut Vec<Layer>, layer: &str, shape: Shape) {
+    let name = if layer.trim().is_empty() { "0" } else { layer.trim() };
+    match layers.iter_mut().find(|l| l.name == name) {
+        Some(l) => l.shapes.push(shape),
+        None => layers.push(Layer { name: name.to_string(), shapes: vec![shape] }),
+    }
+}
+
+/// A shape of a block as the block holds it: measured from its base point, which is the point of it that lands
+/// where the block is put.
+fn from_base(shape: Shape, base: P2) -> Shape {
+    let off = |p: P2| P2(p.0 - base.0, p.1 - base.1);
+    match shape {
+        Shape::Line([a, b]) => Shape::Line([off(a), off(b)]),
+        Shape::Path { points, closed } => Shape::Path { points: points.into_iter().map(off).collect(), closed },
+        Shape::Arc { at, radius, from, to } => Shape::Arc { at: off(at), radius, from, to },
+    }
+}
+
+/// A block put into the drawing: every copy of it the grid says, each opened where it stands.
+fn open_up(
+    put: &Put,
+    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
+    layers: &mut Vec<Layer>,
+    left_out: &mut std::collections::BTreeMap<String, usize>,
+    capped: &mut bool,
+) {
+    // A block holding nothing draws nothing, so nothing would ever stop a grid of a million rows of a million of
+    // it, or eight of those inside one another. How many times a block is opened at all is counted and bounded by
+    // what a drawing holds, which is the one bound that holds whatever a file asks for.
+    let mut tries = 0usize;
+    put_in(put, "0", &Placed::SAME, blocks, 0, layers, left_out, capped, &mut tries);
+}
+
+/// The same, inside a block put there already: on the layer that one came in on, where that one put it.
+#[allow(clippy::too_many_arguments)]
+fn put_in(
+    put: &Put,
+    on: &str,
+    outer: &Placed,
+    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
+    depth: usize,
+    layers: &mut Vec<Layer>,
+    left_out: &mut std::collections::BTreeMap<String, usize>,
+    capped: &mut bool,
+    tries: &mut usize,
+) {
+    let on = match put.layer.trim() {
+        "" | "0" => on,
+        own => own,
+    };
+    for row in 0..put.grid.1.max(1) {
+        for col in 0..put.grid.0.max(1) {
+            if *capped {
+                return;
+            }
+            let placed = Placed::of(put, col as f64, row as f64).inside(outer);
+            opened(&put.name, on, &placed, blocks, depth, layers, left_out, capped, tries);
+        }
+    }
+}
+
+/// A block opened: every shape it holds, drawn on the layer it comes in on, where the placing puts it. A block
+/// holds blocks, so this goes round again — [`MAX_NESTING`] deep, past which a drawing is drawing itself.
+#[allow(clippy::too_many_arguments)]
+fn opened(
+    name: &str,
+    on: &str,
+    placed: &Placed,
+    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
+    depth: usize,
+    layers: &mut Vec<Layer>,
+    left_out: &mut std::collections::BTreeMap<String, usize>,
+    capped: &mut bool,
+    tries: &mut usize,
+) {
+    *tries += 1;
+    if *tries > MAX_SHAPES {
+        *capped = true;
+        return;
+    }
+    if depth >= MAX_NESTING {
+        *left_out.entry(format!("blocks put more than {MAX_NESTING} deep, left unopened")).or_default() += 1;
+        return;
+    }
+    let Some(held) = blocks.get(name) else {
+        *left_out.entry("INSERT of a block the file doesn't hold".into()).or_default() += 1;
+        return;
+    };
+    for drawn in held {
+        if *capped {
+            return;
+        }
+        match drawn {
+            // What a block draws on layer 0 takes the layer the block is put on, as a drawing has it; what it
+            // draws on a layer of its own keeps that one.
+            Drawn::Shape(layer, shape) => {
+                let on = match layer.trim() {
+                    "" | "0" => on,
+                    own => own,
+                };
+                match placing(shape, placed) {
+                    Ok(_) if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => *capped = true,
+                    Ok(shape) => draw(layers, on, shape),
+                    Err(why) => *left_out.entry(why.into()).or_default() += 1,
+                }
+            }
+            Drawn::Put(inner) => put_in(inner, on, placed, blocks, depth + 1, layers, left_out, capped, tries),
+        }
+    }
+}
+
+/// A shape of a block where the placing puts it, or why it is not drawn there.
+fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
+    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
+    let far = "things in a block put farther from the origin than a drawing reaches";
+    match shape {
+        Shape::Line([a, b]) => {
+            let line = [placed.point(*a), placed.point(*b)];
+            line.iter().all(sane).then_some(Shape::Line(line)).ok_or(far)
+        }
+        Shape::Path { points, closed } => {
+            let points: Vec<P2> = points.iter().map(|p| placed.point(*p)).collect();
+            points.iter().all(sane).then_some(Shape::Path { points, closed: *closed }).ok_or(far)
+        }
+        Shape::Arc { at, radius, from, to } => {
+            // Scaled evenly a circle is a circle, and scaled unevenly it is an ellipse, which this does not draw.
+            let radius = radius * placed.round().ok_or("round things in a block scaled into ellipses")?;
+            let at = placed.point(*at);
+            let (turn, over) = placed.turn();
+            // A whole circle stays a whole circle, whatever it is turned by. An arc turns with the block, and a
+            // block turned over runs it the other way round, so its two ends change places.
+            let (from, to) = match ((to - from).abs() >= 360.0, over) {
+                (true, _) => (0.0, 360.0),
+                (false, false) => (from + turn, to + turn),
+                (false, true) => (turn - to, turn - from),
+            };
+            let round = (from / 360.0).floor() * 360.0;
+            let (from, to) = (from - round, to - round);
+            let ok = sane(&at) && radius.is_finite() && radius > 0.0 && radius <= MAX_COORD && from.is_finite() && to.is_finite();
+            ok.then_some(Shape::Arc { at, radius, from, to }).ok_or(far)
+        }
+    }
 }
 
 /// The shape an entity of `kind` makes, in millimetres, or none where it makes none: a kind this does not read, or one

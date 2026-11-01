@@ -62,6 +62,18 @@ fn linked(lines: &[(String, [f64; 4])]) -> Session {
     s
 }
 
+/// A session with a drawing of `lines` under its lowest level, with `blocks` defined in it and `puts` putting them.
+fn linked_with_blocks(lines: &[(String, [f64; 4])], blocks: &str, puts: &str) -> Session {
+    let path = drawing(lines);
+    let text = std::fs::read_to_string(&path).expect("the drawing");
+    let with =
+        text.replace("0\nSECTION\n2\nENTITIES\n", &format!("0\nSECTION\n2\nBLOCKS\n{blocks}0\nENDSEC\n0\nSECTION\n2\nENTITIES\n{puts}"));
+    std::fs::write(&path, with).expect("the drawing again");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    s
+}
+
 #[test]
 fn a_room_drawn_as_the_two_faces_of_its_walls_becomes_four_walls_that_meet_at_its_corners() {
     let mut s = linked(&room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0));
@@ -284,6 +296,25 @@ fn a_doorway_comes_in_as_a_door_in_the_wall_it_is_in_and_a_window_with_glass_in_
     let Some(Element::Window(o)) = s.model.elements.get(windows[0]) else { panic!() };
     assert!(o.sill > 0.0, "a window stands off the floor");
     assert_eq!(s.model.types.window["Fixed 900 x 1500"].width, 900.0);
+}
+
+#[test]
+fn a_window_a_survey_draws_as_a_block_is_read_like_any_other() {
+    // The wall's two faces run through and the window is a block of its two jambs and its glass, put in the wall
+    // where it stands. The block is opened on the wall's own layer, so it reads as a window drawn line by line.
+    let wall = vec![("MURI".to_string(), [0.0, 0.0, 6000.0, 0.0]), ("MURI".to_string(), [0.0, 300.0, 6000.0, 300.0])];
+    let block = "0\nBLOCK\n2\nFINESTRA\n10\n0\n20\n0\n\
+                 0\nLINE\n8\n0\n10\n0\n20\n0\n11\n0\n21\n300\n\
+                 0\nLINE\n8\n0\n10\n900\n20\n0\n11\n900\n21\n300\n\
+                 0\nLINE\n8\n0\n10\n0\n20\n150\n11\n900\n21\n150\n\
+                 0\nENDBLK\n";
+    let mut s = linked_with_blocks(&wall, block, "0\nINSERT\n8\nMURI\n2\nFINESTRA\n10\n2550\n20\n0\n");
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!((out["walls"].clone(), out["windows"].clone()), (json!(1), json!(1)), "{out}");
+    let (walls, windows) = (ids(&s, "wall"), ids(&s, "window"));
+    let Some(Element::Window(o)) = s.model.elements.get(windows[0]) else { panic!("a window") };
+    assert_eq!(s.model.elements.id(o.host), Some(walls[0]), "it is in the wall");
+    assert!((o.offset - 3000.0).abs() < 1.0, "where the block was put: {}", o.offset);
 }
 
 #[test]

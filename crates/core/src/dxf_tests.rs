@@ -87,7 +87,7 @@ fn what_it_does_not_read_is_counted_by_its_own_name_the_most_first() {
     );
     let d = read_ok(&dxf("", &entities));
     assert_eq!(d.shapes(), 1, "only the line is geometry this reads");
-    assert_eq!(d.left_out, ["3 TEXT", "1 INSERT", "1 SPLINE"], "the most of a kind first, then by name");
+    assert_eq!(d.left_out, ["3 TEXT", "1 INSERT of a block the file doesn't hold", "1 SPLINE"], "the most of a kind first, then by name");
 }
 
 #[test]
@@ -141,6 +141,119 @@ fn a_polyline_of_more_points_than_one_holds_is_left_out_whole() {
     let d = read_ok(&dxf("", &entities));
     assert_eq!(d.shapes(), 0, "half a drawing is worse than none of it");
     assert_eq!(d.left_out, ["1 LWPOLYLINE"]);
+}
+
+/// A block named `name`, holding `entities`, with its base point at `at`.
+fn block(name: &str, at: (f64, f64), entities: &str) -> String {
+    format!("0\nBLOCK\n2\n{name}\n10\n{}\n20\n{}\n{entities}0\nENDBLK\n", at.0, at.1)
+}
+
+/// An INSERT of the block `name` on `layer`, put at `at`, turned `angle` degrees and scaled by `scale`.
+fn insert(layer: &str, name: &str, at: (f64, f64), angle: f64, scale: (f64, f64)) -> String {
+    format!("0\nINSERT\n8\n{layer}\n2\n{name}\n10\n{}\n20\n{}\n41\n{}\n42\n{}\n50\n{angle}\n", at.0, at.1, scale.0, scale.1)
+}
+
+/// A DXF whose BLOCKS section holds `blocks` and whose ENTITIES hold `entities`.
+fn with_blocks(blocks: &str, entities: &str) -> Vec<u8> {
+    format!("0\nSECTION\n2\nBLOCKS\n{blocks}0\nENDSEC\n0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n0\nEOF\n").into_bytes()
+}
+
+/// Whether a shape is the line between these two points, to the millionth of a millimetre: a block turned a right
+/// angle lands on its point through a sine, not on the number a draughtsman typed.
+fn is_line(shape: &Shape, [a, b]: [P2; 2]) -> bool {
+    matches!(shape, Shape::Line([p, q]) if p.dist(a) < 1e-6 && q.dist(b) < 1e-6)
+}
+
+#[test]
+fn a_block_is_drawn_wherever_it_is_put_turned_and_scaled_as_the_insert_says() {
+    let blocks = block("PORTA", (0.0, 0.0), &line("0", 0.0, 0.0, 800.0, 0.0));
+    let entities = format!(
+        "{}{}{}",
+        insert("MURI", "PORTA", (1000.0, 2000.0), 0.0, (1.0, 1.0)),
+        insert("MURI", "PORTA", (4000.0, 2000.0), 90.0, (1.0, 1.0)),
+        insert("MURI", "PORTA", (0.0, 0.0), 0.0, (-1.0, 2.0)),
+    );
+    let d = read_ok(&with_blocks(&blocks, &entities));
+    assert_eq!(d.shapes(), 3, "{:?}", d.layers);
+    assert_eq!(d.layers[0].name, "MURI", "what is drawn on layer 0 in a block takes the layer the block is put on");
+    let drawn = &d.layers[0].shapes;
+    assert!(is_line(&drawn[0], [P2(1000.0, 2000.0), P2(1800.0, 2000.0)]), "{:?}", drawn[0]);
+    assert!(is_line(&drawn[1], [P2(4000.0, 2000.0), P2(4000.0, 2800.0)]), "turned a right angle: {:?}", drawn[1]);
+    assert!(is_line(&drawn[2], [P2(0.0, 0.0), P2(-800.0, 0.0)]), "mirrored: {:?}", drawn[2]);
+    assert!(d.left_out.is_empty(), "{:?}", d.left_out);
+}
+
+#[test]
+fn a_block_is_drawn_from_its_base_point_and_keeps_the_layers_its_own_lines_name() {
+    // The base point is where the insertion point lands, so a block drawn away from the origin is not put twice.
+    let blocks = block(
+        "TAVOLO",
+        (1000.0, 1000.0),
+        &format!("{}{}", line("0", 1000.0, 1000.0, 1800.0, 1000.0), line("ARREDI", 1000.0, 1000.0, 1000.0, 1600.0)),
+    );
+    let d = read_ok(&with_blocks(&blocks, &insert("MURI", "TAVOLO", (5000.0, 0.0), 0.0, (1.0, 1.0))));
+    assert_eq!(d.shapes(), 2);
+    let names: Vec<&str> = d.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["MURI", "ARREDI"], "a line on a layer of its own keeps it; one on layer 0 takes the insert's");
+    assert!(is_line(&d.layers[0].shapes[0], [P2(5000.0, 0.0), P2(5800.0, 0.0)]), "{:?}", d.layers[0].shapes[0]);
+    assert!(is_line(&d.layers[1].shapes[0], [P2(5000.0, 0.0), P2(5000.0, 600.0)]), "{:?}", d.layers[1].shapes[0]);
+}
+
+#[test]
+fn a_round_thing_in_a_block_is_drawn_where_the_scale_keeps_it_round() {
+    let round = "0\nCIRCLE\n8\n0\n10\n0\n20\n0\n40\n250\n0\nARC\n8\n0\n10\n0\n20\n0\n40\n500\n50\n0\n51\n90\n";
+    let blocks = block("TONDO", (0.0, 0.0), round);
+    // Scaled evenly, a circle is a circle: the radius goes with it and an arc turns with the block.
+    let d = read_ok(&with_blocks(&blocks, &insert("M", "TONDO", (100.0, 100.0), 90.0, (2.0, 2.0))));
+    assert_eq!(d.shapes(), 2, "{:?}", d.layers);
+    assert_eq!(d.layers[0].shapes[0], Shape::Arc { at: P2(100.0, 100.0), radius: 500.0, from: 0.0, to: 360.0 });
+    match &d.layers[0].shapes[1] {
+        Shape::Arc { radius, from, to, .. } => {
+            assert!((*radius - 1000.0).abs() < 1e-6 && (*from - 90.0).abs() < 1e-6 && (*to - 180.0).abs() < 1e-6, "{radius} {from} {to}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // Scaled unevenly it is an ellipse, which this does not draw, so it is left out and said.
+    let flat = read_ok(&with_blocks(&blocks, &insert("M", "TONDO", (0.0, 0.0), 0.0, (1.0, 2.0))));
+    assert_eq!(flat.shapes(), 0);
+    assert_eq!(flat.left_out, ["2 round things in a block scaled into ellipses"]);
+}
+
+#[test]
+fn a_block_that_holds_another_is_opened_too_and_one_that_holds_itself_does_not_run_away() {
+    let blocks = format!(
+        "{}{}",
+        block("ANTA", (0.0, 0.0), &line("0", 0.0, 0.0, 800.0, 0.0)),
+        block("PORTA", (0.0, 0.0), &format!("{}{}", line("0", 0.0, 0.0, 0.0, 100.0), insert("0", "ANTA", (0.0, 100.0), 0.0, (1.0, 1.0)))),
+    );
+    let d = read_ok(&with_blocks(&blocks, &insert("MURI", "PORTA", (2000.0, 0.0), 0.0, (1.0, 1.0))));
+    assert_eq!(d.shapes(), 2, "{:?}", d.layers);
+    assert!(is_line(&d.layers[0].shapes[1], [P2(2000.0, 100.0), P2(2800.0, 100.0)]), "{:?}", d.layers[0].shapes[1]);
+    // A block that puts itself inside itself is a drawing with no end to it, and a drawing has an end.
+    let itself =
+        block("GIRO", (0.0, 0.0), &format!("{}{}", line("0", 0.0, 0.0, 100.0, 0.0), insert("0", "GIRO", (100.0, 0.0), 0.0, (1.0, 1.0))));
+    let d = read_ok(&with_blocks(&itself, &insert("MURI", "GIRO", (0.0, 0.0), 0.0, (1.0, 1.0))));
+    assert!(d.shapes() <= crate::dxf::MAX_NESTING, "{} shapes from a block inside itself", d.shapes());
+    assert!(d.left_out.iter().any(|w| w.contains("deep")), "{:?}", d.left_out);
+}
+
+#[test]
+fn a_block_put_a_million_times_over_a_million_stops_at_what_a_drawing_holds() {
+    // A grid of copies of a block that holds nothing draws nothing, so nothing in the drawing would ever stop it:
+    // how many times a block is opened at all is what is bounded.
+    let empty = block("NIENTE", (0.0, 0.0), "");
+    let grid = "0\nINSERT\n8\nM\n2\nNIENTE\n10\n0\n20\n0\n70\n2000000\n71\n2000000\n44\n10\n45\n10\n";
+    let d = read_ok(&with_blocks(&empty, grid));
+    assert_eq!(d.shapes(), 0);
+    assert!(d.left_out.iter().any(|w| w.contains("a drawing holds")), "{:?}", d.left_out);
+}
+
+#[test]
+fn an_insert_of_a_block_the_file_does_not_hold_is_counted_and_nothing_else() {
+    let d =
+        read_ok(&with_blocks("", &format!("{}{}", insert("B", "MANCA", (0.0, 0.0), 0.0, (1.0, 1.0)), line("MURI", 0.0, 0.0, 1000.0, 0.0))));
+    assert_eq!(d.shapes(), 1);
+    assert_eq!(d.left_out, ["1 INSERT of a block the file doesn't hold"]);
 }
 
 #[test]

@@ -26,11 +26,21 @@ could not read.
 
 **What it reads.** `LINE`, `LWPOLYLINE`, `POLYLINE` with the `VERTEX` entities that follow it to its `SEQEND`, `ARC` and
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).
-Everything else is counted by its own name and listed in `left_out`, the most of a kind first: `312 TEXT`, `4 SPLINE`.
-Blocks are not opened — an `INSERT` is listed, because what it stands for is a definition this does not read yet — and
-hatches, dimensions and splines are listed too. A polyline's bulge is read as the straight line between its points and
+Everything else is counted by its own name and listed in `left_out`, the most of a kind first: `312 TEXT`, `4 SPLINE`;
+hatches, dimensions and splines are listed so. A polyline's bulge is read as the straight line between its points and
 said to be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a
 drawing is worse than none of it.
+
+**Blocks.** A survey draws its doors, its windows and its furniture as blocks, so a block is opened where it is put: an
+`INSERT` brings in what the `BLOCK` of that name holds, measured from the block's base point, turned and scaled as the
+insert says and as many times over as its grid of copies (codes 70, 71, 44 and 45) says. What a block draws on layer `0`
+comes in on the layer the block is put on, as a drawing has it, so it reads with the other walls of that layer and takes
+its phase; what a block draws on a layer of its own keeps that one. A block holds blocks, which are opened too, up to
+`MAX_NESTING` deep — past that a drawing is drawing itself, and what is left unopened is counted. An `INSERT` naming a
+block the file does not hold is counted like anything else left out. What a block cannot bring in is a round thing it
+scales unevenly, which is an ellipse and no shape this draws: those are counted too. How many times a block is opened
+at all is bounded by `MAX_SHAPES`, and not only how many shapes it brings in, because a block holding nothing draws
+nothing however many million times over a grid asks for it.
 
 **The unit.** The file says its own in `$INSUNITS`, and inches, feet, millimetres, centimetres and metres are read from
 it. A file that says nothing, or says something else, is read as millimetres, which a drawing of a building nearly
@@ -345,5 +355,5 @@ drawn under a dim box that stands in the middle of them and cannot be moved are 
 its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
 while it is open, and the only typing it takes is into numbers.
 
-**What is still missing**: rooms. A drawing's blocks (`INSERT`) are not read either, so a survey that draws its
-doors and its furniture as blocks draws nothing of them, and the openings in such a drawing are not found.
+**What is still missing**: a survey's text (`TEXT`, `MTEXT`) is not read, so what the drawing calls its rooms is not
+read either, and a room this places is numbered and not named.
