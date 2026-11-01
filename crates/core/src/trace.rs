@@ -16,8 +16,9 @@
 //! Two things more are not walls, and a real survey is full of both. One is a ladder: a stair's treads, a hatch, a
 //! fence and a run of joists are parallel lines evenly spaced, and every neighbouring pair of them measures the same
 //! thickness. A wall's face has a room on one side of it, so it is the asymmetry that tells them apart: a face with a
-//! face across it on *both* sides, the same distance away and over the same stretch, is a rung, and no pair it is in
-//! is a wall.
+//! face across it on *both* sides, the same distance away, is a rung, and so is the first line of a ladder or the
+//! last, which has one side only, where the nearest line across it has another twice as far away on that same side.
+//! A rung is no face of a wall at all.
 //!
 //! The other is a mark drawn *inside* a wall. A survey draws a window by carrying the wall's two faces across the
 //! opening and drawing the glass down the middle of it, and the glass is nearer to a face than the far face is, so
@@ -393,23 +394,66 @@ fn inside(faces: &[Face], squares: &Squares, how: &How) -> Vec<bool> {
         .collect()
 }
 
+/// Which faces are rungs of a ladder and no faces of a wall: a stair's treads, a hatch, a fence, a run of joists.
+/// They are parallel lines evenly spaced, so every neighbouring pair of them measures the same thickness — on the
+/// survey this was written against, a flight of nine treads 280 apart read as eight walls.
+///
+/// A rung is told from a face by the asymmetry: a wall's face has a room on one side of it, so a face with a face
+/// across it on both sides, as far away as each other, is a rung — and so is the first of a ladder and the last,
+/// which have one side only, when the nearest line across them has another twice as far away on the same side.
+///
+/// Both ask only after the lines that run alongside the whole of this one and have the whole of themselves
+/// alongside it, because a ladder's rungs are drawn alike. That is what keeps a wall's face from being read as a
+/// rung of a ladder that happens to end under it: on that same survey a stair's treads 1000 long fell 360 under the
+/// inner face of a wall 350 thick, whose own outer face lies 350 over it and runs 7600, and reading that face as a
+/// rung took the north wall of the house away and left the house with no room in it.
+fn rungs(faces: &[Face], squares: &Squares, inside: &[bool], how: &How) -> Vec<bool> {
+    // No farther than a wall is thick, as the pairs themselves: what lies farther off than that is across a room,
+    // and the walls of a room are as far from one another as each other often enough.
+    let reach = how.thick + how.slack(how.thick);
+    (0..faces.len())
+        .map(|i| {
+            if inside[i] {
+                return false;
+            }
+            let a = &faces[i];
+            let apart: Vec<f64> = squares
+                .near(a.at, a.end(), reach)
+                .iter()
+                .filter(|j| **j != i && inside.get(**j) != Some(&true))
+                .filter_map(|j| faces.get(*j))
+                .filter_map(|b| alongside(a, b, how).map(|(d, run)| (b, d, run)))
+                .filter(|(b, d, run)| *d != 0.0 && d.abs() <= reach && *run >= a.len * 0.9 && *run >= b.len * 0.9)
+                .map(|(_, d, _)| d)
+                .collect();
+            let between = apart.iter().any(|up| *up > 0.0 && apart.iter().any(|down| *down < 0.0 && (up + down).abs() <= how.slack(*up)));
+            let goes_on = [1.0, -1.0].iter().any(|side| {
+                let on = || apart.iter().filter(|d| **d * side > 0.0).map(|d| d.abs());
+                on().min_by(f64::total_cmp).is_some_and(|step| on().any(|at| (at - step * 2.0).abs() <= how.slack(step)))
+            });
+            between || goes_on
+        })
+        .collect()
+}
+
 /// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them and
 /// how many of them stood alone.
 fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (Vec<Found>, Vec<Hole>, usize) {
     let squares = Squares::of(&faces.iter().map(|f| (f.at, f.end())).collect::<Vec<(P2, P2)>>());
     let inside = inside(faces, &squares, how);
+    let rung = rungs(faces, &squares, &inside, how);
     let mut pairs: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
     let mut nearest = vec![f64::INFINITY; faces.len()];
     // The two faces of a wall are no farther apart than a wall is thick, so no face farther off than that from this
     // one is weighed against it at all.
     let reach = how.thick + how.slack(how.thick);
     for (i, a) in faces.iter().enumerate() {
-        if inside[i] {
+        if inside[i] || rung[i] {
             continue;
         }
         for j in squares.near(a.at, a.end(), reach) {
             let Some(b) = faces.get(j) else { continue };
-            if j <= i || inside[j] {
+            if j <= i || inside[j] || rung[j] {
                 continue;
             }
             let Some((d, s0, s1)) = across(a, b, how) else { continue };
@@ -418,30 +462,8 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
             pairs.push((i, j, d, s0, s1));
         }
     }
-    // A rung of a ladder: a face with a face across it on both sides, as far away as each other and over the same
-    // stretch of it. A stair's treads, a hatch, a fence.
-    let rung: Vec<bool> = (0..faces.len())
-        .map(|i| {
-            let flanks: Vec<(f64, f64)> = pairs
-                .iter()
-                .filter_map(|(a, b, d, s0, s1)| {
-                    let side = match (*a == i, *b == i) {
-                        (true, _) => *d,
-                        (_, true) => -*d,
-                        _ => return None,
-                    };
-                    Some((side, (s1 - s0) / faces[i].len))
-                })
-                .filter(|(_, over)| *over >= 0.9)
-                .collect();
-            flanks.iter().any(|(up, _)| *up > 0.0 && flanks.iter().any(|(down, _)| *down < 0.0 && (up + down).abs() <= how.slack(*up)))
-        })
-        .collect();
     let mut walls: Vec<Found> = Vec::new();
     for (i, j, d, s0, s1) in pairs {
-        if rung[i] || rung[j] {
-            continue;
-        }
         // A face's wall is the nearest face across it. A farther one is the other side of a room — and the same wall,
         // drawn a little out of true, must not be told from itself, which is what the slack is for.
         let t = d.abs();
@@ -1474,12 +1496,35 @@ mod tests {
             lines.push(("SCALA", [0.0, y, 1200.0, y]));
         }
         assert!(found(&lines).is_empty(), "{:?}", found(&lines));
+        // Four lines are a ladder as much as five, and the first and the last of them are rungs as much as the
+        // ones between: a flight of three treads is no three walls.
+        assert!(found(&lines[..4]).is_empty(), "{:?}", found(&lines[..4]));
         // And the wall beside it is a wall still.
         lines.push(("MURI", [3000.0, 0.0, 3000.0, 5000.0]));
         lines.push(("MURI", [3300.0, 0.0, 3300.0, 5000.0]));
         let walls = found(&lines);
         let [wall] = &walls[..] else { panic!("one wall, not {}", walls.len()) };
         assert!((wall.thickness - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_wall_is_no_rung_however_close_a_stair_is_drawn_against_it() {
+        // The survey this was written against draws a flight of ten treads 280 apart against the north wall of the
+        // house. The wall is 350 thick, the stair's top tread is 80 under its inner face, and the next one down is
+        // 360 under it — as far below that face as the wall's own outer face lies above it.
+        let mut lines: Vec<(&str, [f64; 4])> = vec![
+            ("MURI", [0.0, 3272.0, 7600.0, 3272.0]),
+            ("MURI", [350.0, 2922.0, 6200.0, 2922.0]),
+            ("MURI", [6300.0, 2922.0, 7300.0, 2922.0]),
+        ];
+        for n in 0..10 {
+            let y = 2842.0 - 280.0 * n as f64;
+            lines.push(("SCALA", [6300.0, y, 7300.0, y]));
+        }
+        let walls = found(&lines);
+        let [wall] = &walls[..] else { panic!("one wall, not {}: {walls:?}", walls.len()) };
+        assert!((wall.thickness - 350.0).abs() < 1e-9, "{wall:?}");
+        assert!((wall.length() - 6950.0).abs() < 1e-9, "the wall runs past the stair: {wall:?}");
     }
 
     #[test]

@@ -114,8 +114,14 @@ Six rules keep it from finding walls where there are none, and each of them was 
 - **A ladder is no wall.** A stair's treads, a hatch, a fence and a run of joists are parallel lines evenly spaced,
   and every neighbouring pair of them measures the same thickness: on the survey this was written against, a flight of
   nine treads 280 apart read as eight walls. A wall's face has a room on one side of it, so the asymmetry tells them
-  apart — a face with a face across it on *both* sides, as far away as each other and over the same stretch, is a rung,
-  and no pair it is in is a wall.
+  apart — a face with a face across it on *both* sides, as far away as each other, is a rung; and so are the first and
+  the last of a ladder, which have one side only, where the nearest line across them has another twice as far away on
+  that same side. A rung is no face of a wall at all, so it is not the nearest face across another one either, which
+  is what keeps a stair drawn against a wall from taking the wall's own face away from it. Both ask only after the
+  lines that run alongside the whole of this one and have the whole of themselves alongside it, because a ladder's
+  rungs are drawn alike: on that survey the treads of a stair, 1000 long, fall 360 under the inner face of the north
+  wall, 350 thick, whose own outer face lies 350 over it and runs 7600. Reading that face as a rung lost the north
+  wall east of the stair, left the house open at its north-east corner, and left the north block of it with no room.
 - **A mark inside a wall is no face of one.** A survey draws a window by carrying the wall's two faces across the
   opening and drawing the glass down the middle of it; the glass is 125 from a face where the far face is 300, so the
   nearest-face rule takes glass and face for a wall 130 thick and loses the 300 wall they are drawn in. On the survey
@@ -144,8 +150,8 @@ Six rules keep it from finding walls where there are none, and each of them was 
   one can pass is no gap but a corner drawn carelessly; and because a corner is two axes both stopping short of it,
   taking the one to the other moves the mark the next is measured from, so it is done again until nothing moves (at
   most `ROUNDS`, which is there so that nothing can run away with a drawing). The two together — a reach of
-  `NARROWEST` and the rounds — take that survey from thirteen open wall ends to eight, and those eight are gaps of
-  645 mm and more. An end that has found
+  `NARROWEST` and the rounds — close all but five of that survey's wall ends, and those five stop 304 mm and more
+  short of anything. An end that has found
   its crossing is not weighed again — stretching an axis leaves the line it runs along where it was, so the crossings
   do not move — which is why the rounds cost nothing on a large plan. An end whose crossing would leave
   less than half the wall, or turn it round, is left where it was.
@@ -299,11 +305,12 @@ metre, which is a duct's shaft and the least of a building that is anywhere at a
 sliver two walls leave between their centre lines where one is drawn a hair off the other, and no room.
 
 `trace_walls` takes `rooms` and does the same with the walls it has just built, in the one command, so one undo step
-takes the lot back. On the survey this was written against that gives three rooms, 4.37 m², 8.06 m² and 54.19 m²,
-which is the main block of the house in three; the rest of it stays open, because the survey draws partitions that
-stop two metres short of the walls they run into, and the back of the house is a face the nearest-face rule reads as
-a lining for the whole of its length. A wall drawn by hand across one of those, and `place_rooms` again, is what
-finishes it.
+takes the lot back. On the survey this was written against that gives four rooms, 28.55 m², 4.37 m², 8.06 m² and
+54.19 m², 95.17 m² together: the north block of the house whole, and the main block in three. What stays open is
+inside that last one, where the survey draws the partition between the front room and the back of the house as a
+single line over the five metres between the two ends of it it draws as a pair, and a line is no wall; the back of
+the house is a face the nearest-face rule reads as a lining for the whole of its length as well. A wall drawn by
+hand across one of those, and `place_rooms` again, is what finishes it.
 
 ## The window: Trace Walls
 
