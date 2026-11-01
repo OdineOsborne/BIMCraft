@@ -232,23 +232,48 @@ against says `$INSUNITS` millimetres and is drawn in metres, so its longest line
 it until Link CAD is given `scale`. Nothing guesses at a scale.
 
 Measured on that survey (280 shapes, 204 faces): the DWG reads and links in about 50 ms and the trace takes about
-9 ms, finding 21 walls, 7 doors and 6 windows, with its outside 400 thick all round. Every pair of faces is weighed,
-so the work is the square of their number: a synthetic plan of 1,200 rooms (9,600 faces) reads and links in 64 ms and
-traces 4,800 walls in about 2.2 s, and more than `MAX_FACES` (10,000) faces is refused with what to do about it.
-Looking for the openings as well brings that to about 1.2 s — less than without them, because a wall and the pieces
-of it beyond its doors become one wall, so `meet` and `tidy` weigh 140 walls against each other and not 4,800.
+9 ms, finding 21 walls, 7 doors and 6 windows, with its outside 400 thick all round. A synthetic plan of 1,200 rooms
+(9,600 faces) reads and links in about 80 ms and traces 4,800 walls in about 250 ms with the openings in them, or
+100 ms without them; a drawing with more than `MAX_FACES` (10,000) lines as long as a wall is refused, with what to
+do about it.
 
-Finding those openings took 10 s until it was measured instead of guessed at, and the guess written here before was
-wrong: `glazed_openings` costs 7 ms on that plan. Two things cost it. **`open_up` began again at the first wall after
-every piece of a wall it took in**, which on that plan is 4,660 restarts of a search over 4,800 walls; taking a piece
-in makes an opening for no wall but the one that took it, so one pass over them is enough — `beyond` finds the next
-piece of a wall and the wall is asked again until there is nothing beyond it. **What was left was `glazed`**, which
-read every line of the drawing for every opening: 4,660 openings against 9,600 lines, two thirds of what remained.
-The lines are now laid out in squares (`Marks`) and a wall is handed those drawn within the widest of its openings of
-its axis, with the few that lie in too much of the drawing to be put in a square — the boundary of a plot, a long
-diagonal — handed to every wall. Neither changed what is read: the same 21 walls, 7 doors, 6 windows and 3 rooms on
-the survey, and the same 4,800 walls and 4,660 openings on the plan of 1,200 rooms. What is square in the number of
-faces is now the pairing itself (`across`, and `inside` before it), which is where to look next.
+That trace took 9.7 s, and every second of it was one thing: a drawing weighed against the whole of itself. Nothing
+read here reaches far — a wall is two faces no farther apart than `thick`, two pieces of one wall are a doorway
+apart, a corner is a crossing a step from an end, one wall stands in another only where their axes are within a
+thickness of each other — so the drawing is laid out in squares (`Squares`) and each of those questions is asked of
+the lines and the walls near the one asking. On that plan, before and now:
+
+| | before | now |
+|---|---|---|
+| `inside`, the marks and the leaves | 560 ms | 15 ms |
+| `across`, the pairing itself | 160 ms | 7 ms |
+| `join`, the pieces of one wall | 140 ms | 5 ms |
+| `open_up`, the doorways | 8,700 ms | 150 ms |
+| `meet`, the corners | 600 ms | 11 ms |
+| `tidy`, what is no wall | 860 ms | 13 ms |
+
+Each is measured where it does its work: `open_up` with the openings asked for, `meet` and `tidy` without them,
+where the pieces of a wall stay apart and there are 4,800 walls to weigh against each other and not 140.
+
+Two of those were not the squares. **`open_up` began again at the first wall after every piece of a wall it took
+in** — 4,660 restarts on that plan — and it needs no restart at all, because taking a piece in makes an opening for
+no wall but the one that took it: `beyond` finds the next piece and the wall is asked again until there is nothing
+beyond it. And **`glazed`**, which says whether an opening has glass in it, **read every line of the drawing for
+every opening**; the lines are in the squares too (`Marks`), and a wall is handed those drawn within the widest of
+its openings of its axis. The guess written here before was wrong, which is the reason for measuring: the one named
+as the bottleneck, `glazed_openings`, costs 7 ms.
+
+The squares change nothing that is read: the same 21 walls, 7 doors, 6 windows and three rooms on the survey, and
+the same 4,800 walls and 4,660 openings on the plan of 1,200 rooms. Each question keeps the reach it had, and the
+squares only spare it the asking of what lies farther off than that. Two things to know about them. They are cut
+from the drawing's own size, so on a drawing a few centimetres across one of them is a fraction of a millimetre, and
+nothing outside the drawing is ever asked for. And a line in too much of the drawing to be put in a square — the
+boundary of a plot, a grid line drawn right across the plan, a long diagonal — is in none of them and seen by
+everything, because a drawing holds few of those and cutting each into the hundred squares it crosses would cost
+more than keeping it whole.
+
+What is left on that plan is `open_up`'s 150 ms, which is `glazed` asking the squares once for every opening it
+finds, over walls that are by then as long as the plan.
 
 ## The rooms those walls shut in
 
