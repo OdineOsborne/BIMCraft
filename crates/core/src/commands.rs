@@ -105,8 +105,14 @@ pub static ALL: &[Command] = &[
          `scale` it was read with (millimetres to one of the file's units, from the file's own `$INSUNITS` unless \
          `scale` says), and `left_out`, what it does not read, the most of a kind first. It reads LINE, LWPOLYLINE, \
          POLYLINE, ARC and CIRCLE, each on the layer it names, TEXT and MTEXT as the words the drawing says, and \
-         opens a block where it is put, bringing in what it holds on the layer the block stands on; dimensions, \
-         hatches and splines are counted and named, never guessed at. A DWG is turned into DXF first, by the \
+         DIMENSION as what it measures; it opens a block where it is put, bringing in what it holds on the layer the \
+         block stands on; hatches, splines and the dimensions of an angle or a radius are counted and named, never \
+         guessed at. `measures` holds what the drawing's measurements say, held against what it draws: how many were \
+         `read` with a figure that is a number, what one of those figures' units is in millimetres (`unit`: 10 where \
+         a drawing prints centimetres, taken from what most of its figures agree on), how many `disagree` — say a \
+         length the drawing is not drawn to, which is the survey saying something its drawing does not — and the \
+         `worst` of those, the furthest off first, each with what it `says`, what is `drawn` (mm) and where to go \
+         and look. A DWG is turned into DXF first, by the \
          dependency `bimcraft-dwg` holds \
          (Autodesk publishes no specification for it), and `converted` is what that reader said it could not read",
         dxf_read,
@@ -2416,6 +2422,18 @@ fn dxf_read(s: &mut Session, p: &Value) -> R {
     let drawing = crate::dxf::read(&bytes, &crate::dxf::Options { scale }).map_err(|e| bad(c, format!("`{path}`: {e}")))?;
     let layers: Vec<Value> = drawing.layers.iter().map(|l| json!({"name": l.name, "shapes": l.shapes.len()})).collect();
     let extent = drawing.extent.map(|[lo, hi]| json!([[hundredth(lo.0), hundredth(lo.1)], [hundredth(hi.0), hundredth(hi.1)]]));
+    // What the drawing measures, held against what it draws. The ones that disagree are named the furthest off
+    // first, a handful of them: a survey that disagrees with itself in a hundred places is read by going and looking.
+    const NAMED_MEASURES: usize = 10;
+    let measures = crate::dxf::measured(&drawing).map(|m| {
+        let worst: Vec<Value> = m
+            .disagree
+            .iter()
+            .take(NAMED_MEASURES)
+            .map(|d| json!({"says": d.says, "drawn": hundredth(d.drawn), "at": [hundredth(d.at.0), hundredth(d.at.1)]}))
+            .collect();
+        json!({"read": m.read, "unit": hundredth(m.unit), "disagree": m.disagree.len(), "worst": worst})
+    });
     Ok(json!({
         "scale": drawing.scale,
         "shapes": drawing.shapes(),
@@ -2423,6 +2441,7 @@ fn dxf_read(s: &mut Session, p: &Value) -> R {
         "extent": extent,
         "left_out": drawing.left_out,
         "converted": converted,
+        "measures": measures,
     }))
 }
 

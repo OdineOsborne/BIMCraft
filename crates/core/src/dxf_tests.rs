@@ -447,3 +447,49 @@ fn a_dimension_is_drawn_under_the_plan_and_is_no_line_of_the_building() {
     let above = drawn.iter().flat_map(|(_, points)| points).filter(|p| p.1 < -500.0).count();
     assert!(above > 0, "the figure stands beyond the line it is written along: {drawn:?}");
 }
+
+#[test]
+fn what_a_drawing_measures_is_held_against_what_it_draws() {
+    // Three measurements over a drawing in millimetres, printed in centimetres, as a survey prints them. Two are the
+    // figure a CAD worked out; the third is a surveyor own word over it, 100 mm short of the line it stands on.
+    let blocks = format!("{}{}{}", picture("*D1", "350", 200.0), picture("*D2", "280", 200.0), picture("*D3", "880", 200.0));
+    let ents = format!(
+        "{}{}{}1\n870\n",
+        dimension("QUOTE", "*D1", (0.0, 0.0), (3500.0, 0.0), (0.0, -500.0), 0.0),
+        dimension("QUOTE", "*D2", (0.0, 0.0), (2795.0, 0.0), (0.0, -900.0), 0.0),
+        dimension("QUOTE", "*D3", (0.0, 0.0), (8800.0, 0.0), (0.0, -1300.0), 0.0),
+    );
+    let d = read_ok(&with_blocks(&blocks, &ents));
+    let held = crate::dxf::measured(&d).expect("it measures something");
+    assert_eq!(held.read, 3);
+    assert!((held.unit - 10.0).abs() < 1e-9, "its figures are in centimetres: {} mm to one", held.unit);
+    // 280 over 2795 is the rounding a drawing prints with and no disagreement; 870 over 8800 is one.
+    assert_eq!(held.disagree.len(), 1, "{:?}", held.disagree);
+    assert_eq!(held.disagree[0].says, "870");
+    assert!((held.disagree[0].drawn - 8800.0).abs() < 1e-9, "{:?}", held.disagree[0]);
+    assert!(held.disagree[0].at.dist(P2(4400.0, -1300.0)) < 1e-9, "where to go and look: {:?}", held.disagree[0]);
+}
+
+#[test]
+fn a_drawing_whose_figures_are_no_numbers_is_held_against_nothing() {
+    // A survey writes `var.` where a wall is not square, and a figure that is no number says no length: it is read
+    // and drawn like any other, and nothing is worked out from it.
+    let d =
+        read_ok(&with_blocks(&picture("*D1", "var.", 200.0), &dimension("QUOTE", "*D1", (0.0, 0.0), (3500.0, 0.0), (0.0, -500.0), 0.0)));
+    assert_eq!(d.shapes(), 1);
+    assert!(crate::dxf::measured(&d).is_none(), "nothing to hold it against");
+}
+
+#[test]
+fn a_figure_written_with_a_comma_for_its_decimal_point_is_a_number() {
+    // A drawing made in Italy prints 2,80 where one made elsewhere prints 2.80, and both say the same length.
+    let blocks = format!("{}{}", picture("*D1", "3,50", 200.0), picture("*D2", "2,80", 200.0));
+    let ents = format!(
+        "{}{}",
+        dimension("QUOTE", "*D1", (0.0, 0.0), (3500.0, 0.0), (0.0, -500.0), 0.0),
+        dimension("QUOTE", "*D2", (0.0, 0.0), (2800.0, 0.0), (0.0, -900.0), 0.0),
+    );
+    let held = crate::dxf::measured(&read_ok(&with_blocks(&blocks, &ents))).expect("it measures something");
+    assert_eq!((held.read, held.disagree.len()), (2, 0), "{:?}", held.disagree);
+    assert!((held.unit - 1000.0).abs() < 1e-6, "its figures are in metres: {} mm to one", held.unit);
+}

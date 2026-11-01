@@ -27,7 +27,7 @@ could not read.
 **What it reads.** `LINE`, `LWPOLYLINE`, `POLYLINE` with the `VERTEX` entities that follow it to its `SEQEND`, `ARC` and
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).
 `TEXT` and `MTEXT` come in as the words the drawing says (below). Everything else is counted by its own name and listed
-in `left_out`, the most of a kind first: `12 DIMENSION`, `4 SPLINE`; hatches, dimensions and splines are listed so. A polyline's bulge is read as the straight line between its points and
+in `left_out`, the most of a kind first: `415 HATCH`, `4 SPLINE`; hatches and splines are listed so. A polyline's bulge is read as the straight line between its points and
 said to be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a
 drawing is worse than none of it.
 
@@ -77,6 +77,27 @@ CAD drew the dimension as prints — that picture is a block of its own, holding
 an `MTEXT`, and the figure is taken out of it. Where a survey writes its own word over the figure, the geometry is
 still there beside it to be held against what it says: 167 of those 566 have one, and one of them says `870` over a
 line drawn 8800 long.
+
+**What a drawing measures, held against what it draws.** This is what reading the dimensions is for. `dxf::measured`
+takes every measurement whose figure is a number and holds it against the length under it, and the `dxf` command
+reports what it finds, so that a survey is read before it is traced. The unit is the difficulty: a drawing prints in
+units of its own and says so nowhere in the dimension. But what nearly every figure is, is the length under it
+printed in those units, so the unit is taken as the one the most figures agree on — of the units the drawing's own
+figures make, each held in turn against all the others, the one that comes out right for the most of them. The middle
+one of them would do on most drawings and not on all: on a 14-dimension corner of that survey, where half the figures
+are written over by hand, the middle one made a figure of `405` over a length of 405.43 disagree, which is the
+rounding a drawing prints with and no disagreement at all.
+
+A figure disagrees where it is further from the length under it than half of its own last digit — the rounding it is
+printed to. On the whole of that survey, 427 of its 567 measurements are the length under them to the digit, and 140
+are not; every one of the 140 is a figure a surveyor wrote over the one the CAD worked out, and the furthest off says
+`870` over a wall drawn 8800. That is the survey saying something its drawing does not, and a wall traced from that
+drawing comes out 100 mm too long. It is also a check on this reading: of the 427 figures no one touched, not one
+disagrees, which the projection, the unit and the stripping of an `MTEXT`'s formatting all have to be right for.
+
+A figure that is no number is read and drawn like any other and nothing is worked out from it: a survey writes `var.`
+where a wall is not square. A figure written `2,80` is the number `2.80`, because a drawing made in Italy prints its
+decimal point as a comma.
 
 A dimension is drawn in our own style, as a survey's words are drawn in our own lettering — the two lines out to where
 the measurement is written, the line it is written along, a tick at each end and the figure, which stands a quarter of
@@ -413,5 +434,6 @@ drawn under a dim box that stands in the middle of them and cannot be moved are 
 its title, rolls up to that title to get out of their way, and takes no keys — the plan pans, zooms and fits (`ZF`)
 while it is open, and the only typing it takes is into numbers.
 
-**What is still missing**: a survey's dimensions and hatches are counted and not read, so a drawing that says a wall's
-thickness in a dimension rather than by drawing its two faces says it to nobody here.
+**What is still missing**: a survey's hatches are counted and not read, so what a drawing says a wall is made of by
+hatching it says to nobody here. What a dimension measures is read but not yet used: the walls a trace builds are
+built from the geometry alone, and a measurement that disagrees with the geometry is reported and nothing more.

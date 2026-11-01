@@ -36,6 +36,8 @@ pub const MAX_NESTING: usize = 8;
 pub const MAX_WORD: usize = 256;
 /// How many kinds of thing left out are named, the most of each first.
 const NAMED: usize = 12;
+/// How many of a drawing's figures are tried as the unit the rest are held against ([`measured`]).
+const TRIED: usize = 64;
 
 /// How a file's numbers become millimetres.
 #[derive(Clone, Copy, Debug, Default)]
@@ -91,6 +93,109 @@ impl Drawing {
     pub fn shapes(&self) -> usize {
         self.layers.iter().map(|l| l.shapes.len()).sum()
     }
+}
+
+/// What a drawing's measurements say, held against what it draws: see [`measured`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Measured {
+    /// How many measurements were read whose figure is a number.
+    pub read: usize,
+    /// What one of those figures' units is, in millimetres: 10 where a drawing prints centimetres.
+    pub unit: f64,
+    /// The measurements whose figure the drawing is not drawn to, the furthest off first.
+    pub disagree: Vec<Disagreed>,
+}
+
+/// A measurement that says a length the drawing is not drawn to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Disagreed {
+    /// What it writes.
+    pub says: String,
+    /// How far apart the two points it was taken between are, mm.
+    pub drawn: f64,
+    /// The middle of the line it is written along: where to go and look.
+    pub at: P2,
+}
+
+/// Every measurement a drawing writes, held against the geometry it is written over.
+///
+/// A drawing prints a length in units and to a precision of its own and says neither in the dimension. But what
+/// nearly every figure on a drawing is, is the length it stands over printed in those units, so the unit is what most
+/// of its figures agree on: of the units its own figures make, held one at a time against all the others, the one the
+/// most of them come out right under. The middle one of them would do on most drawings and not on all, because the
+/// figures that are not the length under them are the whole of what this is for, and a survey written over in half
+/// its places has no middle worth taking.
+///
+/// Held against that unit, a figure disagrees where it is further from the length under it than the rounding it is
+/// printed to explains — half of its own last digit. That is the survey saying something its drawing does not: a
+/// surveyor who measured 8.70 and drew 8.80 writes `870` over the figure, and a wall traced from that drawing comes
+/// out 100 mm too long. None where the drawing writes no figure that is a number.
+pub fn measured(d: &Drawing) -> Option<Measured> {
+    let read: Vec<(f64, &str, f64, P2)> = d
+        .layers
+        .iter()
+        .flat_map(|l| &l.shapes)
+        .filter_map(|shape| {
+            let Shape::Measure { line, text, .. } = shape else { return None };
+            let (says, drawn) = (figure(text)?, line[0].dist(line[1]));
+            let at = P2((line[0].0 + line[1].0) / 2.0, (line[0].1 + line[1].1) / 2.0);
+            (drawn > 0.0).then_some((says, text.as_str(), drawn, at))
+        })
+        .collect();
+    let mut units: Vec<f64> = read.iter().map(|(says, _, drawn, _)| says / drawn).collect();
+    units.sort_by(f64::total_cmp);
+    // The unit the most figures agree on, each held against it to the rounding it is printed to, and the closest
+    // agreement where two units are agreed on by as many. Tried from across the whole spread of them and not at the
+    // middle of it, because a drawing a surveyor has written over in half its places has no middle worth taking.
+    let tries = units.len().clamp(1, TRIED);
+    let agreement = |per_mm: f64| {
+        read.iter()
+            .filter(|(says, text, drawn, _)| (says - drawn * per_mm).abs() <= rounding(text))
+            .fold((0usize, 0.0f64), |(n, off), (says, _, drawn, _)| (n + 1, off + (says - drawn * per_mm).abs()))
+    };
+    let per_mm = (0..tries)
+        .filter_map(|i| units.get(i * units.len() / tries).copied())
+        .filter(|per_mm| per_mm.is_finite() && *per_mm > 0.0)
+        .max_by(|a, b| {
+            let (an, aoff) = agreement(*a);
+            let (bn, boff) = agreement(*b);
+            an.cmp(&bn).then(boff.total_cmp(&aoff))
+        })?;
+    let off = |says: f64, drawn: f64| says - drawn * per_mm;
+    let mut disagree: Vec<Disagreed> = read
+        .iter()
+        .filter(|(says, text, drawn, _)| off(*says, *drawn).abs() > rounding(text))
+        .map(|(_, text, drawn, at)| Disagreed { says: (*text).to_string(), drawn: *drawn, at: *at })
+        .collect();
+    disagree.sort_by(|a, b| {
+        let far = |x: &Disagreed| figure(&x.says).map_or(0.0, |says| off(says, x.drawn).abs());
+        far(b).total_cmp(&far(a))
+    });
+    Some(Measured { read: read.len(), unit: 1.0 / per_mm, disagree })
+}
+
+/// The number a figure is, where it is one and nothing else. A drawing made in Italy prints `2,80` where one made
+/// elsewhere prints `2.80`, and both say the same length; a figure with a word in it (`var.`, `8.70 m`, `~350`) is
+/// what the drawing says and no number, and nothing is worked out from it.
+fn figure(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let ok = match text.strip_prefix('-').unwrap_or(text).split(['.', ',']).collect::<Vec<&str>>().as_slice() {
+        [whole] => digits(whole),
+        [whole, part] => digits(whole) && digits(part),
+        _ => false,
+    };
+    ok.then(|| text.replace(',', ".").parse().ok())?
+}
+
+/// How far a figure may stand from the length under it and still be that length: half of its own last digit, which is
+/// the rounding a drawing prints with, and a hair for the arithmetic.
+fn rounding(text: &str) -> f64 {
+    let places = match text.trim().rsplit_once(['.', ',']) {
+        Some((_, part)) => part.chars().count() as i32,
+        None => 0,
+    };
+    0.5 * 10f64.powi(-places) * (1.0 + 1e-9)
 }
 
 /// `$INSUNITS` as millimetres to one unit: the values of the specification this knows. A file that says nothing, or
@@ -401,7 +506,7 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
             }
             // What the drawing measures. The figure it prints is read out of the picture a CAD drew it as, which is a
             // block of its own, so this is here and not in `finish`, where the blocks are not to hand.
-            "DIMENSION" => measured(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)),
+            "DIMENSION" => measurement(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)),
             "SEQEND" => open.take().and_then(|mut o| {
                 bulges += o.bulges;
                 let layer = o.layer.clone();
@@ -652,7 +757,7 @@ fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
 /// figure the picture a CAD drew it as prints. The figure is read where it was written and never worked out again from
 /// what was measured: a drawing prints in units and to a precision of its own — this one prints centimetres — and
 /// keeps them in its dimension style, not in the dimension.
-fn measured(e: &Entity, scale: f64, blocks: &std::collections::HashMap<String, Vec<Drawn>>) -> Option<Shape> {
+fn measurement(e: &Entity, scale: f64, blocks: &std::collections::HashMap<String, Vec<Drawn>>) -> Option<Shape> {
     let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
     let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
     let (from, to) = (mm(e.between.0?), mm(e.between.1?));
