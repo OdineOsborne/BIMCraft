@@ -2712,6 +2712,11 @@ const WORDS: &[[&str; 3]] = &[
         "A linha mais longa nele tem {} mm. Um desenho em metros que diz milímetros se lê assim: vincule-o de novo com uma escala de 1000.",
         "La línea más larga en él tiene {} mm. Un dibujo en metros que dice milímetros se lee así: vínculelo de nuevo con una escala de 1000.",
     ],
+    [
+        "Nothing in it is as thick as a wall, and the measurements written on it say it is drawn at a scale of {}: link it again with that.",
+        "Nada nele é tão espesso quanto uma parede, e as medidas escritas nele dizem que está desenhado numa escala de {}: vincule-o de novo com essa.",
+        "Nada en él es tan grueso como un muro, y las medidas escritas en él dicen que está dibujado a una escala de {}: vínculelo de nuevo con esa.",
+    ],
     ["{} (a type made for it)", "{} (um tipo feito para ela)", "{} (un tipo hecho para él)"],
     ["{}: {} walls", "{}: {} paredes", "{}: {} muros"],
     [

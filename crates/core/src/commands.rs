@@ -110,7 +110,11 @@ pub static ALL: &[Command] = &[
          block stands on; splines and the dimensions of an angle or a radius are counted and named, never \
          guessed at. `measures` holds what the drawing's measurements say, held against what it draws: how many were \
          `read` with a figure that is a number, what one of those figures' units is in millimetres (`unit`: 10 where \
-         a drawing prints centimetres, taken from what most of its figures agree on), how many `disagree` — say a \
+         a drawing prints centimetres, taken from what most of its figures agree on), `scale_says`, the scale to \
+         read the file at that its own measurements say — a length is written in millimetres, centimetres or \
+         metres, so a drawing whose figures come out in none of the three was read at the wrong scale, and a \
+         survey drawn in metres and saved as millimetres comes in a hand's width across and traces nothing; empty \
+         where the units it was read with hold up, which is nearly always — how many `disagree` — say a \
          length the drawing is not drawn to, which is the survey saying something its drawing does not — and the \
          `worst` of those, the furthest off first, each with what it `says`, what is `drawn` (mm) and where to go \
          and look. A DWG is turned into DXF first, by the \
@@ -151,7 +155,9 @@ pub static ALL: &[Command] = &[
          phase it is built in and the one it is taken down in, as an element holds them; without it, the layers' own \
          names are read for it (`Stato di fatto`, `Demolizioni`, `Progetto`, and the colours an Italian drawing uses), \
          and what was read comes back in `phases` for changing. A layer none of it names stands in every phase. \
-         Returns `id`, `name`, `shapes`, `layers`, `left_out`, `scale`, `phases`",
+         Returns `id`, `name`, `shapes`, `layers`, `left_out`, `scale`, `scale_says` — the scale to link it at that \
+         the drawing's own measurements say, where the units it was read with cannot be right, and empty where they \
+         can (`dxf` tells the whole of it) — and `phases`",
         underlay_cad,
     ),
     edit(
@@ -210,7 +216,9 @@ pub static ALL: &[Command] = &[
          walls, made}, …], `doors`, `windows`, `opening_ids`, `openings` [{kind, width, type, openings, made}, \
          …], `phases` [{phase, walls}, …], `faces` how many lines were long enough to be a wall\'s \
          face, and `longest`, the longest line in the drawing: a survey whose longest line is 13 mm is a survey drawn \
-         in metres, and `scale` on Link CAD is what says so",
+         in metres, and `scale` on Link CAD is what says so. Where the drawing measures on itself and the scale it \
+         was linked with cannot be what its figures are printed in, `scale_says` is the scale to link it with \
+         instead, which is the same thing said by the drawing rather than guessed at",
         trace_walls,
     ),
     edit(
@@ -1902,6 +1910,9 @@ fn underlay_cad(s: &mut Session, p: &Value) -> R {
         drawing.left_out.clone(),
         drawing.scale,
     );
+    // What the drawing's own measurements say it is drawn at, where the units it was read with cannot be right: a
+    // survey drawn in metres and saved as millimetres comes in a hand's width across and traces nothing.
+    let scale_says = crate::dxf::measured(&drawing).map(|m| m.scale_says).unwrap_or_default();
     let m = s.model_mut();
     let mut u =
         crate::model::Underlay { name: name.clone(), path: path.clone(), level, at, angle, scale: read_with, hidden, phases: Vec::new() };
@@ -1911,7 +1922,8 @@ fn underlay_cad(s: &mut Session, p: &Value) -> R {
     u.phases = phases.unwrap_or_else(|| crate::underlay::read_phases(m, &u));
     let said = json!(u.phases);
     let id = m.insert(Element::Underlay(u));
-    Ok(json!({"id": id, "name": name, "shapes": shapes, "layers": layers, "left_out": left_out, "scale": read_with, "phases": said}))
+    Ok(json!({"id": id, "name": name, "shapes": shapes, "layers": layers, "left_out": left_out, "scale": read_with,
+              "scale_says": scale_says, "phases": said}))
 }
 
 /// What every underlay of the project reads, again; the ones that couldn't be read, as `{name, error}`.
@@ -2151,6 +2163,9 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         return Err(bad(c, format!("`type` is one of this project's wall types, not `{name}`")));
     }
     let reading = crate::trace::read(&s.model, &u, &how).map_err(|e| bad(c, e))?;
+    // What the drawing's own measurements say it is drawn at, where the scale it was linked with cannot be right: a
+    // survey in metres linked as millimetres has nothing in it as thick as a wall, and this is what to link it with.
+    let scale_says = s.model.drawings.get(&u.path).and_then(|d| crate::dxf::measured(d)).map(|m| m.scale_says).unwrap_or_default();
     // The type each thickness comes in as, and what was found of it.
     let mut types: BTreeMap<i64, (String, bool, usize, f64)> = BTreeMap::new();
     for w in &reading.walls {
@@ -2229,6 +2244,9 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     });
     if !disagreed.is_empty() {
         out["disagreed"] = json!(disagreed);
+    }
+    if !scale_says.is_empty() {
+        out["scale_says"] = json!(scale_says);
     }
     if flag(c, p, "preview")? {
         out["found"] = json!(
@@ -2433,7 +2451,7 @@ fn dxf_read(s: &mut Session, p: &Value) -> R {
             .take(NAMED_MEASURES)
             .map(|d| json!({"says": d.says, "drawn": hundredth(d.drawn), "at": [hundredth(d.at.0), hundredth(d.at.1)]}))
             .collect();
-        json!({"read": m.read, "unit": hundredth(m.unit), "disagree": m.disagree.len(), "worst": worst})
+        json!({"read": m.read, "unit": hundredth(m.unit), "scale_says": m.scale_says, "disagree": m.disagree.len(), "worst": worst})
     });
     Ok(json!({
         "scale": drawing.scale,

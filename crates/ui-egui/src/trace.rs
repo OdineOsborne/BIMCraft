@@ -264,13 +264,22 @@ fn found_shown(ui: &mut Ui, report: &Value, alone: bool) {
         RichText::new(tf("{} walls, {} m, of {} lines long enough to be a wall's face.", &[&number("walls"), &metres, &number("faces")]))
             .strong(),
     );
-    // A drawing in metres that says millimetres has nothing in it as thick as a wall: its longest line says so.
+    // A drawing in metres that says millimetres has nothing in it as thick as a wall. Where it measures on itself,
+    // its own figures say what scale to link it with; where it does not, the longest line in it is the sign of it.
     if report["walls"].as_u64() == Some(0) {
-        let longest = format!("{:.2}", report["longest"].as_f64().unwrap_or(0.0));
-        let said = tf(
-            "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
-            &[&longest],
-        );
+        let said = match report["scale_says"].as_array().and_then(|said| said.first()).and_then(|scale| scale.as_f64()) {
+            Some(scale) => tf(
+                "Nothing in it is as thick as a wall, and the measurements written on it say it is drawn at a scale of {}: link it again with that.",
+                &[&format!("{scale:.0}")],
+            ),
+            None => {
+                let longest = format!("{:.2}", report["longest"].as_f64().unwrap_or(0.0));
+                tf(
+                    "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
+                    &[&longest],
+                )
+            }
+        };
         ui.label(RichText::new(said).color(pal().muted));
     }
     let (doors, windows) = (number("doors"), number("windows"));

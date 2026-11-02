@@ -113,6 +113,20 @@ something else of another entity, and both were read as that other thing before 
 3 is the style it is drawn in, where an `MTEXT`'s is a chunk of what it says, and code 42 is what it measures, where a
 polyline's is an arc read straight. A drawing of 601 dimensions reported 601 arcs it had read straight.
 
+**A drawing whose units are not the ones its file says.** That same unit is what catches it. The survey here says
+`$INSUNITS` 4, millimetres, and is drawn in metres: linked as it says, a window cut out of it — a ground floor
+plan, the elevations and the sections — comes in 124 mm across, its longest line is 96 mm, and Trace Walls finds
+not one face. Read at a thousand, the same window gives
+1316 faces, 212 walls, 44 doors and 10 windows. The figures are what say so — read as the file says, they come out
+0.01 mm to one, and nobody writes a length in hundredths of a millimetre. A length is written in millimetres,
+centimetres or metres, the one a drawing is drawn in and the one it prints both; so for each of the three the
+drawing could be printing, the scale that would make it so is worked out and kept where that scale is itself one of
+the three (`dxf::scale_says`). Here one survives, a thousand, and that is what the drawing is drawn at. The `dxf`
+command reports them in `measures.scale_says` and Link CAD returns them beside the scale it read with, because that
+is where the trap is sprung. Nothing is said of a drawing whose figures already come out in one of the three, which
+is nearly every drawing, and nothing is corrected behind the caller's back: the scale a drawing is read at stays
+theirs.
+
 **What a drawing fills an area with.** A survey hatches to say what something is: this wall is brick, this is the
 ground, this is the roof. A `HATCH` comes in as `Shape::Fill` — the name its pattern goes by, whether it is filled
 solid, the areas it fills, and the families of parallel lines that pattern is drawn with.
@@ -454,6 +468,11 @@ rooms does not drop what was found, because the rooms are of the walls and not o
 so it places nothing either. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
+
+A Find that comes back with no wall at all is nearly always a drawing linked at the wrong scale, and the window says
+so. Where the drawing measures on itself, it says what the drawing says: `trace_walls` passes `scale_says` on and the
+window reads *the measurements written on it say it is drawn at a scale of 1000*. Where it does not, the longest line
+in it is all there is to go on, and that is what the window shows instead.
 
 It is the one window here that is not a modal, and for a reason: what it shows is on the plan behind it, and walls
 drawn under a dim box that stands in the middle of them and cannot be moved are no use. So it floats, is dragged by

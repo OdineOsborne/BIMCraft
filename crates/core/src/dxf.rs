@@ -132,6 +132,9 @@ pub struct Measured {
     pub read: usize,
     /// What one of those figures' units is, in millimetres: 10 where a drawing prints centimetres.
     pub unit: f64,
+    /// The scale the drawing's own measurements say it is drawn at, millimetres to one of the file's units, where
+    /// the units it was read with cannot be right. Empty where they can, which is nearly always.
+    pub scale_says: Vec<f64>,
     /// The measurements whose figure the drawing is not drawn to, the furthest off first.
     pub disagree: Vec<Disagreed>,
 }
@@ -160,6 +163,13 @@ pub struct Disagreed {
 /// printed to explains — half of its own last digit. That is the survey saying something its drawing does not: a
 /// surveyor who measured 8.70 and drew 8.80 writes `870` over the figure, and a wall traced from that drawing comes
 /// out 100 mm too long. None where the drawing writes no figure that is a number.
+///
+/// That unit is also what catches a file whose units are not what it says they are, which a survey drawn in metres
+/// and saved as millimetres is: read as it says, the building comes out a hand's width across and nothing traces.
+/// A length is written in millimetres, centimetres or metres, both the one a drawing is drawn in and the one it
+/// prints; so a drawing whose figures come out in none of them was read at the wrong scale, and the scales at which
+/// both come out a unit somebody writes in are what its own measurements say it is drawn at ([`Measured::scale_says`]).
+/// Nothing is said of a drawing whose figures already come out in one of the three, which is nearly every drawing.
 pub fn measured(d: &Drawing) -> Option<Measured> {
     let read: Vec<(f64, &str, f64, P2)> = d
         .layers
@@ -201,7 +211,31 @@ pub fn measured(d: &Drawing) -> Option<Measured> {
         let far = |x: &Disagreed| figure(&x.says).map_or(0.0, |says| off(says, x.drawn).abs());
         far(b).total_cmp(&far(a))
     });
-    Some(Measured { read: read.len(), unit: 1.0 / per_mm, disagree })
+    Some(Measured { read: read.len(), unit: 1.0 / per_mm, scale_says: scale_says(d.scale, 1.0 / per_mm), disagree })
+}
+
+/// The units a length is written in, millimetres to one: millimetres, centimetres and metres. What a drawing is
+/// drawn in is one of them and what it prints is one of them, and a decimetre is neither.
+const WRITTEN_IN: [f64; 3] = [1.0, 10.0, 1000.0];
+
+/// How near a unit a measured one must come to be it: a figure printed to the nearest centimetre over a wall a
+/// metre long is a fortieth out on its own, and the three units are ten times apart, so nothing is ever two.
+const NEARLY: f64 = 0.05;
+
+/// The scales a drawing's figures allow, where the one it was read at is not among them: for each unit it could be
+/// printing in, the scale that would make it so, kept where that scale is itself a unit a drawing is drawn in.
+fn scale_says(read_at: f64, unit: f64) -> Vec<f64> {
+    let nearly = |a: f64, b: f64| (a - b).abs() <= b * NEARLY;
+    if !unit.is_finite() || unit <= 0.0 || WRITTEN_IN.iter().any(|written| nearly(unit, *written)) {
+        return Vec::new();
+    }
+    WRITTEN_IN
+        .iter()
+        .filter_map(|prints| {
+            let scale = read_at * prints / unit;
+            WRITTEN_IN.iter().copied().find(|drawn_in| nearly(scale, *drawn_in))
+        })
+        .collect()
 }
 
 /// The number a figure is, where it is one and nothing else. A drawing made in Italy prints `2,80` where one made

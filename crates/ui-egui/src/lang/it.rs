@@ -1945,6 +1945,10 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
         "La linea più lunga è {} mm. Un disegno in metri che dichiara millimetri si legge così: collegalo di nuovo con una scala di 1000.",
     ],
+    [
+        "Nothing in it is as thick as a wall, and the measurements written on it say it is drawn at a scale of {}: link it again with that.",
+        "Niente in esso è spesso quanto un muro, e le quote scritte sopra dicono che è disegnato con una scala di {}: collegalo di nuovo con quella.",
+    ],
     ["{} (a type made for it)", "{} (un tipo creato per lui)"],
     ["{}: {} walls", "{}: {} muri"],
     [

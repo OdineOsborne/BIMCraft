@@ -1657,6 +1657,10 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "The longest line in it is {} mm. A drawing in metres that says millimetres reads like this: link it again with a scale of 1000.",
         "其中最长的线只有 {} 毫米。以米绘制却声明毫米的图纸就是这样：请用 1000 的比例重新链接。",
     ],
+    [
+        "Nothing in it is as thick as a wall, and the measurements written on it say it is drawn at a scale of {}: link it again with that.",
+        "其中没有任何东西厚得像一道墙，而图上标注的尺寸表明它是以 {} 的比例绘制的：请用该比例重新链接。",
+    ],
     ["{} (a type made for it)", "{}（为此新建的类型）"],
     ["{}: {} walls", "{}：{} 道墙"],
     [

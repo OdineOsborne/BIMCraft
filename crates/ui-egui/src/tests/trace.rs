@@ -7,6 +7,11 @@ use egui_kittest::kittest::{By, NodeT};
 
 /// A DXF of the lines given, each on the layer it names, in a folder of this call's own; its path.
 fn drawing(lines: &[(String, [f64; 4])]) -> String {
+    drawing_with(lines, "")
+}
+
+/// The same, with `extra` written into its ENTITIES after the lines: a dimension, say.
+fn drawing_with(lines: &[(String, [f64; 4])], extra: &str) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("bimcraft-ui-trace-{}-{n}", std::process::id()));
@@ -16,6 +21,7 @@ fn drawing(lines: &[(String, [f64; 4])]) -> String {
     for (layer, [x0, y0, x1, y1]) in lines {
         text.push_str(&format!("0\nLINE\n8\n{layer}\n10\n{x0}\n20\n{y0}\n11\n{x1}\n21\n{y1}\n"));
     }
+    text.push_str(extra);
     text.push_str("0\nENDSEC\n0\nEOF\n");
     std::fs::write(&path, text).unwrap();
     path.to_string_lossy().into_owned()
@@ -261,6 +267,25 @@ fn a_drawing_in_metres_that_says_millimetres_finds_nothing_and_is_told_what_to_d
     shortcut(&mut h, "TW");
     press(&mut h, "Find");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4));
+}
+
+#[test]
+fn a_drawing_that_measures_on_itself_says_what_scale_to_link_it_with() {
+    // The same room in metres, with the survey's own measurement written over its long side, printed in centimetres
+    // as a survey prints it. Read as millimetres its figures come out a hundredth of one, which is no unit anybody
+    // writes a length in, so the drawing itself says what it is drawn at and the window says it rather than the
+    // longest line in it.
+    let small: Vec<(String, [f64; 4])> =
+        one_room("MURI").into_iter().map(|(l, [a, b, c, d])| (l, [a / 1000.0, b / 1000.0, c / 1000.0, d / 1000.0])).collect();
+    let measure = "0\nDIMENSION\n8\nQUOTE\n70\n32\n10\n4\n20\n-1\n13\n0\n23\n0\n14\n8\n24\n0\n50\n0\n1\n800\n";
+    let mut h = app("");
+    h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&small, measure)})).expect("it comes in");
+    h.run();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(0));
+    assert!(says(&h, "drawn at a scale of 1000"), "its own measurements say what to link it with");
+    assert!(!says(&h, "The longest line in it is"), "and the sign a drawing with no measurement goes by is not shown");
 }
 
 #[test]

@@ -494,6 +494,36 @@ fn a_figure_written_with_a_comma_for_its_decimal_point_is_a_number() {
     assert!((held.unit - 1000.0).abs() < 1e-6, "its figures are in metres: {} mm to one", held.unit);
 }
 
+#[test]
+fn a_drawing_whose_units_cannot_be_what_it_says_is_told_so_by_its_own_measurements() {
+    // A survey drawn in metres whose file says millimetres, printing centimetres as the real ones do: a wall 8.8
+    // units long written `880`. Read as the file says, its figures come out in hundredths of a millimetre, which is
+    // no unit anybody writes, and the one scale at which both what it is drawn in and what it prints are units
+    // somebody writes in is a thousand to one: it is drawn in metres.
+    let blocks = format!("{}{}", picture("*D1", "880", 0.2), picture("*D2", "350", 0.2));
+    let ents = format!(
+        "{}{}",
+        dimension("QUOTE", "*D1", (0.0, 0.0), (8.8, 0.0), (0.0, -0.5), 0.0),
+        dimension("QUOTE", "*D2", (0.0, 0.0), (3.5, 0.0), (0.0, -0.9), 0.0),
+    );
+    let held = crate::dxf::measured(&read_ok(&with_blocks(&blocks, &ents))).expect("it measures something");
+    assert_eq!(held.scale_says, vec![1000.0], "its figures come out {} mm to one", held.unit);
+}
+
+#[test]
+fn a_drawing_whose_units_hold_up_is_told_nothing_about_its_scale() {
+    // The same survey read for what it is: its figures are centimetres, a unit a drawing prints in, and there is
+    // nothing to say about the scale it was read with.
+    let blocks = format!("{}{}", picture("*D1", "880", 200.0), picture("*D2", "350", 200.0));
+    let ents = format!(
+        "{}{}",
+        dimension("QUOTE", "*D1", (0.0, 0.0), (8800.0, 0.0), (0.0, -500.0), 0.0),
+        dimension("QUOTE", "*D2", (0.0, 0.0), (3500.0, 0.0), (0.0, -900.0), 0.0),
+    );
+    let held = crate::dxf::measured(&read_ok(&with_blocks(&blocks, &ents))).expect("it measures something");
+    assert!(held.scale_says.is_empty(), "nothing to say: {:?}", held.scale_says);
+}
+
 /// A `HATCH` on `layer`, filled with the pattern `name`, over `ring` as a closed polyline boundary, with the lines
 /// its pattern is drawn with after it.
 fn hatch(layer: &str, name: &str, solid: bool, ring: &[(f64, f64)], rulings: &[(f64, f64)]) -> String {
