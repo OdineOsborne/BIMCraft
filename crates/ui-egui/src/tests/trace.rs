@@ -107,21 +107,55 @@ fn a_plan_cropped_to_one_sheet_traces_that_sheet_and_not_the_rest_of_the_file() 
     lines.extend(room("PROSPETTO", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
     let mut h = linked(&lines, None);
     shortcut(&mut h, "TW");
-    // With the plan uncropped there is nothing to look inside, so the window says what to do and reads the lot.
-    assert!(h.query_by_label("Only inside the plan's crop").is_some(), "the window offers it");
-    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.only_crop), Some(false));
+    // With the plan uncropped there is nothing to read inside, so it reads the lot.
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Whole));
     press(&mut h, "Find");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(8), "both sheets");
     press(&mut h, "Close window");
-    // Cropped to the plan, it traces what is inside the crop and nothing else.
+    // Cropped to the plan, it reads what is inside the crop and nothing else.
     let level = h.state().plan_level().expect("a plan");
     let region = json!({"view": level, "region": [[-1000.0, -1000.0], [9000.0, 7000.0]]});
     h.state_mut().session.execute("crop", &region).expect("it crops");
     h.run();
     shortcut(&mut h, "TW");
-    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.only_crop), Some(true), "a cropped plan is what to trace");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Crop), "a cropped plan is what to trace");
     press(&mut h, "Find");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the sheet in the crop and no other");
+}
+
+#[test]
+fn a_part_is_added_from_the_crop_with_the_survey_own_name_for_it_and_traced_by_name() {
+    // Two plans in one file, each captioned under it as a survey captions its sheets.
+    let mut lines = one_room("MURI");
+    lines.extend(room("MURI", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let caption = "0\nTEXT\n8\nTESTO\n10\n2000\n20\n-900\n40\n300\n1\nPIANTA PIANO TERRA\n";
+    let mut h = app("");
+    h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&lines, caption)})).expect("it comes in");
+    let level = h.state().plan_level().expect("a plan");
+    let region = json!({"view": level, "region": [[-2000.0, -2000.0], [9000.0, 7000.0]]});
+    h.state_mut().session.execute("crop", &region).expect("it crops");
+    h.run();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Parts");
+    assert!(says(&h, "It is made of no parts yet"), "a drawing is made of nothing until someone says so");
+    press(&mut h, "Add the plan's crop as a part");
+    // It is named by what the survey writes under it, and it is the plan of the level whose plan is on screen.
+    let parts = h.state().session.model.elements.values().find_map(|e| match e {
+        bimcraft_core::model::Element::Underlay(u) => Some(u.parts.clone()),
+        _ => None,
+    });
+    let parts = parts.expect("the drawing");
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert_eq!(parts[0].name, "PIANTA PIANO TERRA");
+    assert_eq!(parts[0].kind, bimcraft_core::model::PartKind::Plan);
+    assert_eq!(parts[0].level, Some(h.state().session.model.guid(level)));
+    // And the Walls tab offers it by name among what there is to read: the whole drawing, the crop, or a part.
+    press(&mut h, "Walls");
+    assert_eq!(combo_value(&h, "What to read"), "Inside the plan's crop", "a cropped plan is what to read");
+    choose(&mut h, "What to read", "PIANTA PIANO TERRA");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Part("PIANTA PIANO TERRA".into())));
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the part and no other");
 }
 
 #[test]

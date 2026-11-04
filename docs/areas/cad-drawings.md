@@ -437,6 +437,34 @@ drawn round them, by the clusters the shapes fall into — was not done: a sheet
 the frames are lines like any others, and a wrong guess would silently trace half a building. What the user does is
 crop the plan to the sheet, which they can see.
 
+## What the drawing is made of
+
+An area is enough to trace one sheet, but a survey is worked through sheet by sheet, and the second time you want the
+same rectangle back. So a drawing is told what its parts are (`Underlay::parts`, `cad_parts`): each is a `name`, a
+`kind` (`plan`, `elevation` or `section`), a `region`, the `level` it is the plan of, and the `phase` what it draws is
+in. They are the drawing's own and the project's file carries them, as it carries its layers' phases.
+
+Trace Walls then takes one by name: `trace_walls {"part": "PIANTA PIANO TERRA"}` is its area, its level and its phase
+in one word, so two plans in one file become two floors in two commands. A part the drawing hasn't is refused, and the
+refusal names the ones it has.
+
+The phase is on the part and not only on the layers because of what a real file does. The permesso di costruire this
+was measured against draws its existing state on its own sheets, not on its own layers: of 8,290 shapes, the layer
+`Stato di fatto` holds 89, while `progetto` and `rosso` hold 1,967 between them. Read by layer, nearly everything in
+it stands in every phase. Read by part, the sheet says it once. So where a part says a phase, every wall traced from
+it comes in that phase whatever its layers say, and the disagreement between two layers is not reported, because it
+has been overruled rather than left unsettled.
+
+**The name comes from the drawing.** A survey captions each of its sheets under it — `PIANTA PIANO TERRA`,
+`PROSPETTO SUD-EST`, `SEZIONE A-A` — in lettering taller than the room names inside the plan, so `underlay::caption`
+takes the words written inside a region, the largest, and the lowest where two are written as large. That is what a
+new part is called, and it is a proposal like any other here: it is written into a field the user can change.
+
+What is not done is finding the parts by itself. A sheet has no mark in a DXF that says it is a sheet; its frame is
+lines like any others, and the clusters the shapes fall into are not sheets either (a plan and the elevation beside it
+are one cluster as readily as two). A wrong guess would silently trace half a building, so the user draws the area —
+which they can see — and the drawing only names it.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -493,14 +521,20 @@ wall is in. **Read the Layer Names Again** puts back what the names say, for a c
 is not drawn is not traced either, which is how a surveyor's own layers — levels, GPS points, a north arrow — are kept
 out of the walls.
 
-**Walls** is what to look for (`How`, as above), whether to find the openings as well, whether to take the lines that
-stand alone too, whether to read only inside the plan's crop, whether to place the rooms too, the wall type every wall is to
-come in as or `By thickness`, and two buttons. **Only inside the plan's crop** is how a file of sheets is traced one
-sheet at a time: crop the plan around the sheet (Crop View, dragging the grips on its edges) and the crop's corners go
-to `trace_walls` as `region`. It is ticked already where the plan was cropped before the window was opened, because a
-plan cropped before tracing was cropped to what is to be traced, and it is greyed where the plan has no crop, with the
-hover saying what to do — and if the crop is taken off while the window stands open it unticks itself, so the button
-never reads the whole file when it says it is reading a part. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
+**Parts** is a row for each part the drawing is made of: its name, what it is, the level it is the plan of and the
+phase it draws, each put right where the reading was wrong, with **Add the plan's crop as a part** above them. That is
+the whole of marking up a sheet set: crop the plan around a sheet (Crop View, dragging the grips on its edges), press
+the button, and the part is there with the survey's own caption as its name and the plan's own level as its level.
+The button is greyed where the plan has no crop, with the hover saying what to do, and a change is its own `cad_parts`
+carrying the whole list, as the Layers tab's clicks are their own `cad_layers`.
+
+**Walls** is what to read, what to look for (`How`, as above), whether to find the openings as well, whether to take
+the lines that stand alone too, whether to place the rooms too, the wall type every wall is to
+come in as or `By thickness`, and two buttons. **What to read** is the whole drawing, what the plan's crop holds, or
+one of its parts by name: the crop is an area and nothing more, a part carries its level and its phase as well. It
+stands on the crop where the plan was cropped before the window was opened, because a plan cropped before tracing was
+cropped to what is to be traced; and a crop taken off, or a part done away with, while the window stands open puts it
+back to the whole drawing, so the button never reads the whole file when it says it is reading a part. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
 much it found of what thickness, type and phase, how many doors and windows, and how many lines it left out for
 meeting no wall of the building, and draws it all over the plan — each
 wall a band as thick as it measured with its axis down it, each opening a lighter stretch of that band, with a line

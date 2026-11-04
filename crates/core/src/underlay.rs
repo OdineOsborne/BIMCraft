@@ -73,6 +73,36 @@ pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
     out
 }
 
+/// What the drawing writes inside `region` that is the name of what is drawn there: of the words written in it, the
+/// one written largest, and the lowest where two are written as large. A survey captions each sheet under it, in
+/// lettering taller than the names of the rooms inside the plan, so that caption is what the part is called; a part
+/// the survey captions nothing has no name of its own to take.
+pub fn caption(m: &Model, u: &Underlay, region: [P2; 2]) -> Option<String> {
+    let drawing = m.drawings.get(&u.path)?;
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let [sw, ne] = region;
+    let mut best: Option<(f64, f64, String)> = None;
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Words { at, text, height, .. } = shape else { continue };
+            let said = text.trim();
+            let at = place(*at);
+            if said.is_empty() || at.0 < sw.0 || at.0 > ne.0 || at.1 < sw.1 || at.1 > ne.1 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((tall, y, _)) => *height > *tall + 1e-9 || ((*height - *tall).abs() <= 1e-9 && at.1 < *y),
+            };
+            if better {
+                best = Some((*height, at.1, said.to_string()));
+            }
+        }
+    }
+    best.map(|(_, _, said)| said)
+}
+
 /// The measurements the underlay writes, each with the layer it is written on, as the strokes they are drawn with, in
 /// this project's millimetres: the two lines that take the measurement out from the points it was taken between, the
 /// line it is written along, a tick at each end of that line, and the figure itself in our own lettering.

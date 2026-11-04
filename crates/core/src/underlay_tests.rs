@@ -49,6 +49,43 @@ fn a_drawing_comes_under_a_plan_and_the_project_builds_nothing_of_it() {
 }
 
 #[test]
+fn a_part_of_a_drawing_is_named_by_what_the_survey_writes_under_it() {
+    // A sheet set: two plans side by side, each captioned under it in lettering taller than the room names inside.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-caption-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tavole.dxf");
+    let words =
+        |layer: &str, x: f64, y: f64, height: f64, text: &str| format!("0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n40\n{height}\n1\n{text}\n");
+    let text = format!(
+        "0\nSECTION\n2\nENTITIES\n{}{}{}{}0\nENDSEC\n0\nEOF\n",
+        words("TESTO", 1000.0, -800.0, 300.0, "PIANTA PIANO TERRA"),
+        words("TESTO", 1500.0, 2000.0, 150.0, "SOGGIORNO"),
+        words("TESTO", 1200.0, 1000.0, 150.0, "CAMERA"),
+        words("TESTO", 21000.0, -800.0, 300.0, "PROSPETTO SUD"),
+    );
+    std::fs::write(&path, text).unwrap();
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path.to_string_lossy()})).expect("it comes in");
+    let u = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    let caption = |region| crate::underlay::caption(&s.model, &u, region);
+    assert_eq!(caption([P2(-2000.0, -2000.0), P2(10000.0, 5000.0)]).as_deref(), Some("PIANTA PIANO TERRA"));
+    assert_eq!(caption([P2(18000.0, -2000.0), P2(30000.0, 5000.0)]).as_deref(), Some("PROSPETTO SUD"));
+    // A part with nothing written in it is named by nothing, and the room names alone are not a caption.
+    assert_eq!(caption([P2(50000.0, 0.0), P2(60000.0, 1000.0)]), None);
+    assert_eq!(caption([P2(1100.0, 500.0), P2(5000.0, 3000.0)]).as_deref(), Some("CAMERA"), "the lowest of two as large");
+}
+
+#[test]
 fn the_project_keeps_the_path_and_never_the_drawing() {
     let path = drawing("rilievo.dxf");
     let mut s = Session::new();

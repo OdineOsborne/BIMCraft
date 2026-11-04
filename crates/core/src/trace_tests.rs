@@ -74,6 +74,86 @@ fn linked_with_blocks(lines: &[(String, [f64; 4])], blocks: &str, puts: &str) ->
     s
 }
 
+/// The project's levels, lowest first.
+fn levels(s: &Session) -> Vec<crate::model::Id> {
+    let mut found: Vec<crate::model::Id> = ids(s, "level");
+    found.sort();
+    found
+}
+
+#[test]
+fn what_each_part_of_a_drawing_is_is_told_to_it_and_kept() {
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    lines.extend(room("MURI", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let mut s = linked(&lines);
+    let out = run(&mut s, "cad_parts", json!({})).expect("it reads");
+    assert_eq!(out["parts"], json!([]), "a drawing is made of nothing until someone says so: {out}");
+    let (ground, phase) = (levels(&s)[0], s.model.phases.first().cloned().expect("a phase"));
+    let parts = json!([
+        {"name": "Ground floor", "kind": "plan", "region": [[-1000, -1000], [9000, 7000]], "level": ground, "phase": phase},
+        {"name": "South elevation", "kind": "elevation", "region": [[99_000, -1000], [109_000, 7000]]},
+    ]);
+    let out = run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    assert_eq!(out["parts"].as_array().map(Vec::len), Some(2), "{out}");
+    assert_eq!(out["parts"][0]["kind"], json!("plan"));
+    assert_eq!(out["parts"][1]["kind"], json!("elevation"));
+    assert_eq!(out["parts"][0]["phase"], json!(phase));
+    // They are the drawing's own, and the project carries them as it carries the layers' phases.
+    let held = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.parts.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    assert_eq!(held.len(), 2);
+    assert_eq!(held[0].name, "Ground floor");
+    // What is no part of a drawing is refused, rather than kept and traced as nothing.
+    let bad = [
+        json!([{"name": "A", "kind": "plan", "region": [[9000, 7000], [-1000, -1000]]}]),
+        json!([{"name": "A", "kind": "floor plan", "region": [[0, 0], [1000, 1000]]}]),
+        json!([{"name": "", "kind": "plan", "region": [[0, 0], [1000, 1000]]}]),
+        json!([{"name": "A", "kind": "plan", "region": [[0, 0], [1000, 1000]], "phase": "Someday"}]),
+        json!([{"name": "A", "kind": "plan", "region": [[0, 0]]}]),
+        json!([{"name": "A", "kind": "plan"}]),
+    ];
+    for parts in bad {
+        assert!(run(&mut s, "cad_parts", json!({"parts": parts})).is_err(), "{parts}");
+    }
+    // Refused, nothing of what was there is lost.
+    assert_eq!(run(&mut s, "cad_parts", json!({})).expect("it reads")["parts"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn a_plan_part_is_traced_into_its_own_level_in_its_own_phase_and_nowhere_else() {
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    lines.extend(room("MURI", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let mut s = linked(&lines);
+    let upper = levels(&s)[1];
+    let phase = s.model.phases.last().cloned().expect("a phase");
+    let parts = json!([
+        {"name": "Upstairs", "kind": "plan", "region": [[-1000, -1000], [9000, 7000]], "level": upper, "phase": phase},
+        {"name": "Next door", "kind": "plan", "region": [[99_000, -1000], [109_000, 7000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    let out = run(&mut s, "trace_walls", json!({"part": "Upstairs"})).expect("it traces");
+    assert_eq!(out["walls"], json!(4), "the part and no other: {out}");
+    let here = s.model.guid(upper);
+    assert!(walls(&s).iter().all(|w| w.level == here), "every wall is on the part's own level");
+    let created = |w: &crate::model::Wall| w.params.get("Phase Created").and_then(|v| v.as_str().map(str::to_string));
+    assert!(
+        walls(&s).iter().all(|w| created(w).as_deref() == Some(phase.as_str())),
+        "and in its phase: {:?}",
+        walls(&s).iter().map(|w| created(w)).collect::<Vec<_>>()
+    );
+    assert_eq!(out["phases"], json!([{"phase": phase, "walls": 4}]), "{out}");
+    // A part the drawing hasn't is refused, and names the ones it has.
+    let e = run(&mut s, "trace_walls", json!({"part": "Attic"})).expect_err("no such part");
+    assert!(e.contains("Upstairs") && e.contains("Next door"), "{e}");
+}
+
 #[test]
 fn a_drawing_of_many_sheets_is_traced_inside_the_area_asked_for_and_nowhere_else() {
     // A survey saved as a set of sheets in one file: the plan, and a hundred metres away the elevation, whose lines

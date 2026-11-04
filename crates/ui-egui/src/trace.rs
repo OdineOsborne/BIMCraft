@@ -12,7 +12,8 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{Element, Id, Model, Underlay};
+use bimcraft_core::ids::Guid;
+use bimcraft_core::model::{Element, Id, Model, Part, PartKind, Underlay};
 use bimcraft_core::render::View;
 use bimcraft_core::trace::How;
 use egui::{
@@ -25,6 +26,15 @@ use crate::BimApp;
 use crate::lang::{category, t, tf};
 use crate::properties::combo;
 use crate::style::pal;
+
+/// What of the drawing Trace Walls reads: the whole of it, what the plan's crop holds, or one of its parts, which
+/// carries its own level and phase as well as its area.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum What {
+    Whole,
+    Crop,
+    Part(String),
+}
 
 /// A wall found in the drawing and not yet built: where its axis runs and how thick, in the project's millimetres.
 pub(crate) struct Traced {
@@ -52,11 +62,13 @@ pub(crate) struct TraceDialog {
     pub(crate) how: How,
     /// Whether to place a room in every area the walls shut in, once they are built.
     pub(crate) rooms: bool,
-    /// Whether to look only inside the plan's crop region: a drawing that holds a whole set of sheets side by side
-    /// is traced one sheet at a time, and the crop is how the user says which one.
-    pub(crate) only_crop: bool,
+    /// What of the drawing to read: a drawing that holds a whole set of sheets side by side is traced one sheet at
+    /// a time.
+    pub(crate) what: What,
     /// The crop region of the plan on screen as it stands this frame, or none where it is not cropped.
     pub(crate) crop: Option<[P2; 2]>,
+    /// The level whose plan is on screen: what a part added here is the plan of, until it is said otherwise.
+    pub(crate) level: Option<Guid>,
     pub(crate) kind: Option<String>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
@@ -79,8 +91,14 @@ impl TraceDialog {
         if let Some(kind) = &self.kind {
             p["type"] = json!(kind);
         }
-        if let (true, Some([sw, ne])) = (self.only_crop, self.crop) {
-            p["region"] = json!([[sw.0, sw.1], [ne.0, ne.1]]);
+        match &self.what {
+            What::Whole => {}
+            What::Crop => {
+                if let Some([sw, ne]) = self.crop {
+                    p["region"] = json!([[sw.0, sw.1], [ne.0, ne.1]]);
+                }
+            }
+            What::Part(name) => p["part"] = json!(name),
         }
         match preview {
             // A Find builds nothing, so it places no rooms either: the rooms are of the walls, not of the drawing.
@@ -213,12 +231,148 @@ fn layers_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) 
     });
 }
 
+/// The Parts tab: what each part of the drawing is of the building. A change is its own `cad_parts`, carrying the
+/// whole list, as the Layers tab's clicks are their own `cad_layers`.
+fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
+    let Some(u) = underlay_of(m, d.underlay) else { return };
+    let said = t(
+        "What each part of the drawing is of the building. A survey is often saved as a whole set of sheets side by side in one file, and this says which rectangle of it is which, so that each is read as what it is.",
+    );
+    ui.label(RichText::new(said).color(pal().muted));
+    ui.add_space(6.0);
+    let mut parts = u.parts.clone();
+    let mut changed = false;
+    let cropped = d.crop.is_some();
+    let add = ui.add_enabled(cropped, Button::new(t("Add the plan's crop as a part")));
+    let clicked = add.clicked();
+    if !cropped {
+        add.on_hover_text(t("Crop the plan to the part of the drawing to trace, and only that part is read."));
+    }
+    if clicked && let Some(region) = d.crop {
+        // The survey's own caption for it, where it writes one: a sheet is captioned under it, larger than anything
+        // written inside it.
+        let taken = |name: &String| parts.iter().any(|part: &Part| part.name == *name);
+        let name = bimcraft_core::underlay::caption(m, u, region)
+            .filter(|said| !taken(said))
+            .unwrap_or_else(|| tf("Part {}", &[&(parts.len() + 1).to_string()]));
+        parts.push(Part { name, kind: PartKind::Plan, region, level: d.level, phase: None });
+        changed = true;
+    }
+    ui.add_space(6.0);
+    if parts.is_empty() {
+        ui.label(RichText::new(t("It is made of no parts yet, so Trace Walls reads the whole of it.")).color(pal().muted));
+        return;
+    }
+    let none = t("<None>").to_string();
+    let kinds: Vec<String> =
+        [PartKind::Plan, PartKind::Elevation, PartKind::Section].iter().map(|k| t(kind_word(*k)).to_string()).collect();
+    let levels: Vec<(String, Id)> = m.levels().iter().map(|(id, l)| (l.name.clone(), *id)).collect();
+    let level_options: Vec<String> = std::iter::once(none.clone()).chain(levels.iter().map(|(name, _)| name.clone())).collect();
+    let phase_options: Vec<String> = std::iter::once(none.clone()).chain(m.phases.iter().cloned()).collect();
+    let mut drop: Option<usize> = None;
+    ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
+        Grid::new("trace-parts").num_columns(5).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
+            for label in ["Name", "What it is", "Level", "Phase"] {
+                ui.label(RichText::new(t(label)).color(pal().muted));
+            }
+            ui.label("");
+            ui.end_row();
+            for (i, part) in parts.iter_mut().enumerate() {
+                let salt = format!("{i} {}", part.name);
+                changed |= ui.add_sized([170.0, 20.0], egui::TextEdit::singleline(&mut part.name)).changed();
+                let row = part.name.clone();
+                let named = |column: &str| format!("{}: {row}", t(column));
+                let now = t(kind_word(part.kind)).to_string();
+                if let Some(picked) = phase_combo(ui, (d.underlay, &format!("kind {salt}")), named("What it is"), &now, &kinds) {
+                    part.kind = match kinds.iter().position(|k| *k == picked) {
+                        Some(1) => PartKind::Elevation,
+                        Some(2) => PartKind::Section,
+                        _ => PartKind::Plan,
+                    };
+                    changed = true;
+                }
+                let on = part.level.and_then(|g| levels.iter().find(|(_, id)| m.guid(*id) == g)).map(|(name, _)| name.clone());
+                let now = on.unwrap_or_else(|| none.clone());
+                if let Some(picked) = phase_combo(ui, (d.underlay, &format!("level {salt}")), named("Level"), &now, &level_options) {
+                    part.level = levels.iter().find(|(name, _)| *name == picked).map(|(_, id)| m.guid(*id));
+                    changed = true;
+                }
+                let now = part.phase.clone().unwrap_or_else(|| none.clone());
+                if let Some(picked) = phase_combo(ui, (d.underlay, &format!("phase {salt}")), named("Phase"), &now, &phase_options) {
+                    part.phase = (picked != none).then_some(picked);
+                    changed = true;
+                }
+                if ui.button(t("Remove")).clicked() {
+                    drop = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+    });
+    if let Some(i) = drop {
+        parts.remove(i);
+        changed = true;
+    }
+    if changed {
+        let rows: Vec<Value> = parts.iter().map(|part| part_json(m, part)).collect();
+        *run = Some(json!({"underlay": d.underlay, "parts": rows}));
+    }
+}
+
+/// The word a kind of part is shown by.
+fn kind_word(kind: PartKind) -> &'static str {
+    match kind {
+        PartKind::Plan => "Plan",
+        PartKind::Elevation => "Elevation",
+        PartKind::Section => "Section",
+    }
+}
+
+/// A part as `cad_parts` takes it.
+fn part_json(m: &Model, part: &Part) -> Value {
+    let [sw, ne] = part.region;
+    json!({
+        "name": part.name,
+        "kind": part.kind.word(),
+        "region": [[sw.0, sw.1], [ne.0, ne.1]],
+        "level": part.level.map(|g| m.elements.id(g)),
+        "phase": part.phase,
+    })
+}
+
 /// The Walls tab: what to look for, Find, Build, and what the last Find said.
 fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build: &mut bool) {
     let said = t("A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall. What to look for:");
     ui.label(RichText::new(said).color(pal().muted));
     ui.add_space(6.0);
     let mut changed = false;
+    // A drawing that holds a whole set of sheets side by side is read one sheet at a time: one of its parts by name,
+    // which carries its level and its phase too, or what the plan's crop holds, which is an area and nothing more.
+    // An elevation's lines pair as a wall's faces do, so a file of sheets read whole gives walls that are no walls.
+    let (whole, crop) = (t("The whole drawing").to_string(), t("Inside the plan's crop").to_string());
+    let named: Vec<String> = underlay_of(m, d.underlay).map(|u| u.parts.iter().map(|part| part.name.clone()).collect()).unwrap_or_default();
+    let mut options = vec![whole.clone()];
+    if d.crop.is_some() {
+        options.push(crop.clone());
+    }
+    options.extend(named);
+    let now = match &d.what {
+        What::Whole => whole.clone(),
+        What::Crop => crop.clone(),
+        What::Part(name) => name.clone(),
+    };
+    ui.horizontal(|ui| {
+        let label = ui.label(t("What to read"));
+        if let Some(picked) = combo(ui, (d.underlay, "trace-what"), label.id, &now, &options) {
+            d.what = match picked {
+                p if p == whole => What::Whole,
+                p if p == crop => What::Crop,
+                p => What::Part(p),
+            };
+            changed = true;
+        }
+    });
+    ui.add_space(6.0);
     Grid::new("trace-how").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
         changed |= measure(ui, "Thinnest wall", &mut d.how.thin, 1.0..=10_000.0, " mm");
         changed |= measure(ui, "Thickest wall", &mut d.how.thick, 1.0..=10_000.0, " mm");
@@ -232,15 +386,6 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     // A survey draws the land around the building as well, and its lines pair as a wall's faces do: the boundary of
     // the plot, the kerb of the road. What tells them apart is that they meet no wall of the building.
     changed |= ui.checkbox(&mut d.how.alone, t("Take the lines that stand alone too")).changed();
-    // A drawing that holds a whole set of sheets side by side is traced one sheet at a time, and the plan's crop
-    // region is how the user says which: an elevation's lines pair as a wall's faces do, so a file of sheets gives
-    // as many walls again as the building has.
-    let cropped = d.crop.is_some();
-    let only = ui.add_enabled(cropped, egui::Checkbox::new(&mut d.only_crop, t("Only inside the plan's crop")));
-    changed |= only.changed();
-    if !cropped {
-        only.on_hover_text(t("Crop the plan to the part of the drawing to trace, and only that part is read."));
-    }
     // The rooms are of the walls and not of the drawing, so asking for them changes nothing a Find would find.
     ui.checkbox(&mut d.rooms, t("Place the rooms too"));
     ui.add_space(6.0);
@@ -384,13 +529,18 @@ impl BimApp {
         let (found, holes) = (Vec::new(), Vec::new());
         // A plan cropped before the window was opened was cropped to what is to be traced.
         let crop = self.plan_key().and_then(|key| bimcraft_core::render::crop_region(&self.session.model, key));
+        let what = match crop.is_some() {
+            true => What::Crop,
+            false => What::Whole,
+        };
         let dialog = TraceDialog {
             underlay,
-            tab: 1,
+            tab: 2,
             how,
             rooms: false,
-            only_crop: crop.is_some(),
+            what,
             crop,
+            level: Some(here),
             kind: None,
             found,
             holes,
@@ -406,10 +556,19 @@ impl BimApp {
         // The plan may have been cropped, or uncropped, since the last frame; with no crop there is nothing to look
         // inside, so the window stops offering it.
         d.crop = self.plan_key().and_then(|key| bimcraft_core::render::crop_region(&model, key));
-        d.only_crop &= d.crop.is_some();
+        d.level = self.plan_level().map(|level| model.guid(level));
+        // A crop taken off, or a part done away with, while the window stands open leaves nothing to read inside it.
+        let named: Vec<String> =
+            underlay_of(&model, d.underlay).map(|u| u.parts.iter().map(|part| part.name.clone()).collect()).unwrap_or_default();
+        match &d.what {
+            What::Crop if d.crop.is_none() => d.what = What::Whole,
+            What::Part(name) if !named.contains(name) => d.what = What::Whole,
+            _ => {}
+        }
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
+        let mut parts = None::<Value>;
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -426,7 +585,7 @@ impl BimApp {
                 ui.set_min_height(360.0);
                 ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
                 ui.add_space(6.0);
-                let tabs = [t("Layers").to_string(), category("wall", true)];
+                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true)];
                 ui.horizontal(|ui| {
                     for (i, label) in tabs.iter().enumerate() {
                         if ui.selectable_label(d.tab == i, label).clicked() {
@@ -437,6 +596,7 @@ impl BimApp {
                 ui.separator();
                 match d.tab {
                     0 => layers_tab(ui, &d, &model, &mut layers),
+                    1 => parts_tab(ui, &d, &model, &mut parts),
                     _ => walls_tab(ui, &mut d, &model, &mut find, &mut build),
                 }
                 if !d.error.is_empty() {
@@ -446,10 +606,11 @@ impl BimApp {
                 ui.add_space(8.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
-        let asked = match (layers, find || build) {
-            (Some(p), _) => Some(("cad_layers", p)),
-            (None, true) => Some(("trace_walls", d.params(find))),
-            (None, false) => None,
+        let asked = match (layers, parts, find || build) {
+            (Some(p), _, _) => Some(("cad_layers", p)),
+            (_, Some(p), _) => Some(("cad_parts", p)),
+            (None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();

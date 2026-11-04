@@ -177,12 +177,28 @@ pub static ALL: &[Command] = &[
         cad_layers,
     ),
     edit(
+        "cad_parts",
+        "CAD Parts",
+        &[],
+        "{underlay?, parts?: [{name, kind, region, level?, phase?}, \u{2026}]} what the parts of a drawing under a plan \
+         are of the building: a survey is often saved as a whole set of sheets side by side in one file, and this is \
+         where each rectangle of it is said to be the plan of a floor, an elevation of a side or a section. A part is \
+         a `name` (the survey's own caption for it, as a rule), a `kind` (`plan`, `elevation` or `section`), a `region` \
+         [[x, y], [x, y]] \u{2014} its south-west corner and its north-east, where the drawing stands \u{2014} the `level` it is \
+         the plan of, and the `phase` what it draws is in: a survey's existing state is often a sheet of its own rather \
+         than a layer of its own, so a part says the phase of everything in it, whatever its layers say. `parts` is \
+         the whole list, as the drawing is to be made of them; without it nothing changes and the parts are reported. \
+         `underlay` is which drawing (the only one there is, unless there are several). Trace Walls takes one by name \
+         (`part`), which is its area, its level and its phase in one word. Returns `id`, `name` and `parts`",
+        cad_parts,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
         // open (`LC` for Link CAD), and nothing in the window traces a drawing yet.
         &[],
-        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, region?, rooms?, preview?} the walls \
+        "{underlay?, part?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, region?, rooms?, preview?} the walls of the \
          drawing under a plan, built. A survey draws a wall as its two faces, so a pair of lines running alongside one \
          another a wall\'s thickness apart is a wall: one wall is built down the middle of each pair, as thick as the \
          pair measured. `underlay` is which drawing to read (the only one there is, unless there are several); the \
@@ -1918,8 +1934,17 @@ fn underlay_cad(s: &mut Session, p: &Value) -> R {
     // survey drawn in metres and saved as millimetres comes in a hand's width across and traces nothing.
     let scale_says = crate::dxf::measured(&drawing).map(|m| m.scale_says).unwrap_or_default();
     let m = s.model_mut();
-    let mut u =
-        crate::model::Underlay { name: name.clone(), path: path.clone(), level, at, angle, scale: read_with, hidden, phases: Vec::new() };
+    let mut u = crate::model::Underlay {
+        name: name.clone(),
+        path: path.clone(),
+        level,
+        at,
+        angle,
+        scale: read_with,
+        hidden,
+        phases: Vec::new(),
+        parts: Vec::new(),
+    };
     m.drawings.insert(path, drawing);
     // What the layers' own names say of the project's history, unless the caller said it: a survey writes it down
     // (`Stato di fatto`, `Demolizioni`, `Progetto`), and what is read is the caller's to change.
@@ -2080,6 +2105,84 @@ fn cad_layers(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "name": name, "changed": changed, "layers": layers}))
 }
 
+/// What a part of a drawing may be told about itself.
+const PART_FIELDS: [&str; 5] = ["name", "kind", "region", "level", "phase"];
+
+/// One part of a drawing, read from what the user said of it.
+fn part_told(c: &str, m: &Model, row: &Value) -> Result<crate::model::Part, String> {
+    use crate::model::PartKind;
+    let Some(fields) = row.as_object() else {
+        return Err(bad(c, format!("a part is {{name, kind, region, level?, phase?}}, not {row}")));
+    };
+    if let Some(key) = fields.keys().find(|k| !PART_FIELDS.contains(&k.as_str())) {
+        return Err(bad(c, format!("a part takes {}, not `{key}`", PART_FIELDS.map(|f| format!("`{f}`")).join(", "))));
+    }
+    let name = string(c, row, "name")?.ok_or_else(|| bad(c, format!("a part needs a `name`, and {row} has none")))?;
+    let kind = match string(c, row, "kind")?.as_deref() {
+        Some("plan") => PartKind::Plan,
+        Some("elevation") => PartKind::Elevation,
+        Some("section") => PartKind::Section,
+        Some(other) => return Err(bad(c, format!("a part is a `plan`, an `elevation` or a `section`, not a `{other}`"))),
+        None => return Err(bad(c, format!("a part needs a `kind`, and {row} has none"))),
+    };
+    let region = match points(c, row, "region")?.as_slice() {
+        [sw, ne] => [*sw, *ne],
+        _ => return Err(bad(c, "a part's `region` is two corners, [[x, y], [x, y]]")),
+    };
+    let level = match row.get("level") {
+        v if absent(v) => None,
+        _ => Some(m.guid(level_param(c, m, row, "level")?)),
+    };
+    let phase = string(c, row, "phase")?;
+    Ok(crate::model::Part { name, kind, region, level, phase })
+}
+
+/// What a part says of itself, as the command reports it.
+fn part_json(m: &Model, part: &crate::model::Part) -> Value {
+    let [sw, ne] = part.region;
+    json!({
+        "name": part.name,
+        "kind": part.kind.word(),
+        "region": [[hundredth(sw.0), hundredth(sw.1)], [hundredth(ne.0), hundredth(ne.1)]],
+        "level": part.level.map(|g| m.elements.id(g)),
+        "phase": part.phase,
+    })
+}
+
+fn cad_parts(s: &mut Session, p: &Value) -> R {
+    let c = "cad_parts";
+    let (id, mut u) = chosen_underlay(c, &s.model, p, "read")?;
+    let was = u.clone();
+    match p.get("parts") {
+        v if absent(v) => {}
+        Some(Value::Array(a)) if a.len() <= MAX_POINTS => {
+            u.parts = a.iter().map(|row| part_told(c, &s.model, row)).collect::<Result<Vec<_>, _>>()?;
+        }
+        Some(Value::Array(_)) => return Err(bad(c, format!("`parts` names more than {MAX_POINTS} parts"))),
+        Some(v) => return Err(bad(c, format!("`parts` is a list of parts, not {v}"))),
+        None => {}
+    }
+    let name = u.name.clone();
+    // Told what is so already, it leaves the project alone and so leaves no undo step.
+    if u != was {
+        match s.model_mut().elements.get_mut(id) {
+            Some(Element::Underlay(slot)) => *slot = u,
+            _ => return Err(bad(c, format!("{id} is no drawing under a plan"))),
+        }
+    }
+    let held = held_parts(&s.model, id);
+    let parts: Vec<Value> = held.iter().map(|part| part_json(&s.model, part)).collect();
+    Ok(json!({"id": id, "name": name, "parts": parts}))
+}
+
+/// The parts of the drawing `id` is, as the project holds them.
+fn held_parts(m: &Model, id: Id) -> Vec<crate::model::Part> {
+    match m.elements.get(id) {
+        Some(Element::Underlay(u)) => u.parts.clone(),
+        _ => Vec::new(),
+    }
+}
+
 /// What something that measured `measured` mm is built at: the nearest 10 mm, which is how a wall is built and an
 /// opening is made.
 fn by_ten(measured: f64) -> i64 {
@@ -2141,6 +2244,22 @@ fn wall_type_for(m: &Model, given: Option<&str>, wanted: f64) -> (String, bool) 
 fn trace_walls(s: &mut Session, p: &Value) -> R {
     let c = "trace_walls";
     let (_, u) = chosen_underlay(c, &s.model, p, "trace")?;
+    // The part of the drawing to trace, where one is named: its area, its level and its phase in one word.
+    let told: Option<crate::model::Part> = match string(c, p, "part")? {
+        None => None,
+        Some(name) => match u.parts.iter().find(|part| part.name == name) {
+            Some(part) => Some(part.clone()),
+            None => {
+                let has = match u.parts.is_empty() {
+                    true => "it is made of no parts yet: `cad_parts` is what says which part of it is what".to_string(),
+                    false => {
+                        format!("it is made of {}", u.parts.iter().map(|part| format!("`{}`", part.name)).collect::<Vec<_>>().join(", "))
+                    }
+                };
+                return Err(bad(c, format!("`{}` has no part `{name}`: {has}", u.name)));
+            }
+        },
+    };
     let was = crate::trace::How::default();
     let how = crate::trace::How {
         thin: num(c, p, "thin")?.unwrap_or(was.thin),
@@ -2155,13 +2274,15 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             v if absent(v) => was.alone,
             _ => flag(c, p, "alone")?,
         },
-        // A survey saved as a whole set of sheets in one file is traced a sheet at a time.
-        within: match p.get("region") {
-            v if absent(v) => None,
-            _ => match points(c, p, "region")?.as_slice() {
+        // A survey saved as a whole set of sheets in one file is traced a sheet at a time: the area asked for, or
+        // the one the part named says, which carries its level and its phase as well.
+        within: match (p.get("region"), &told) {
+            (v, _) if !absent(v) => match points(c, p, "region")?.as_slice() {
                 [sw, ne] => Some((*sw, *ne)),
                 _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
             },
+            (_, Some(part)) => Some((part.region[0], part.region[1])),
+            _ => None,
         },
     };
     let rooms = match p.get("rooms") {
@@ -2208,6 +2329,17 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
             }
         })
         .collect();
+    // A part says the phase of everything drawn in it, whatever its layers say: a survey's existing state is often a
+    // sheet of its own rather than a layer of its own, and then no layer carries the phase and no disagreement
+    // between two layers is left to report.
+    let said: Vec<Option<crate::model::LayerPhase>> = match told.as_ref().and_then(|part| part.phase.clone()) {
+        Some(phase) => {
+            disagreed.clear();
+            let of_the_part = crate::model::LayerPhase { layer: String::new(), created: Some(phase), demolished: None };
+            said.iter().map(|_| Some(of_the_part.clone())).collect()
+        }
+        None => said,
+    };
     let first = s.model.phases.first().cloned();
     let created: Vec<Option<String>> = said.iter().map(|p| p.as_ref().and_then(|p| p.created.clone()).or_else(|| first.clone())).collect();
     let by_phase: Vec<Value> = s
@@ -2292,9 +2424,11 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         );
         return Ok(out);
     }
-    let level = match p.get("level") {
-        v if absent(v) => u.level,
-        _ => level_param(c, &s.model, p, "level")?,
+    let level = match (p.get("level"), &told) {
+        (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
+        // A plan of a floor stands on the level it is the plan of.
+        (_, Some(part)) => part.level.unwrap_or(u.level),
+        _ => u.level,
     };
     let (top_level, height) = top_param(c, &s.model, p, level)?;
     let m = s.model_mut();

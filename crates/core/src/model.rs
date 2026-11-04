@@ -637,6 +637,63 @@ pub struct Underlay {
     /// `Demolizioni`, `Progetto`), and a layer with no word for it here stands in every phase, as the drawing does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<LayerPhase>,
+    /// What its parts are of the building: which rectangle of it is the plan of which floor, which is an elevation,
+    /// which is a section. Empty until someone says, which is what a drawing of one plan needs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Part>,
+}
+
+/// What a part of a drawing is of the building.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PartKind {
+    /// A floor seen from above: what walls are traced from.
+    #[default]
+    Plan,
+    /// A side of the building seen square on: what heights are read from.
+    Elevation,
+    /// A cut through it.
+    Section,
+}
+
+impl PartKind {
+    /// The word a command says it by.
+    pub fn word(&self) -> &'static str {
+        match self {
+            PartKind::Plan => "plan",
+            PartKind::Elevation => "elevation",
+            PartKind::Section => "section",
+        }
+    }
+}
+
+/// A part of a drawing that is something of the building: the plan of a floor, an elevation of a side, a section
+/// through it. A survey is often saved as a whole set of sheets side by side in one file — the plans, the
+/// elevations, the sections, the site plan — and this is where the user says which rectangle of it is what, so that
+/// each is read as what it is and no other. Nothing to do with a library entry's parts (`HasPart`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Part {
+    /// What to call it: the survey's own caption for it, as a rule.
+    pub name: String,
+    pub kind: PartKind,
+    /// Its south-west corner and its north-east, where the drawing stands in the project, in millimetres.
+    pub region: [P2; 2],
+    /// For a plan, the level it is the plan of; none is not said, and then a command says which level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Guid>,
+    /// The phase what it draws is in. A survey's existing state is often a sheet of its own rather than a layer of
+    /// its own, so a part says the phase of everything in it, whatever its layers say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+impl Part {
+    /// Whether `p` is in it.
+    pub fn holds(&self, p: P2) -> bool {
+        let [sw, ne] = self.region;
+        p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1
+    }
 }
 
 /// A layer of a drawing in the project's history: built in one phase, taken down in another. The same pair an element
@@ -1122,7 +1179,12 @@ macro_rules! visit_refs {
         match $e {
             // A view's graphics, as `views_graphics` gives them.
             Element::Level(_) | Element::Section(_) | Element::Elevation(_) | Element::View3D(_) => {}
-            Element::Underlay(u) => f(& $($m)? u.level),
+            Element::Underlay(u) => {
+                f(& $($m)? u.level);
+                for part in & $($m)? u.parts {
+                    if let Some(g) = & $($m)? part.level { f(g) }
+                }
+            }
             Element::Grid(_) | Element::Sheet(_) | Element::Schedule(_) | Element::Link(_) => {}
             Element::PlanView(v) => {
                 f(& $($m)? v.level);
@@ -3954,6 +4016,30 @@ impl Model {
                     }
                     for layer in &u.hidden {
                         text(&format!("{who} hidden layer"), "name", layer)?;
+                    }
+                    for part in &u.parts {
+                        let what = format!("{who} part `{}`", part.name);
+                        text(&what, "name", &part.name)?;
+                        if part.name.trim().is_empty() {
+                            return Err(format!("{who}: a part of a drawing needs a name"));
+                        }
+                        let [sw, ne] = part.region;
+                        if ![sw.0, sw.1, ne.0, ne.1].iter().all(|v| v.is_finite()) {
+                            return Err(format!("{what}: its corners must be numbers"));
+                        }
+                        if ne.0 <= sw.0 || ne.1 <= sw.1 {
+                            return Err(format!(
+                                "{what}: a part is its south-west corner and then its north-east, and {sw:?} to {ne:?} has no room between them"
+                            ));
+                        }
+                        if let Some(phase) = &part.phase
+                            && !self.phases.iter().any(|p| p == phase)
+                        {
+                            return Err(format!("{what}: there's no phase `{phase}` for it to be in"));
+                        }
+                        if u.parts.iter().filter(|other| other.name == part.name).count() > 1 {
+                            return Err(format!("{who}: it has two parts called `{}`, and a part is named to be named", part.name));
+                        }
                     }
                     for l in &u.phases {
                         let what = format!("{who} layer `{}`", l.layer);
