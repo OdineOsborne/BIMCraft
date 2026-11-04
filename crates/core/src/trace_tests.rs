@@ -155,6 +155,43 @@ fn a_plan_part_is_traced_into_its_own_level_in_its_own_phase_and_nowhere_else() 
 }
 
 #[test]
+fn the_rooms_of_a_part_take_their_names_from_the_drawing_wherever_the_drawing_stands() {
+    // Two plans in one file, the second a floor of its own, each with a room name written inside it. The drawing
+    // comes under the lowest level; the second plan is traced onto a level the drawing does not stand on.
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    lines.extend(room("MURI", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let path = drawing(&lines);
+    let said = |x: f64, y: f64, text: &str| format!("0\nTEXT\n8\nTESTO\n10\n{x}\n20\n{y}\n40\n200\n1\n{text}\n");
+    let text = std::fs::read_to_string(&path).expect("the drawing");
+    let with = text.replace(
+        "0\nENDSEC\n0\nEOF\n",
+        &format!("{}{}0\nENDSEC\n0\nEOF\n", said(4000.0, 3000.0, "CUCINA"), said(104_000.0, 3000.0, "CANTINA")),
+    );
+    std::fs::write(&path, with).expect("the drawing again");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let upper = levels(&s)[1];
+    let parts = json!([
+        {"name": "Ground", "kind": "plan", "region": [[-1000, -1000], [9000, 7000]]},
+        {"name": "Cellar", "kind": "plan", "region": [[99_000, -1000], [109_000, 7000]], "level": upper},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    run(&mut s, "trace_walls", json!({"part": "Ground", "rooms": true})).expect("it traces");
+    run(&mut s, "trace_walls", json!({"part": "Cellar", "rooms": true})).expect("it traces");
+    let mut named: Vec<String> = s
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Room(r) => Some(r.name.clone()),
+            _ => None,
+        })
+        .collect();
+    named.sort();
+    assert_eq!(named, vec!["CANTINA".to_string(), "CUCINA".to_string()], "the survey names both, on whichever level");
+}
+
+#[test]
 fn a_drawing_of_many_sheets_is_traced_inside_the_area_asked_for_and_nowhere_else() {
     // A survey saved as a set of sheets in one file: the plan, and a hundred metres away the elevation, whose lines
     // pair as a wall's faces do.

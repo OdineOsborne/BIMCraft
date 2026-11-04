@@ -85,6 +85,88 @@ fn a_part_of_a_drawing_is_named_by_what_the_survey_writes_under_it() {
     assert_eq!(caption([P2(1100.0, 500.0), P2(5000.0, 3000.0)]).as_deref(), Some("CAMERA"), "the lowest of two as large");
 }
 
+/// A drawing of `words`, each {layer, x, y, height, text}, under a plan; the session and the drawing it holds.
+fn written(words: &[(&str, f64, f64, f64, &str)]) -> (Session, crate::model::Underlay) {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-written-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("prospetto.dxf");
+    let mut text = String::from("0\nSECTION\n2\nENTITIES\n");
+    for (layer, x, y, height, said) in words {
+        text.push_str(&format!("0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n40\n{height}\n1\n{said}\n"));
+    }
+    text.push_str("0\nENDSEC\n0\nEOF\n");
+    std::fs::write(&path, text).unwrap();
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path.to_string_lossy()})).expect("it comes in");
+    let u = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    (s, u)
+}
+
+#[test]
+fn the_heights_an_elevation_writes_are_read_and_held_against_one_another() {
+    // An elevation marking three heights in metres against the lines it measures, 150 and 400 mm apart as the
+    // heights it says are: the ground at 69.70, a floor at 69.85, another at 70.10.
+    let words = [
+        ("QUOTE", 0.0, 0.0, 250.0, "69.70"),
+        ("QUOTE", 2000.0, 150.0, 250.0, "69,85"),
+        ("QUOTE", 4000.0, 400.0, 250.0, "70.10"),
+        // What is no height: the section's name, a door's number, an area with its unit.
+        ("TESTO", 1000.0, -800.0, 300.0, "SEZIONE A-A"),
+        ("TESTO", 1500.0, 90.0, 150.0, "4"),
+        ("TESTO", 2500.0, 90.0, 150.0, "20.68 M2"),
+    ];
+    let (s, u) = written(&words);
+    let whole = [P2(-10_000.0, -10_000.0), P2(10_000.0, 10_000.0)];
+    let read = crate::underlay::heights(&s.model, &u, whole);
+    assert_eq!(read.marks.iter().map(|mark| mark.says).collect::<Vec<_>>(), vec![69.7, 69.85, 70.1]);
+    assert_eq!(read.datum, Some(69_700.0), "the one number that turns a y into a height");
+    assert!(read.worst < 1e-6, "they agree to the millimetre: {}", read.worst);
+    // A mark 300 mm out of where the others put it is said to be, and by how much, rather than averaged away.
+    let mut out = words;
+    out[2] = ("QUOTE", 4000.0, 700.0, 250.0, "70.10");
+    let (s, u) = written(&out);
+    let read = crate::underlay::heights(&s.model, &u, whole);
+    assert!((read.worst - 300.0).abs() < 1e-6, "{}", read.worst);
+    assert!(read.marks.iter().filter(|mark| mark.out > crate::underlay::HEIGHTS_AGREE).count() == 1);
+    // A drawing with nothing written in it says nothing about how high anything is.
+    let (s, u) = written(&[("TESTO", 0.0, 0.0, 250.0, "PROSPETTO SUD")]);
+    assert_eq!(crate::underlay::heights(&s.model, &u, whole), crate::underlay::Heights::default());
+}
+
+#[test]
+fn an_elevation_part_reports_its_heights_through_the_command() {
+    let words = [
+        ("QUOTE", 0.0, 0.0, 250.0, "69.70"),
+        ("QUOTE", 2000.0, 150.0, 250.0, "69,85"),
+        ("QUOTE", 4000.0, 400.0, 250.0, "70.10"),
+        ("TESTO", 1000.0, -800.0, 300.0, "PROSPETTO SUD"),
+    ];
+    let (mut s, _) = written(&words);
+    assert!(run(&mut s, "cad_heights", json!({})).is_err(), "it reads a part, and one has to be named");
+    let whole = json!([[-10_000, -10_000], [10_000, 10_000]]);
+    let parts = json!([{"name": "PROSPETTO SUD", "kind": "elevation", "region": whole}]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes it");
+    let out = run(&mut s, "cad_heights", json!({"part": "PROSPETTO SUD"})).expect("it reads");
+    assert_eq!(out["datum"], json!(69_700.0), "{out}");
+    assert_eq!(out["agree"], json!(true));
+    assert_eq!(out["kind"], json!("elevation"));
+    assert_eq!(out["marks"].as_array().map(Vec::len), Some(3), "{out}");
+    assert_eq!(out["marks"][0]["says"], json!(69.7));
+    assert_eq!(out["marks"][2]["above"], json!(400.0), "how far the top floor stands above the lowest mark");
+    let e = run(&mut s, "cad_heights", json!({"part": "SOFFITTA"})).expect_err("no such part");
+    assert!(e.contains("PROSPETTO SUD"), "{e}");
+}
+
 #[test]
 fn the_project_keeps_the_path_and_never_the_drawing() {
     let path = drawing("rilievo.dxf");

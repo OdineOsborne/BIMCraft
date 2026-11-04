@@ -1699,6 +1699,10 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Plan", "平面图"],
     ["Elevation", "立面图"],
     ["Section", "剖面图"],
+    ["Heights", "标高"],
+    ["None written", "未标注"],
+    ["{} heights, within {} mm", "{} 个标高，误差在 {} 毫米内"],
+    ["{} heights, {} mm apart", "{} 个标高，相差 {} 毫米"],
     ["Place the rooms too", "同时放置房间"],
     ["Place Rooms", "放置房间"],
     [

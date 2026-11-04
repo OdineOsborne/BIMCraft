@@ -2771,6 +2771,10 @@ const WORDS: &[[&str; 3]] = &[
     ["Plan", "Planta", "Planta"],
     ["Elevation", "Alçado", "Alzado"],
     ["Section", "Corte", "Sección"],
+    ["Heights", "Alturas", "Alturas"],
+    ["None written", "Nenhuma escrita", "Ninguna escrita"],
+    ["{} heights, within {} mm", "{} alturas, dentro de {} mm", "{} alturas, dentro de {} mm"],
+    ["{} heights, {} mm apart", "{} alturas, {} mm de diferença", "{} alturas, {} mm de diferencia"],
     ["Place the rooms too", "Colocar também os ambientes", "Colocar también los recintos"],
     ["Place Rooms", "Colocar ambientes", "Colocar recintos"],
     [

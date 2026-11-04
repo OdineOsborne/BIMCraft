@@ -103,6 +103,84 @@ pub fn caption(m: &Model, u: &Underlay, region: [P2; 2]) -> Option<String> {
     best.map(|(_, _, said)| said)
 }
 
+/// A height an elevation writes on itself: what it says, in metres above whatever it is measured from, and where in
+/// the project the drawing writes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub says: f64,
+    pub at: P2,
+    /// How far out it is from where the others put it, in millimetres: 0 where they all agree.
+    pub out: f64,
+}
+
+/// What an elevation says about how high things are: the heights written on it, and the one number that turns the
+/// drawing into the project's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Heights {
+    pub marks: Vec<Mark>,
+    /// Millimetres to add to a point's y in the project to get the height it stands at, as the drawing writes
+    /// heights: `height_mm = y + datum`. None where the drawing writes fewer than one height.
+    pub datum: Option<f64>,
+    /// The worst a mark is out of what the rest say, in millimetres.
+    pub worst: f64,
+}
+
+/// How far out of true a height written by hand may be and still be believed: a mark is written to the centimetre
+/// and its text is placed by eye against the line it measures, so a couple of centimetres is nothing and a tenth of
+/// a metre is another storey's mark read as this one's.
+pub const HEIGHTS_AGREE: f64 = 50.0;
+
+/// What a word says as a height, or none: a height is written in metres with its decimals \u{2014} `69.80`, `+3.20`,
+/// `70,10` \u{2014} so a word with no decimal point is a door's number or a room's and no height at all.
+fn height_said(text: &str) -> Option<f64> {
+    let said = text.trim().replace(',', ".");
+    let (whole, fraction) = said.split_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let whole = whole.strip_prefix(['+', '-']).unwrap_or(whole);
+    if !digits(whole) || !digits(fraction) || fraction.len() > 3 {
+        return None;
+    }
+    said.parse().ok()
+}
+
+/// The heights the drawing writes inside `region`, held against one another. An elevation marks the heights it is
+/// drawn to in metres against the lines it measures, so every mark in it should put the datum in the same place; one
+/// that does not is a mark read as something it is not, or a drawing not drawn to its own heights, and the answer
+/// says which mark and by how much rather than averaging the trouble away.
+pub fn heights(m: &Model, u: &Underlay, region: [P2; 2]) -> Heights {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Heights::default() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let [sw, ne] = region;
+    let mut marks: Vec<Mark> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Words { at, text, .. } = shape else { continue };
+            let at = place(*at);
+            if at.0 < sw.0 || at.0 > ne.0 || at.1 < sw.1 || at.1 > ne.1 {
+                continue;
+            }
+            if let Some(says) = height_said(text) {
+                marks.push(Mark { says, at, out: 0.0 });
+            }
+        }
+    }
+    marks.sort_by(|a, b| a.says.total_cmp(&b.says));
+    // Each mark puts the datum somewhere; where they agree it is theirs, and the middle one of them is taken rather
+    // than the average, which one mark read wrong would drag off on its own.
+    let mut datums: Vec<f64> = marks.iter().map(|mark| mark.says * 1000.0 - mark.at.1).collect();
+    datums.sort_by(f64::total_cmp);
+    let datum = datums.get(datums.len() / 2).copied();
+    let mut worst = 0.0f64;
+    if let Some(datum) = datum {
+        for mark in &mut marks {
+            mark.out = (mark.says * 1000.0 - mark.at.1 - datum).abs();
+            worst = worst.max(mark.out);
+        }
+    }
+    Heights { marks, datum, worst }
+}
+
 /// The measurements the underlay writes, each with the layer it is written on, as the strokes they are drawn with, in
 /// this project's millimetres: the two lines that take the measurement out from the points it was taken between, the
 /// line it is written along, a tick at each end of that line, and the figure itself in our own lettering.

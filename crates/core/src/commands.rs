@@ -192,6 +192,19 @@ pub static ALL: &[Command] = &[
          (`part`), which is its area, its level and its phase in one word. Returns `id`, `name` and `parts`",
         cad_parts,
     ),
+    other(
+        "cad_heights",
+        "CAD Heights",
+        "{underlay?, part} the heights an elevation or a section of a drawing writes on itself, read and reported \
+         without changing the project. An elevation marks the heights it is drawn to in metres against the lines it \
+         measures, so `marks` is each of them: what it `says`, where it is written (`at`), how far `above` the lowest \
+         of them it stands in millimetres, and how far `out` it is from where the rest of them put the datum. `datum` \
+         is that one number, the millimetres to add to a point in the project to get the height it stands at, and \
+         `worst` and `agree` are how well the marks bear one another out: a mark far out is one read as something it \
+         is not, or a drawing not drawn to its own heights, and it is said rather than averaged away. A word with no \
+         decimals is no height (a door number, a room number), and a drawing that writes none says nothing",
+        cad_heights,
+    ),
     edit(
         "trace_walls",
         "Trace Walls",
@@ -2175,6 +2188,52 @@ fn cad_parts(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "name": name, "parts": parts}))
 }
 
+/// The part of `u` that `name` names, or what it is made of instead.
+fn part_of(c: &str, u: &crate::model::Underlay, name: &str) -> Result<crate::model::Part, String> {
+    match u.parts.iter().find(|part| part.name == name) {
+        Some(part) => Ok(part.clone()),
+        None => {
+            let has = match u.parts.is_empty() {
+                true => "it is made of no parts yet: `cad_parts` is what says which part of it is what".to_string(),
+                false => {
+                    format!("it is made of {}", u.parts.iter().map(|part| format!("`{}`", part.name)).collect::<Vec<_>>().join(", "))
+                }
+            };
+            Err(bad(c, format!("`{}` has no part `{name}`: {has}", u.name)))
+        }
+    }
+}
+
+fn cad_heights(s: &mut Session, p: &Value) -> R {
+    let c = "cad_heights";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which part of the drawing to read the heights of"))?;
+    let part = part_of(c, &u, &name)?;
+    let read = crate::underlay::heights(&s.model, &u, part.region);
+    let lowest = read.marks.first().map(|mark| mark.says).unwrap_or_default();
+    let marks: Vec<Value> = read
+        .marks
+        .iter()
+        .map(|mark| {
+            json!({
+                "says": mark.says,
+                "at": [hundredth(mark.at.0), hundredth(mark.at.1)],
+                "out": hundredth(mark.out),
+                "above": hundredth((mark.says - lowest) * 1000.0),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "id": id,
+        "part": part.name,
+        "kind": part.kind.word(),
+        "marks": marks,
+        "datum": read.datum.map(hundredth),
+        "worst": hundredth(read.worst),
+        "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+    }))
+}
+
 /// The parts of the drawing `id` is, as the project holds them.
 fn held_parts(m: &Model, id: Id) -> Vec<crate::model::Part> {
     match m.elements.get(id) {
@@ -2247,18 +2306,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     // The part of the drawing to trace, where one is named: its area, its level and its phase in one word.
     let told: Option<crate::model::Part> = match string(c, p, "part")? {
         None => None,
-        Some(name) => match u.parts.iter().find(|part| part.name == name) {
-            Some(part) => Some(part.clone()),
-            None => {
-                let has = match u.parts.is_empty() {
-                    true => "it is made of no parts yet: `cad_parts` is what says which part of it is what".to_string(),
-                    false => {
-                        format!("it is made of {}", u.parts.iter().map(|part| format!("`{}`", part.name)).collect::<Vec<_>>().join(", "))
-                    }
-                };
-                return Err(bad(c, format!("`{}` has no part `{name}`: {has}", u.name)));
-            }
-        },
+        Some(name) => Some(part_of(c, &u, &name)?),
     };
     let was = crate::trace::How::default();
     let how = crate::trace::How {
@@ -2519,7 +2567,9 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     }
     // The rooms the walls just built shut in, placed with them: one command, so one undo step takes the lot back.
     if rooms {
-        let (ids, areas, _, _) = fill_rooms(s, level, None);
+        // The names come from the drawing just traced, wherever it stands: a part traced onto a floor of its own
+        // is a plan of that floor, though the drawing itself is under another level's.
+        let (ids, areas, _, _) = fill_rooms(s, level, None, Some(&u));
         let total: f64 = areas.iter().sum();
         out["rooms"] = json!(ids.len());
         out["room_ids"] = json!(ids);
@@ -4604,7 +4654,7 @@ fn place_rooms(s: &mut Session, p: &Value) -> R {
     let c = "place_rooms";
     let level = level_param(c, &s.model, p, "level")?;
     let name = string(c, p, "name")?;
-    let (ids, areas, held, small) = fill_rooms(s, level, name.as_deref());
+    let (ids, areas, held, small) = fill_rooms(s, level, name.as_deref(), None);
     let total: f64 = areas.iter().sum();
     let areas: Vec<f64> = areas.iter().map(|a| m2(*a)).collect();
     Ok(json!({"rooms": ids.len(), "ids": ids, "areas_m2": areas, "area_m2": m2(total), "held": held, "small": small}))
@@ -4614,15 +4664,22 @@ fn place_rooms(s: &mut Session, p: &Value) -> R {
 /// Trace Walls does with the walls it has just built. Gives back what it made, what each measures, and how many
 /// areas it left to the rooms already standing in them or passed over as too small to be a room.
 ///
-/// Every room comes in called `name`. Where the caller says none, a room takes the name the survey under the plan
-/// writes inside it, because that is why a surveyor writes it there, and the project's own word for a room where
-/// the survey writes nothing.
-fn fill_rooms(s: &mut Session, level: Guid, name: Option<&str>) -> (Vec<Id>, Vec<f64>, usize, usize) {
+/// Every room comes in called `name`. Where the caller says none, a room takes the name the survey writes inside it,
+/// because that is why a surveyor writes it there, and the project's own word for a room where the survey writes
+/// nothing. Which survey: `from` where the caller knows it, which is how Trace Walls names the rooms of a part it
+/// traced onto a level the drawing does not stand on; else the drawings under this level's own plan.
+fn fill_rooms(
+    s: &mut Session,
+    level: Guid,
+    name: Option<&str>,
+    from: Option<&crate::model::Underlay>,
+) -> (Vec<Id>, Vec<f64>, usize, usize) {
     let m = &s.model;
     let plain = name.map(str::to_string).unwrap_or_else(|| m.language.word("Room").to_string());
-    let said: Vec<(P2, f64, String)> = match name {
-        Some(_) => Vec::new(),
-        None => m
+    let said: Vec<(P2, f64, String)> = match (name, from) {
+        (Some(_), _) => Vec::new(),
+        (None, Some(u)) => crate::underlay::said(m, u),
+        (None, None) => m
             .elements
             .values()
             .filter_map(|e| match e {

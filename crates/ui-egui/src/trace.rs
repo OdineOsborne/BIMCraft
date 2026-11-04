@@ -271,8 +271,8 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
     let phase_options: Vec<String> = std::iter::once(none.clone()).chain(m.phases.iter().cloned()).collect();
     let mut drop: Option<usize> = None;
     ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
-        Grid::new("trace-parts").num_columns(5).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
-            for label in ["Name", "What it is", "Level", "Phase"] {
+        Grid::new("trace-parts").num_columns(6).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
+            for label in ["Name", "What it is", "Level", "Phase", "Heights"] {
                 ui.label(RichText::new(t(label)).color(pal().muted));
             }
             ui.label("");
@@ -301,6 +301,26 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
                 if let Some(picked) = phase_combo(ui, (d.underlay, &format!("phase {salt}")), named("Phase"), &now, &phase_options) {
                     part.phase = (picked != none).then_some(picked);
                     changed = true;
+                }
+                // What an elevation writes about how high things are, and whether its marks bear one another out:
+                // an area that holds two views of the building holds two datums, and the marks say so.
+                match part.kind {
+                    PartKind::Plan => {
+                        ui.label("");
+                    }
+                    _ => {
+                        let read = bimcraft_core::underlay::heights(m, u, part.region);
+                        let said = match (read.marks.len(), read.worst <= bimcraft_core::underlay::HEIGHTS_AGREE) {
+                            (0, _) => t("None written").to_string(),
+                            (n, true) => tf("{} heights, within {} mm", &[&n.to_string(), &format!("{:.0}", read.worst)]),
+                            (n, false) => tf("{} heights, {} mm apart", &[&n.to_string(), &format!("{:.0}", read.worst)]),
+                        };
+                        let colour = match read.worst <= bimcraft_core::underlay::HEIGHTS_AGREE {
+                            true => pal().muted,
+                            false => pal().error,
+                        };
+                        ui.label(RichText::new(said).color(colour));
+                    }
                 }
                 if ui.button(t("Remove")).clicked() {
                     drop = Some(i);

@@ -465,6 +465,38 @@ lines like any others, and the clusters the shapes fall into are not sheets eith
 are one cluster as readily as two). A wrong guess would silently trace half a building, so the user draws the area —
 which they can see — and the drawing only names it.
 
+A room takes the name the survey writes inside it, and which survey that is depends on who is asking. `place_rooms`
+takes the drawings under the plan it is filling, as it always has. Trace Walls takes **the drawing it has just
+traced**, wherever that drawing stands: a part traced onto a floor of its own is a plan of that floor, though the
+file itself is linked under one level only. Without that, the basement of a sheet set comes in as `Locale 4` and
+`Locale 5` while the ground floor comes in as `CANTINA` and `SOGGIORNO/CUCINA`, which is how this was found.
+
+## The heights an elevation writes
+
+A plan says nothing about how high anything is; the elevation beside it says it all, and says it in writing. An
+Italian survey marks its heights in metres against the lines it measures — `69.80`, `69.85`, `70.10`, each with
+its own little triangle on the line — and those marks are words like any other, so they can be read
+(`underlay::heights`, `cad_heights {"part": …}`).
+
+The reading rests on one number. Within one view, the drawing is to scale in both directions, so every mark says the
+same thing: `height_mm = y + datum`. Each mark puts that datum somewhere, the middle one of them is taken (the
+median, which one mark read wrong cannot drag off as a mean would), and every mark is then held against it and
+reported with how far `out` it is. That is the whole of the check, and it is worth more than the reading: the marks
+of one view agree to a centimetre or two, because they were written against lines drawn to scale, and nothing else in
+a drawing does.
+
+Measured on the permesso di costruire: its SEZIONE A-A writes three heights, 69.70, 69.85 and 70.10, and they put the
+datum within **13.5 mm** of one another — on marks written to the centimetre and placed against their lines by eye.
+Asked instead for a region holding all three views of that sheet at once, the same reading comes back **29 metres**
+out, because the same height is written again 29 m away in another view. So the check catches the one mistake this
+invites, which is drawing the area too big, and says it in metres rather than quietly averaging three datums into a
+fourth that is none of them.
+
+What is a height and what is not: a word is a height where it reads as a number with its decimals (`69.80`, `70,10`,
+`+3.20`), which is how a height is written and how a door number, a room number and an area with its unit are not.
+`HEIGHTS_AGREE` is 50 mm, which is wider than a mark written to the centimetre and placed by eye, and narrower than
+one storey's mark read as another's.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
