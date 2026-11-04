@@ -547,6 +547,8 @@ pub struct BimApp {
     purge_dialog: Option<purge::PurgeDialog>,
     /// Trace Walls, while it's open: the drawing it reads and what it found in it.
     trace_dialog: Option<trace::TraceDialog>,
+    /// Link CAD's question, while a drawing waits on the scale to come in at.
+    cad_scale: Option<links::CadScale>,
     /// Manage > Select by ID and IDs of Selection, while open.
     select_by_id: Option<inquiry::SelectById>,
     ids_of_selection: Option<inquiry::IdsOfSelection>,
@@ -894,6 +896,7 @@ impl BimApp {
             price_dialog: None,
             purge_dialog: None,
             trace_dialog: None,
+            cad_scale: None,
             select_by_id: None,
             ids_of_selection: None,
             copied: None,
@@ -3673,6 +3676,7 @@ impl BimApp {
         self.price_window(ctx);
         self.purge_window(ctx);
         self.trace_window(ctx);
+        self.cad_scale_window(ctx);
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);
         }

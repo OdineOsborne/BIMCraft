@@ -100,6 +100,31 @@ fn with_no_drawing_under_the_plan_it_says_so_and_opens_nothing() {
 }
 
 #[test]
+fn a_plan_cropped_to_one_sheet_traces_that_sheet_and_not_the_rest_of_the_file() {
+    // What a survey saved as a set of sheets is: the plan, and a hundred metres away the elevation, whose lines
+    // pair as a wall's faces do.
+    let mut lines = one_room("MURI");
+    lines.extend(room("PROSPETTO", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let mut h = linked(&lines, None);
+    shortcut(&mut h, "TW");
+    // With the plan uncropped there is nothing to look inside, so the window says what to do and reads the lot.
+    assert!(h.query_by_label("Only inside the plan's crop").is_some(), "the window offers it");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.only_crop), Some(false));
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(8), "both sheets");
+    press(&mut h, "Close window");
+    // Cropped to the plan, it traces what is inside the crop and nothing else.
+    let level = h.state().plan_level().expect("a plan");
+    let region = json!({"view": level, "region": [[-1000.0, -1000.0], [9000.0, 7000.0]]});
+    h.state_mut().session.execute("crop", &region).expect("it crops");
+    h.run();
+    shortcut(&mut h, "TW");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.only_crop), Some(true), "a cropped plan is what to trace");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the sheet in the crop and no other");
+}
+
+#[test]
 fn find_says_what_it_found_and_draws_it_and_nothing_is_built_until_build() {
     let mut h = linked(&one_room("MURI"), None);
     shortcut(&mut h, "TW");
@@ -286,6 +311,53 @@ fn a_drawing_that_measures_on_itself_says_what_scale_to_link_it_with() {
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(0));
     assert!(says(&h, "drawn at a scale of 1000"), "its own measurements say what to link it with");
     assert!(!says(&h, "The longest line in it is"), "and the sign a drawing with no measurement goes by is not shown");
+}
+
+#[test]
+fn link_cad_asks_at_which_scale_a_drawing_comes_in_before_it_comes_in_at_all() {
+    // The same room in metres in a file that says millimetres, with the survey's own measurement over its long side.
+    let small: Vec<(String, [f64; 4])> =
+        one_room("MURI").into_iter().map(|(l, [a, b, c, d])| (l, [a / 1000.0, b / 1000.0, c / 1000.0, d / 1000.0])).collect();
+    let measure = "0
+DIMENSION
+8
+QUOTE
+70
+32
+10
+4
+20
+-1
+13
+0
+23
+0
+14
+8
+24
+0
+50
+0
+1
+800
+";
+    let path = drawing_with(&small, measure);
+    let mut h = app("");
+    let level = h.state().plan_level().map(serde_json::Value::from);
+    // What Link CAD does once the file is picked: it reads it, and asks rather than bringing it in.
+    let read = h.state_mut().session.execute("dxf", &json!({"path": path})).expect("it reads");
+    let measured = read["measures"]["scale_says"][0].as_f64().expect("its measurements say a scale");
+    let declares = read["scale"].as_f64().unwrap_or(1.0);
+    h.state_mut().cad_scale = Some(crate::links::CadScale { path: path.clone(), level, declares, says: measured });
+    h.run();
+    assert!(says(&h, "drawn at a scale of 1000"), "the question says what the drawing measures");
+    assert!(ids(&h, "underlay").is_empty(), "and nothing has come in while it is asked");
+    // Answered, the drawing comes in at that scale, with one command, so one undo takes it back out.
+    press(&mut h, "Bring it in at 1000");
+    assert_eq!(ids(&h, "underlay").len(), 1, "{}", h.state().status.text);
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "and it traces as a drawing in metres");
 }
 
 #[test]

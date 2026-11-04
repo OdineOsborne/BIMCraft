@@ -188,6 +188,16 @@ twice over: a piece is turned where the underlay stands only when the box round 
 and at most `MAX_UNDERLAY` pieces are taken. Measured on 50,000 lines (`underlay_snap_speed`, ignored like the other
 measurements): the file reads in about 45 ms and a snap takes about 0.2 ms, against a frame's 16.
 
+**Which file, and at what scale.** The window takes a DXF and, where the build has what turns one into the other, a
+DWG (`Session::dwg`, `crates/dwg`): the file picker offers both, and a DWG becomes DXF bytes on the way in. The scale
+is asked for before anything comes in, and only when there is a reason to ask: Link CAD reads the file first with the
+`dxf` command, which changes nothing, and where that comes back with `measures.scale_says` — the drawing measuring
+on itself and saying it is not in the units its file declares — a small window says both numbers and offers
+either. Whichever is pressed brings the drawing in with one `underlay` command, so one undo step takes it back out,
+and Cancel brings in nothing. Where the drawing's measurements hold up, or it has none, nothing is asked and it comes
+in as the file says. This is why the scale is a question and not a correction: a drawing that comes in a hand's width
+across is unusable, and a scale changed behind the user's back is worse.
+
 ## The phases a survey already carries
 
 A survey is drawn in layers that say what each line is of the project's history — `Stato di fatto`, `Demolizioni`,
@@ -401,6 +411,32 @@ more than keeping it whole.
 What is left on that plan is `open_up`'s 150 ms, which is `glazed` asking the squares once for every opening it
 finds, over walls that are by then as long as the plan.
 
+## One sheet at a time
+
+A survey is rarely one plan in a file. The one this was written against next, a `permesso di costruire` as it was
+issued (`Elaborati Grafici Asborno PDC Rilasciato.dwg`, AutoCAD 2004, 1.1 MB, 8,290 shapes on 21 layers), holds the
+whole set of sheets side by side in model space: 521 m across and 1,889 m from the first to the last, with the plans,
+the elevations, the sections, the site plan and the points the surveyor took by GPS all in the one drawing.
+
+Everything above then works against itself, because **an elevation's lines pair as a wall's faces do**. A window drawn
+in elevation is two uprights the width of the window apart; a storey's floor and ceiling lines are parallel and a
+storey apart; a section is a plan stood on its side. Traced whole, that file gives 729 walls, 127 doors and 42 windows
+from 4,773 faces — and in the one sheet looked at closely, of the 45 openings found, 19 are in the two plans and 26
+are in the four elevations and the section. More than half of what it finds is drawn in a view that has no walls in it
+at all. Nor is any of it reachable by turning layers off: the plans and the elevations of one sheet are drawn on the
+same layers, because they are one drawing.
+
+So `region` says where to look: `[[x, y], [x, y]]`, the south-west corner and the north-east, and a run of the drawing
+with an end outside it is left out whole (`How::within`, `How::holds`). Both ends, not one, and no clipping: a line
+that leaves the area belongs to what is drawn beside it, and half a wall at the edge of the area is worse than none.
+Draw the area a little wider than the plan. Everything the answer reports is then of what was read inside it,
+`longest` included, so the measure of the drawing is the measure of the sheet being traced.
+
+The rule it rests on is the user's eye and not a heuristic. Finding the sheets in a file automatically — by the frames
+drawn round them, by the clusters the shapes fall into — was not done: a sheet set has no mark in a DXF that says so,
+the frames are lines like any others, and a wrong guess would silently trace half a building. What the user does is
+crop the plan to the sheet, which they can see.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -458,8 +494,13 @@ is not drawn is not traced either, which is how a surveyor's own layers — leve
 out of the walls.
 
 **Walls** is what to look for (`How`, as above), whether to find the openings as well, whether to take the lines that
-stand alone too, whether to place the rooms too, the wall type every wall is to
-come in as or `By thickness`, and two buttons. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
+stand alone too, whether to read only inside the plan's crop, whether to place the rooms too, the wall type every wall is to
+come in as or `By thickness`, and two buttons. **Only inside the plan's crop** is how a file of sheets is traced one
+sheet at a time: crop the plan around the sheet (Crop View, dragging the grips on its edges) and the crop's corners go
+to `trace_walls` as `region`. It is ticked already where the plan was cropped before the window was opened, because a
+plan cropped before tracing was cropped to what is to be traced, and it is greyed where the plan has no crop, with the
+hover saying what to do — and if the crop is taken off while the window stands open it unticks itself, so the button
+never reads the whole file when it says it is reading a part. **Find** runs `trace_walls` with `preview`: it builds nothing, says how
 much it found of what thickness, type and phase, how many doors and windows, and how many lines it left out for
 meeting no wall of the building, and draws it all over the plan — each
 wall a band as thick as it measured with its axis down it, each opening a lighter stretch of that band, with a line

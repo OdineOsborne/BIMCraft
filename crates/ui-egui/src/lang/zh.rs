@@ -1672,6 +1672,18 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["{} {} and {} {}.", "{} {}，{} {}。"],
     ["{} openings stood higher than the wall they are in and were left out.", "{} 个洞口高过所在的墙，已被略去。"],
     ["Take the lines that stand alone too", "连独自存在的线也一并取用"],
+    [
+        "This drawing's file says a unit of it is {} mm, and the measurements written on it say it is drawn at a scale of {}.",
+        "该图纸的文件称其一个单位为 {} 毫米，而图上标注的尺寸说它的绘制比例是 {}。",
+    ],
+    [
+        "Brought in as the file says, a survey drawn in metres is a hand's width across and nothing in it is as thick as a wall.",
+        "按文件所述引入时，以米绘制的测绘图只有一掌宽，其中没有任何东西厚得像墙。",
+    ],
+    ["Bring it in at {}", "以 {} 引入"],
+    ["Bring it in at {}, as the file says", "按文件所述以 {} 引入"],
+    ["Only inside the plan's crop", "仅在平面图裁剪框内"],
+    ["Crop the plan to the part of the drawing to trace, and only that part is read.", "将平面图裁剪到要描绘的图形部分，仅读取该部分。"],
     ["Place the rooms too", "同时放置房间"],
     ["Place Rooms", "放置房间"],
     [

@@ -182,7 +182,7 @@ pub static ALL: &[Command] = &[
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
         // open (`LC` for Link CAD), and nothing in the window traces a drawing yet.
         &[],
-        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, rooms?, preview?} the walls of the \
+        "{underlay?, type?, level?, height?, top_level?, thin?, thick?, shortest?, skew?, region?, rooms?, preview?} the walls \
          drawing under a plan, built. A survey draws a wall as its two faces, so a pair of lines running alongside one \
          another a wall\'s thickness apart is a wall: one wall is built down the middle of each pair, as thick as the \
          pair measured. `underlay` is which drawing to read (the only one there is, unless there are several); the \
@@ -209,6 +209,10 @@ pub static ALL: &[Command] = &[
          boundary of the plot, the kerb of the road, the lines the surveyor took his levels along \u{2014} and a wall \
          of a building meets another wall, so a wall that meets none of the others is left out and counted in \
          `alone`; `alone: true` takes them as well, for a survey of a garden wall or a boundary to be built. \
+         `region` [[x, y], [x, y]] is the area to look in, its south-west corner and its north-east, and nothing \
+         outside it is read: a survey is often saved as a whole set of sheets side by side in one file, and an \
+         elevation's lines pair as a wall's faces do, so one plan of it is traced at a time. A line with an end \
+         outside the area is left out of it whole, so draw the area a little wider than the plan. \
          `rooms` places a room in every area the walls it built shut in, as Place Rooms Automatically does, and \
          says how many in `rooms` and what they measure together in `room_area_m2`. `preview` \
          finds and reports and builds nothing, and says in `holes` where each opening runs ({kind, width, \
@@ -2150,6 +2154,14 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         alone: match p.get("alone") {
             v if absent(v) => was.alone,
             _ => flag(c, p, "alone")?,
+        },
+        // A survey saved as a whole set of sheets in one file is traced a sheet at a time.
+        within: match p.get("region") {
+            v if absent(v) => None,
+            _ => match points(c, p, "region")?.as_slice() {
+                [sw, ne] => Some((*sw, *ne)),
+                _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
+            },
         },
     };
     let rooms = match p.get("rooms") {

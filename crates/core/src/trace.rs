@@ -124,13 +124,17 @@ pub struct How {
     /// Whether to take the walls that stand alone too: a line that meets no wall of the building is the land around
     /// it, so they are left out, and a survey of a garden wall or a boundary to be built asks for them back.
     pub alone: bool,
+    /// The area to look in, its south-west corner and its north-east, or none for the whole drawing. A survey is
+    /// often saved as a whole set of sheets side by side in one file — the plans, the elevations, the sections, the
+    /// land around — and an elevation's lines pair as a wall's faces do, so what is traced is said a sheet at a time.
+    pub within: Option<(P2, P2)>,
 }
 
 impl Default for How {
     /// What a building is drawn with: walls from a 60 mm lining to an 800 mm stone wall, nothing shorter than a
     /// doorway's width, drawn square to a couple of degrees.
     fn default() -> How {
-        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0, openings: true, alone: false }
+        How { thin: 60.0, thick: 800.0, shortest: 400.0, skew: 2.0, openings: true, alone: false, within: None }
     }
 }
 
@@ -138,7 +142,7 @@ impl How {
     /// Itself, where a drawing could be read with it; else what is wrong with it. Numbers come from the user, so one
     /// that is no measure of a wall is refused here rather than finding everything or nothing further down.
     fn checked(&self) -> Result<How, String> {
-        let How { thin, thick, shortest, skew, openings: _, alone: _ } = *self;
+        let How { thin, thick, shortest, skew, openings: _, alone: _, within } = *self;
         if ![thin, thick, shortest, skew].iter().all(|v| v.is_finite()) {
             return Err("every measure of a wall must be a number".into());
         }
@@ -151,7 +155,26 @@ impl How {
         if !(0.0..=45.0).contains(&skew) {
             return Err(format!("`skew` is how many degrees out of parallel a wall's faces may be, 0 to 45, not {skew}"));
         }
+        if let Some((sw, ne)) = within {
+            if ![sw.0, sw.1, ne.0, ne.1].iter().all(|v| v.is_finite()) {
+                return Err("the area to look in is two corners, and a corner is two numbers".into());
+            }
+            if ne.0 <= sw.0 || ne.1 <= sw.1 {
+                return Err(format!(
+                    "the area to look in is its south-west corner and then its north-east, and {sw:?} to {ne:?} has \
+                     no room between them"
+                ));
+            }
+        }
         Ok(*self)
+    }
+
+    /// Whether a run of the drawing is in the area asked for: both its ends are, so a line that leaves the area
+    /// belongs to what is drawn beside it and never leaves half a wall at the edge.
+    fn holds(&self, a: P2, b: P2) -> bool {
+        let Some((sw, ne)) = self.within else { return true };
+        let inside = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
+        inside(a) && inside(b)
     }
 
     /// How far out of true the same wall may be drawn and still be itself: a tenth of what is measured, and never
@@ -251,7 +274,7 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
             .chain(close);
         for (a, b) in runs {
             let len = a.dist(b);
-            if !len.is_finite() {
+            if !len.is_finite() || !how.holds(a, b) {
                 continue;
             }
             longest = longest.max(len);
@@ -1632,6 +1655,43 @@ mod tests {
         assert!((one.length() - 6000.0).abs() < 1e-6, "{}", one.length());
         let [hole] = &r.holes[..] else { panic!("the opening the frame fills, not {}", r.holes.len()) };
         assert!((hole.width - 800.0).abs() < 1e-6, "{}", hole.width);
+    }
+
+    #[test]
+    fn a_drawing_that_holds_a_whole_set_of_sheets_is_traced_one_sheet_at_a_time() {
+        // What a set of sheets in one file is: the same plan drawn twice, a hundred metres apart.
+        let here = room([0.0, 0.0, 5000.0, 4000.0], 300.0);
+        let there: Vec<(&str, [f64; 4])> = room([100_000.0, 0.0, 105_000.0, 4000.0], 300.0).into_iter().collect();
+        let lines: Vec<(&str, [f64; 4])> = here.into_iter().chain(there).collect();
+        assert_eq!(found(&lines).len(), 8, "both of them, with nothing said about where to look");
+        let (m, u) = with(&lines);
+        let how = How { within: Some((P2(-1000.0, -1000.0), P2(6000.0, 5000.0))), ..How::default() };
+        let walls = read(&m, &u, &how).expect("it reads").walls;
+        assert_eq!(walls.len(), 4, "the sheet asked for and no other: {walls:?}");
+        assert!(walls.iter().all(|w| w.start.0 < 6000.0 && w.end.0 < 6000.0), "{walls:?}");
+    }
+
+    #[test]
+    fn a_line_that_leaves_the_area_is_no_line_of_what_is_in_it() {
+        // The pair of lines the surveyor took his levels along runs through the plan and out the other side. Within
+        // the area they are a wall four metres long, and they are not the building's.
+        let mut lines = room([0.0, 0.0, 5000.0, 4000.0], 300.0);
+        lines.push(("T", [-50_000.0, 1000.0, 50_000.0, 1000.0]));
+        lines.push(("T", [-50_000.0, 1300.0, 50_000.0, 1300.0]));
+        let (m, u) = with(&lines);
+        let how = How { within: Some((P2(-1000.0, -1000.0), P2(6000.0, 5000.0))), ..How::default() };
+        let r = read(&m, &u, &how).expect("it reads");
+        assert_eq!(r.walls.len(), 4, "{:?}", r.walls);
+        assert!(r.longest <= 5000.0, "the longest line is the longest of what was read: {}", r.longest);
+    }
+
+    #[test]
+    fn an_area_with_no_room_in_it_is_refused() {
+        let (m, u) = with(&[("A", [0.0, 0.0, 5000.0, 0.0])]);
+        for within in [(P2(6000.0, 0.0), P2(0.0, 4000.0)), (P2(0.0, 0.0), P2(0.0, 4000.0)), (P2(f64::NAN, 0.0), P2(6000.0, 4000.0))] {
+            let how = How { within: Some(within), ..How::default() };
+            assert!(read(&m, &u, &how).is_err(), "{within:?}");
+        }
     }
 
     #[test]

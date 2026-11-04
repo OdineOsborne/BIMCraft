@@ -52,6 +52,11 @@ pub(crate) struct TraceDialog {
     pub(crate) how: How,
     /// Whether to place a room in every area the walls shut in, once they are built.
     pub(crate) rooms: bool,
+    /// Whether to look only inside the plan's crop region: a drawing that holds a whole set of sheets side by side
+    /// is traced one sheet at a time, and the crop is how the user says which one.
+    pub(crate) only_crop: bool,
+    /// The crop region of the plan on screen as it stands this frame, or none where it is not cropped.
+    pub(crate) crop: Option<[P2; 2]>,
     pub(crate) kind: Option<String>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
@@ -73,6 +78,9 @@ impl TraceDialog {
         });
         if let Some(kind) = &self.kind {
             p["type"] = json!(kind);
+        }
+        if let (true, Some([sw, ne])) = (self.only_crop, self.crop) {
+            p["region"] = json!([[sw.0, sw.1], [ne.0, ne.1]]);
         }
         match preview {
             // A Find builds nothing, so it places no rooms either: the rooms are of the walls, not of the drawing.
@@ -224,6 +232,15 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     // A survey draws the land around the building as well, and its lines pair as a wall's faces do: the boundary of
     // the plot, the kerb of the road. What tells them apart is that they meet no wall of the building.
     changed |= ui.checkbox(&mut d.how.alone, t("Take the lines that stand alone too")).changed();
+    // A drawing that holds a whole set of sheets side by side is traced one sheet at a time, and the plan's crop
+    // region is how the user says which: an elevation's lines pair as a wall's faces do, so a file of sheets gives
+    // as many walls again as the building has.
+    let cropped = d.crop.is_some();
+    let only = ui.add_enabled(cropped, egui::Checkbox::new(&mut d.only_crop, t("Only inside the plan's crop")));
+    changed |= only.changed();
+    if !cropped {
+        only.on_hover_text(t("Crop the plan to the part of the drawing to trace, and only that part is read."));
+    }
     // The rooms are of the walls and not of the drawing, so asking for them changes nothing a Find would find.
     ui.checkbox(&mut d.rooms, t("Place the rooms too"));
     ui.add_space(6.0);
@@ -365,13 +382,31 @@ impl BimApp {
         };
         let how = How::default();
         let (found, holes) = (Vec::new(), Vec::new());
-        let dialog = TraceDialog { underlay, tab: 1, how, rooms: false, kind: None, found, holes, report: None, error: String::new() };
+        // A plan cropped before the window was opened was cropped to what is to be traced.
+        let crop = self.plan_key().and_then(|key| bimcraft_core::render::crop_region(&self.session.model, key));
+        let dialog = TraceDialog {
+            underlay,
+            tab: 1,
+            how,
+            rooms: false,
+            only_crop: crop.is_some(),
+            crop,
+            kind: None,
+            found,
+            holes,
+            report: None,
+            error: String::new(),
+        };
         self.trace_dialog = Some(dialog);
     }
 
     pub(crate) fn trace_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.trace_dialog.take() else { return };
         let model = Arc::clone(&self.session.model);
+        // The plan may have been cropped, or uncropped, since the last frame; with no crop there is nothing to look
+        // inside, so the window stops offering it.
+        d.crop = self.plan_key().and_then(|key| bimcraft_core::render::crop_region(&model, key));
+        d.only_crop &= d.crop.is_some();
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);

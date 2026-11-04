@@ -75,6 +75,26 @@ fn linked_with_blocks(lines: &[(String, [f64; 4])], blocks: &str, puts: &str) ->
 }
 
 #[test]
+fn a_drawing_of_many_sheets_is_traced_inside_the_area_asked_for_and_nowhere_else() {
+    // A survey saved as a set of sheets in one file: the plan, and a hundred metres away the elevation, whose lines
+    // pair as a wall's faces do.
+    let mut lines = room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    lines.extend(room("PROSPETTO", [100_000.0, 0.0, 108_000.0, 6000.0], 300.0));
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(out["walls"], json!(8), "the whole file, with no area asked for: {out}");
+    let mut s = linked(&lines);
+    let out = run(&mut s, "trace_walls", json!({"region": [[-1000.0, -1000.0], [9000.0, 7000.0]]})).expect("it traces");
+    assert_eq!(out["walls"], json!(4), "the plan and not the elevation: {out}");
+    assert!(walls(&s).iter().all(|w| w.start.0 < 9000.0 && w.end.0 < 9000.0), "every wall is in the area");
+    // An area is two corners with room between them, and one that is neither is refused rather than finding nothing.
+    for bad in [json!([[9000.0, 7000.0], [-1000.0, -1000.0]]), json!([[0.0, 0.0]]), json!("the plan")] {
+        let mut s = linked(&lines);
+        assert!(run(&mut s, "trace_walls", json!({"region": bad})).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn a_room_drawn_as_the_two_faces_of_its_walls_becomes_four_walls_that_meet_at_its_corners() {
     let mut s = linked(&room("MURI", [0.0, 0.0, 8000.0, 6000.0], 300.0));
     let out = run(&mut s, "trace_walls", json!({})).expect("it traces");

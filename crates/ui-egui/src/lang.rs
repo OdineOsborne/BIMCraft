@@ -2733,6 +2733,24 @@ const WORDS: &[[&str; 3]] = &[
         "{} vanos quedaban más altos que el muro en que están y se dejaron fuera.",
     ],
     ["Take the lines that stand alone too", "Pegar também as linhas que ficam sozinhas", "Tomar también las líneas que quedan solas"],
+    [
+        "This drawing's file says a unit of it is {} mm, and the measurements written on it say it is drawn at a scale of {}.",
+        "O ficheiro deste desenho diz que uma unidade dele é {} mm, e as medidas nele escritas dizem que está desenhado à escala de {}.",
+        "El archivo de este dibujo dice que una unidad suya es {} mm, y las medidas escritas en él dicen que está dibujado a una escala de {}.",
+    ],
+    [
+        "Brought in as the file says, a survey drawn in metres is a hand's width across and nothing in it is as thick as a wall.",
+        "Trazido como o ficheiro diz, um levantamento desenhado em metros tem a largura de uma mão e nada nele é tão espesso como uma parede.",
+        "Traído como dice el archivo, un levantamiento dibujado en metros mide el ancho de una mano y nada en él es tan grueso como un muro.",
+    ],
+    ["Bring it in at {}", "Trazer à escala {}", "Traerlo a escala {}"],
+    ["Bring it in at {}, as the file says", "Trazer à escala {}, como diz o ficheiro", "Traerlo a escala {}, como dice el archivo"],
+    ["Only inside the plan's crop", "Apenas dentro do recorte da planta", "Sólo dentro del recorte de la planta"],
+    [
+        "Crop the plan to the part of the drawing to trace, and only that part is read.",
+        "Recorte a planta na parte do desenho a traçar, e só essa parte é lida.",
+        "Recorta la planta en la parte del dibujo a trazar, y sólo esa parte se lee.",
+    ],
     ["Place the rooms too", "Colocar também os ambientes", "Colocar también los recintos"],
     ["Place Rooms", "Colocar ambientes", "Colocar recintos"],
     [
