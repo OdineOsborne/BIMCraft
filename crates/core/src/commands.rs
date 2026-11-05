@@ -202,7 +202,11 @@ pub static ALL: &[Command] = &[
          is that one number, the millimetres to add to a point in the project to get the height it stands at, and \
          `worst` and `agree` are how well the marks bear one another out: a mark far out is one read as something it \
          is not, or a drawing not drawn to its own heights, and it is said rather than averaged away. A word with no \
-         decimals is no height (a door number, a room number), and a drawing that writes none says nothing",
+         decimals is no height (a door number, a room number), and a drawing that writes none says nothing. \
+         `courses` is the other half of what it says: the heights it draws a line across at, which is what a floor, \
+         a ceiling and the ground are, the most drawn first and at most 16 of them, each with how much line is \
+         drawn at it (`span`), where it stands in the project (`y`) and what `height` that is where the marks said. \
+         A section marks only the heights the draughtsman thought to mark, and draws every one of them",
         cad_heights,
     ),
     edit(
@@ -2204,6 +2208,10 @@ fn part_of(c: &str, u: &crate::model::Underlay, name: &str) -> Result<crate::mod
     }
 }
 
+/// How many heights a drawing draws across at are worth reporting: the floors, the ceilings, the ground and the
+/// roof of a storey or three, and not every sill in the facade.
+const MOST_COURSES: usize = 16;
+
 fn cad_heights(s: &mut Session, p: &Value) -> R {
     let c = "cad_heights";
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
@@ -2223,6 +2231,12 @@ fn cad_heights(s: &mut Session, p: &Value) -> R {
             })
         })
         .collect();
+    // The heights it draws lines across at, which are the floors themselves: a section marks only the ones the
+    // draughtsman thought to mark, and draws every one of them.
+    let courses: Vec<Value> = crate::underlay::courses(&s.model, &u, part.region, read.datum, MOST_COURSES)
+        .iter()
+        .map(|course| json!({"height": course.height.map(hundredth), "y": hundredth(course.y), "span": hundredth(course.span)}))
+        .collect();
     Ok(json!({
         "id": id,
         "part": part.name,
@@ -2231,6 +2245,7 @@ fn cad_heights(s: &mut Session, p: &Value) -> R {
         "datum": read.datum.map(hundredth),
         "worst": hundredth(read.worst),
         "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+        "courses": courses,
     }))
 }
 

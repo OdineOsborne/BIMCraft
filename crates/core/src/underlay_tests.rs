@@ -85,6 +85,22 @@ fn a_part_of_a_drawing_is_named_by_what_the_survey_writes_under_it() {
     assert_eq!(caption([P2(1100.0, 500.0), P2(5000.0, 3000.0)]).as_deref(), Some("CAMERA"), "the lowest of two as large");
 }
 
+/// A DXF of the lines given, each on the layer it names, in a folder of this call's own; its path.
+fn drawing_lines(lines: &[(String, [f64; 4])]) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-courses-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sezione.dxf");
+    let mut text = String::from("0\nSECTION\n2\nENTITIES\n");
+    for (layer, [x0, y0, x1, y1]) in lines {
+        text.push_str(&format!("0\nLINE\n8\n{layer}\n10\n{x0}\n20\n{y0}\n11\n{x1}\n21\n{y1}\n"));
+    }
+    text.push_str("0\nENDSEC\n0\nEOF\n");
+    std::fs::write(&path, text).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
 /// A drawing of `words`, each {layer, x, y, height, text}, under a plan; the session and the drawing it holds.
 fn written(words: &[(&str, f64, f64, f64, &str)]) -> (Session, crate::model::Underlay) {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -141,6 +157,45 @@ fn the_heights_an_elevation_writes_are_read_and_held_against_one_another() {
     // A drawing with nothing written in it says nothing about how high anything is.
     let (s, u) = written(&[("TESTO", 0.0, 0.0, 250.0, "PROSPETTO SUD")]);
     assert_eq!(crate::underlay::heights(&s.model, &u, whole), crate::underlay::Heights::default());
+}
+
+#[test]
+fn the_heights_a_section_draws_lines_across_at_are_read_with_how_much_is_drawn_at_each() {
+    // A section: the ground, a floor 2.7 m up and the one above it, each drawn right across; a window sill a metre
+    // of line long; a tick too short to be a height of its own; and a roof's pitch, which is level nowhere.
+    let mut lines: Vec<(String, [f64; 4])> = vec![
+        ("SEZIONE".into(), [0.0, 0.0, 9000.0, 0.0]),
+        ("SEZIONE".into(), [0.0, 2700.0, 9000.0, 2700.0]),
+        // The floor above, drawn in two pieces as a drawing breaks a line, and 4 mm off level: one height, not two.
+        ("SEZIONE".into(), [0.0, 5400.0, 4000.0, 5400.0]),
+        ("SEZIONE".into(), [4000.0, 5404.0, 9000.0, 5404.0]),
+        ("SEZIONE".into(), [2000.0, 1500.0, 3200.0, 1500.0]),
+        ("SEZIONE".into(), [1000.0, 900.0, 1200.0, 900.0]),
+        ("SEZIONE".into(), [0.0, 5400.0, 4500.0, 7000.0]),
+    ];
+    lines.push(("QUOTE".into(), [0.0, 0.0, 0.0, 0.0]));
+    lines.pop();
+    let path = drawing_lines(&lines);
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let u = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    let whole = [P2(-1000.0, -1000.0), P2(10_000.0, 10_000.0)];
+    let found = crate::underlay::courses(&s.model, &u, whole, Some(69_700.0), 16);
+    let at: Vec<(f64, f64)> = found.iter().map(|c| ((c.y / 10.0).round() * 10.0, (c.span / 100.0).round() * 100.0)).collect();
+    assert_eq!(at, vec![(0.0, 9000.0), (1500.0, 1200.0), (2700.0, 9000.0), (5400.0, 9000.0)], "{found:?}");
+    assert_eq!(found[2].height, Some(72_400.0), "the floor 2.7 m up, as the drawing writes heights");
+    // The most drawn first, where only so many are wanted: the floors before the window sill.
+    let few = crate::underlay::courses(&s.model, &u, whole, None, 3);
+    assert_eq!(few.iter().map(|c| (c.y / 10.0).round() * 10.0).collect::<Vec<_>>(), vec![0.0, 2700.0, 5400.0]);
+    assert!(few.iter().all(|c| c.height.is_none()), "no marks, no heights");
 }
 
 #[test]

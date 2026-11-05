@@ -181,6 +181,68 @@ pub fn heights(m: &Model, u: &Underlay, region: [P2; 2]) -> Heights {
     Heights { marks, datum, worst }
 }
 
+/// A height a drawing draws a line across at: in a section, a floor, a ceiling, the ground; in an elevation, the
+/// eaves and the top of a plinth. What makes one is how much is drawn at it, which is why `span` is reported and
+/// not thrown away — a floor runs the width of the building and a window sill runs the width of a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Course {
+    /// Where it is in the project, in millimetres.
+    pub y: f64,
+    /// What height that is, as the drawing writes heights, where its marks said: `y + datum`, in millimetres.
+    pub height: Option<f64>,
+    /// How much line is drawn at it, in millimetres, taking every piece together.
+    pub span: f64,
+}
+
+/// How far from level a line may be drawn and still be one: a drawing's floors are drawn flat, and a millimetre over
+/// a run is the rounding of the file and nothing else.
+const COURSE_FLAT: f64 = 1.0;
+
+/// How near two lines must be to be drawn at the same height: a floor drawn in two pieces is one height, and two
+/// floors are never a centimetre apart.
+const COURSE_SAME: f64 = 10.0;
+
+/// The shortest line that is a height of its own and not a tick, a hatch's stroke or a symbol's edge.
+const COURSE_SHORTEST: f64 = 500.0;
+
+/// The heights the drawing draws across inside `region`, the most drawn first and at most `most` of them, each with
+/// what height it is where `datum` says. A section says the heights it is drawn to twice over: in the marks it
+/// writes, which [`heights`] reads, and in the lines it draws, which are the floors themselves and are marked only
+/// where the draughtsman thought to.
+pub fn courses(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>, most: usize) -> Vec<Course> {
+    let [sw, ne] = region;
+    let inside = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
+    let mut at: std::collections::BTreeMap<i64, (f64, f64)> = std::collections::BTreeMap::new();
+    for (_, points, closed) in lines_by_layer(m, u) {
+        let close = match (closed, points.len() > 2, points.first(), points.last()) {
+            (true, true, Some(a), Some(b)) => Some((*b, *a)),
+            _ => None,
+        };
+        let runs = points
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] => Some((*a, *b)),
+                _ => None,
+            })
+            .chain(close);
+        for (a, b) in runs {
+            let len = (b.0 - a.0).abs();
+            if !inside(a) || !inside(b) || (a.1 - b.1).abs() > COURSE_FLAT || len < COURSE_SHORTEST || !len.is_finite() {
+                continue;
+            }
+            let y = (a.1 + b.1) / 2.0;
+            let key = (y / COURSE_SAME).round() as i64;
+            let held = at.entry(key).or_insert((y, 0.0));
+            held.1 += len;
+        }
+    }
+    let mut found: Vec<Course> = at.values().map(|(y, span)| Course { y: *y, height: datum.map(|d| y + d), span: *span }).collect();
+    found.sort_by(|a, b| b.span.total_cmp(&a.span));
+    found.truncate(most);
+    found.sort_by(|a, b| a.y.total_cmp(&b.y));
+    found
+}
+
 /// The measurements the underlay writes, each with the layer it is written on, as the strokes they are drawn with, in
 /// this project's millimetres: the two lines that take the measurement out from the points it was taken between, the
 /// line it is written along, a tick at each end of that line, and the figure itself in our own lettering.

@@ -492,6 +492,24 @@ out, because the same height is written again 29 m away in another view. So the 
 invites, which is drawing the area too big, and says it in metres rather than quietly averaging three datums into a
 fourth that is none of them.
 
+A section says its heights twice over, and the second saying is the one that is always there. It writes marks where
+the draughtsman thought to, and it draws a line at every floor, every ceiling and the ground whether or not anyone
+marked them, so `courses` reads those too: every run drawn level (within a millimetre) and long enough not to be a
+tick (500 mm), gathered by height to the centimetre, with how much line is drawn at each. What makes a height
+worth having is how much is drawn at it — a floor runs the width of the building and a window sill runs the width
+of a window — so they come back most-drawn first, at most sixteen of them, and the datum from the marks turns each
+into a height.
+
+On the permesso di costruire's SEZIONE A-A the most-drawn line is at **69.81 m with 11.8 m of line**, which is the
+ground floor; the marks written on the same section say **69.85**. Two readings that share nothing but the drawing
+agree to four centimetres. Above it a cluster at 72.5–72.96 is the eaves, which makes the storey about 3.15 m, and
+nothing in the drawing writes that number anywhere.
+
+It also shows where the region has to be tight. Asked for a region 17 m tall around that section, `courses` came
+back with lines at 80 m: the view above it, whose own marks were outside the region, so the marks agreed with one
+another and the lines were another drawing's. The marks check what the marks can check. The lines are read from
+wherever the region reaches, so the region is drawn around one view and no more.
+
 What is a height and what is not: a word is a height where it reads as a number with its decimals (`69.80`, `70,10`,
 `+3.20`), which is how a height is written and how a door number, a room number and an area with its unit are not.
 `HEIGHTS_AGREE` is 50 mm, which is wider than a mark written to the centimetre and placed by eye, and narrower than
