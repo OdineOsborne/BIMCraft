@@ -223,6 +223,44 @@ pub static ALL: &[Command] = &[
          draws each of them, which is how a reading is held against the drawing",
         cad_anchor,
     ),
+    other(
+        "cad_openings",
+        "CAD Openings",
+        "{underlay?, part, plan, floor?, storey?, slack?, depth?, thin?, thick?, shortest?, skew?} the sill and the \
+         head of every opening an elevation draws, read and reported without changing the project: the openings \
+         found in the plan `plan`, as Trace Walls finds them, each stood against the elevation `part` where its \
+         anchor says, and the lines the elevation draws of it. `part` is an elevation or a section that stands \
+         against its plan (`cad_anchor`), and `plan` is the plan the openings are found in. A line of the drawing \
+         is an opening's where it is drawn level, as wide as the opening to within a tenth of its width, and within \
+         `slack` of where the plan puts it along the face (by default the opening's own width, between 500 and 1500 \
+         mm, which is nearer than the next opening of a facade stands): so a sill and a lintel are its own, while \
+         the floor, the eaves and a string course, which run the width of the building, are not. `floor` is the \
+         height in millimetres the storey's floor stands at as the drawing writes heights (`cad_heights` reports it \
+         as a course), and with it an opening is read only between that floor and `storey` (3000 mm) above it, which \
+         is what keeps a dormer's window from being read as the ground floor's; a door, whose sill is the floor \
+         itself and which the elevation draws no line across the bottom of, takes its sill from `floor` as well. \
+         Each opening comes back in the order the elevation draws them, left to right: its `kind` and `width` as the \
+         plan has them, where it runs in the plan (`from`, `to`, `at`), the `band` of the elevation's own x the plan \
+         puts it in, how far `off` the face it is, the `lines` the elevation draws of it, its `sill` and `head` \
+         where the elevation's marks put them, how `high` it is between them, where `floor` was said how far \
+         `above` the floor its sill stands, `shift`, how far the lines lie from where the plan put them, and \
+         `on_plane`, whether it stands on the plane the rest of them agree on. An \
+         opening the elevation draws no two lines of keeps its `lines` and no sill or head: it is said and not \
+         invented, and `found` and `missed` are how many of each. An opening whose wall runs across the face rather \
+         than along it is on another side of the building, and is counted in `elsewhere` and left alone; `depth` \
+         leaves out as well anything standing farther than that behind the line the elevation was stood against, \
+         which by default nothing is, the two points being picked anywhere along the face. `plane` is the middle of \
+         how far behind that line the openings with a sill and a head stand, and `off_plane` how many of them stand \
+         off that plane — an opening of another plane of the facade, whose lines may be those of whatever stands in \
+         front of it. An opening that stands off that plane and that the elevation draws no line of is another wall \
+         of the building's, and is counted in `elsewhere` too; where nothing was found at all there is no plane to \
+         go by, and every opening is listed, which is what says the anchor itself may be wrong. `shift` is the \
+         middle of how far their lines lie from where the plan put them: one shift for all of them is an anchor \
+         picked that much off the face, and worth putting right. Returns `id`, `part`, \
+         `plan`, `datum`, `agree`, `along`, `openings`, `found`, `missed`, `elsewhere`, `plane`, `off_plane` and \
+         `shift`",
+        cad_openings,
+    ),
     edit(
         "trace_walls",
         "Trace Walls",
@@ -2349,6 +2387,219 @@ fn cad_heights(s: &mut Session, p: &Value) -> R {
         "worst": hundredth(read.worst),
         "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
         "courses": courses,
+    }))
+}
+
+/// How many degrees out of the face an opening's wall may run and still be on it: the two points an elevation stands
+/// by are picked off the drawing by eye, so a degree or two of it is the picking and not the building.
+const FACADE_SQUARE: f64 = 5.0;
+
+/// How far from the plane the openings agree on one of them may stand and still be on it: the wall is one wall, and
+/// its openings are drawn in its one face.
+const ONE_PLANE: f64 = 300.0;
+
+/// How tall a storey is taken to be, where the caller says the floor and not the storey: a storey of a house, floor
+/// to floor, which is as much as an opening of it can stand within.
+const ONE_STOREY: f64 = 3000.0;
+
+/// How far under its floor an opening of a storey may be drawn: a threshold is laid a step down, and no sill is.
+const STOREY_UNDER: f64 = 200.0;
+
+/// How far an opening may be matched from where the plan puts it, where the caller does not say: its own width,
+/// which is nearer than the next opening of a facade stands, held between these two.
+const SLACK_LEAST: f64 = 500.0;
+const SLACK_MOST: f64 = 1500.0;
+
+fn cad_openings(s: &mut Session, p: &Value) -> R {
+    let c = "cad_openings";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the openings off"))?;
+    let part = part_of(c, &u, &name)?;
+    if part.kind == crate::model::PartKind::Plan {
+        return Err(bad(c, format!("`{name}` is a plan: the sills and the heads are drawn by an elevation or a section, not by a plan")));
+    }
+    let Some(anchor) = part.anchor else {
+        return Err(bad(
+            c,
+            format!("`{name}` does not stand against its plan yet, so nothing says where it draws an opening: `cad_anchor` is what says"),
+        ));
+    };
+    let Some(along) = anchor.along() else {
+        return Err(bad(c, format!("`{name}` stands against the plan by one point twice, which says nothing of which way its face runs")));
+    };
+    let plan_name = string(c, p, "plan")?.ok_or_else(|| bad(c, "`plan` is which plan of the drawing the openings are found in"))?;
+    let plan = part_of(c, &u, &plan_name)?;
+    if plan.kind != crate::model::PartKind::Plan {
+        return Err(bad(c, format!("`{plan_name}` is {} and no plan: the openings are found in a plan", plan.kind.word())));
+    }
+    // How far off the line the elevation was stood against an opening may stand. Without it every wall that runs
+    // along the face is read: the two points are picked anywhere along the face, a terrace's corners as readily as
+    // the wall's, so how far an opening lies behind that line says nothing by itself. What says it is that the
+    // openings the elevation draws lines across stand on one plane, which is reported and not guessed at.
+    let depth = match p.get("depth") {
+        v if absent(v) => None,
+        _ => Some(num(c, p, "depth")?.unwrap_or_default()),
+    };
+    if let Some(depth) = depth
+        && (!depth.is_finite() || depth < 0.0)
+    {
+        return Err(bad(c, format!("`depth` is how far off the face an opening may stand, in mm, and {depth} is no distance")));
+    }
+    let floor = num(c, p, "floor")?;
+    let storey = num(c, p, "storey")?.unwrap_or(ONE_STOREY);
+    let slack = num(c, p, "slack")?;
+    // A floor is a height, and a drawing whose datum is its eaves writes the heights under it as it finds them; a
+    // storey and a slack are lengths, and no length is less than nothing.
+    if floor.is_some_and(|floor| !floor.is_finite()) {
+        return Err(bad(c, "`floor` is the height the storey's floor stands at, in mm, and that must be a number"));
+    }
+    for (key, said) in [("storey", Some(storey)), ("slack", slack)] {
+        if said.is_some_and(|said| !said.is_finite() || said < 0.0) {
+            return Err(bad(c, format!("`{key}` is a length in mm, and {} is none", said.unwrap_or_default())));
+        }
+    }
+    // The two heights an opening of this storey stands between, where the floor is known: a sill stands on the
+    // floor or above it, and the head of an opening of this storey is under the next storey's floor. Without them
+    // an elevation's every storey is read at once, and a dormer's window may be read as the ground floor's.
+    let between = floor.map(|floor| (floor - STOREY_UNDER, floor + storey));
+    let was = crate::trace::How::default();
+    let how = crate::trace::How {
+        thin: num(c, p, "thin")?.unwrap_or(was.thin),
+        thick: num(c, p, "thick")?.unwrap_or(was.thick),
+        shortest: num(c, p, "shortest")?.unwrap_or(was.shortest),
+        skew: num(c, p, "skew")?.unwrap_or(was.skew),
+        openings: true,
+        alone: false,
+        within: Some((plan.region[0], plan.region[1])),
+    };
+    let reading = crate::trace::read(&s.model, &u, &how).map_err(|e| bad(c, e))?;
+    // What the elevation says of how high things are: the one number that turns a point of it into a height.
+    let read = crate::underlay::heights(&s.model, &u, part.region);
+    // Every line the elevation draws level, read once: the drawing is walked for them, not for each opening.
+    let drawn = crate::underlay::drawn_lines(&s.model, &u, part.region, read.datum);
+    let square = FACADE_SQUARE.to_radians().sin();
+    let mut rows: Vec<(f64, f64, bool, Value)> = Vec::new();
+    let mut shifts: Vec<f64> = Vec::new();
+    let (mut found, mut missed, mut elsewhere) = (0usize, 0usize, 0usize);
+    for h in &reading.holes {
+        let Some(w) = reading.walls.get(h.wall) else { continue };
+        let dir = (w.end - w.start).unit();
+        let (from, to) = (w.start + dir * (h.at - h.width / 2.0), w.start + dir * (h.at + h.width / 2.0));
+        let mid = w.start + dir * h.at;
+        // On the face this elevation draws: its wall runs along that face, and it stands within `depth` of the line
+        // the elevation was stood against, where a depth was asked for.
+        let off = along.perp().dot(mid - anchor.plan[0]).abs();
+        if dir.cross(along).abs() > square || depth.is_some_and(|depth| off > depth) {
+            elsewhere += 1;
+            continue;
+        }
+        let (Some(a), Some(b)) = (anchor.drawn_x(from), anchor.drawn_x(to)) else { continue };
+        let (x0, x1) = (a.min(b), a.max(b));
+        let near = slack.unwrap_or_else(|| (x1 - x0).clamp(SLACK_LEAST, SLACK_MOST));
+        let lines = crate::underlay::opening(&drawn, x0, x1, near, between);
+        let heights: Vec<Value> = lines
+            .iter()
+            .map(|line| {
+                json!({
+                    "y": hundredth(line.y),
+                    "height": line.height.map(hundredth),
+                    "from": hundredth(line.from),
+                    "to": hundredth(line.to),
+                })
+            })
+            .collect();
+        // How far the lines the elevation draws lie from where the plan puts the opening: the same number for every
+        // opening of a facade whose anchor is off by that much, which is what says to put the anchor right.
+        let shift = match (lines.first(), lines.last()) {
+            (Some(low), Some(high)) => Some((low.middle() + high.middle()) / 2.0 - (x0 + x1) / 2.0),
+            _ => None,
+        };
+        // The sill and the head are the lowest line and the highest; a door's sill is the floor itself, and the
+        // floor runs the width of the facade, so a door that draws one line takes its sill from `floor`.
+        let (sill, head, whence) = match (lines.first(), lines.last(), floor, read.datum) {
+            (Some(low), Some(high), _, _) if lines.len() > 1 => (Some(low.y), Some(high.y), Some("line")),
+            (Some(high), _, Some(floor), Some(datum)) if !h.window => (Some(floor - datum), Some(high.y), Some("floor")),
+            _ => (None, None, None),
+        };
+        let both = sill.is_some() && head.is_some();
+        match both {
+            true => found += 1,
+            false => missed += 1,
+        }
+        let height = |y: f64| read.datum.map(|d| hundredth(y + d));
+        let mut row = json!({
+            "kind": if h.window { "window" } else { "door" },
+            "width": hundredth(h.width),
+            "at": [hundredth(mid.0), hundredth(mid.1)],
+            "from": [hundredth(from.0), hundredth(from.1)],
+            "to": [hundredth(to.0), hundredth(to.1)],
+            "off": hundredth(off),
+            "band": [hundredth(x0), hundredth(x1)],
+            "shift": shift.map(hundredth),
+            "lines": heights,
+            "sill": sill.and_then(height),
+            "head": head.and_then(height),
+            "high": match (sill, head) {
+                (Some(low), Some(high)) => Some(hundredth(high - low)),
+                _ => None,
+            },
+        });
+        if let Some(whence) = whence {
+            row["sill_from"] = json!(whence);
+        }
+        if let (Some(sill), Some(floor)) = (sill.and_then(height), floor) {
+            row["above"] = json!(hundredth(sill - floor));
+        }
+        rows.push((x0, off, both, row));
+        if let Some(shift) = shift {
+            shifts.push(shift);
+        }
+    }
+    // In the order the elevation draws them, left to right across the face, which is the order they are read in.
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The plane the openings stand on: the middle of how far behind the line each of those with a sill and a head
+    // lies. A wall's openings are drawn in its one face, so they agree; one that does not is an opening of another
+    // plane of the facade, which this elevation may draw behind what stands in front of it, and the lines read
+    // across it may be those of whatever does. It is said and nothing is thrown away over it.
+    let mut planes: Vec<f64> = rows.iter().filter(|(_, _, both, _)| *both).map(|(_, off, _, _)| *off).collect();
+    planes.sort_by(f64::total_cmp);
+    let plane = planes.get(planes.len() / 2).copied();
+    let off_plane = match plane {
+        Some(plane) => planes.iter().filter(|off| (*off - plane).abs() > ONE_PLANE).count(),
+        None => 0,
+    };
+    // An opening that stands off that plane and that the elevation draws no line of is an opening of another wall
+    // of the building, which this elevation does not draw: it is counted with the openings elsewhere rather than
+    // reported as one the elevation was silent about. Where nothing was found at all there is no plane to go by,
+    // and every opening stays listed, which is what says the anchor itself may be wrong.
+    let (mut kept, left): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|(_, off, both, _)| *both || plane.is_none_or(|plane| (off - plane).abs() <= ONE_PLANE));
+    elsewhere += left.len();
+    missed = missed.saturating_sub(left.len());
+    // And each of those that is left says whether it stands on that plane, so that the one that does not is read
+    // for what it is and not taken for a reading of the face.
+    for (_, off, _, row) in &mut kept {
+        row["on_plane"] = json!(plane.is_none_or(|plane| (*off - plane).abs() <= ONE_PLANE));
+    }
+    let rows = kept;
+    // And the shift they agree on, which is the anchor's own error: a facade's openings are drawn where the facade
+    // is, so one shift for all of them is two points picked a little off, and no shift is an anchor that is right.
+    shifts.sort_by(f64::total_cmp);
+    let shift = shifts.get(shifts.len() / 2).copied();
+    Ok(json!({
+        "id": id,
+        "part": part.name,
+        "plan": plan.name,
+        "datum": read.datum.map(hundredth),
+        "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+        "along": anchor.along().map(|d| hundredth(d.1.atan2(d.0).to_degrees())),
+        "openings": rows.into_iter().map(|(_, _, _, row)| row).collect::<Vec<Value>>(),
+        "found": found,
+        "missed": missed,
+        "elsewhere": elsewhere,
+        "plane": plane.map(hundredth),
+        "off_plane": off_plane,
+        "shift": shift.map(hundredth),
     }))
 }
 

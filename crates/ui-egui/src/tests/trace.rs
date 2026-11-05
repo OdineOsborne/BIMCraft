@@ -209,6 +209,49 @@ fn the_openings_it_found_are_drawn_over_the_plan_and_come_in_as_doors_and_window
 }
 
 #[test]
+fn the_openings_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_nothing() {
+    // A survey of one storey: the plan of a room with two windows in its south wall, and 20 m east of it the
+    // elevation of that side, which draws the ground, the eaves, a rectangle around each window, and two heights.
+    let mut lines = room("MURI", [0.0, 0.0, 10_000.0, 6000.0], 300.0);
+    for [x0, x1] in [[3000.0, 4500.0], [6000.0, 7200.0]] {
+        lines.push(("MURI".to_string(), [x0, 0.0, x0, 300.0]));
+        lines.push(("MURI".to_string(), [x1, 0.0, x1, 300.0]));
+        lines.push(("MURI".to_string(), [x0, 150.0, x1, 150.0]));
+    }
+    lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
+    lines.push(("PROSPETTO".to_string(), [20_000.0, 3000.0, 30_000.0, 3000.0]));
+    for [x0, x1, sill, head] in [[23_000.0, 24_500.0, 900.0, 2100.0], [26_000.0, 27_200.0, 1000.0, 2200.0]] {
+        lines.push(("PROSPETTO".to_string(), [x0, sill, x1, sill]));
+        lines.push(("PROSPETTO".to_string(), [x0, head, x1, head]));
+        lines.push(("PROSPETTO".to_string(), [x0, sill, x0, head]));
+        lines.push(("PROSPETTO".to_string(), [x1, sill, x1, head]));
+    }
+    let heights = "0\nTEXT\n8\nQUOTE\n10\n20500\n20\n0\n40\n250\n1\n69.80\n\
+                   0\nTEXT\n8\nQUOTE\n10\n20500\n20\n3000\n40\n250\n1\n72.80\n";
+    let mut h = app("");
+    h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&lines, heights)})).expect("it comes in");
+    let parts = json!([
+        {"name": "PIANTA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    h.state_mut().session.execute("cad_parts", &json!({"parts": parts})).expect("it takes them");
+    let anchor = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
+    h.state_mut().session.execute("cad_anchor", &anchor).expect("it stands");
+    h.run();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Openings");
+    // The elevation and the plan it is a view of, each the first of its kind among the parts.
+    assert_eq!((combo_value(&h, "The elevation"), combo_value(&h, "The plan")), ("PROSPETTO SUD".to_string(), "PIANTA".to_string()));
+    press(&mut h, "Read the Sills and Heads");
+    assert!(says(&h, "2 openings on this face, 2 of them with a sill and a head."), "what it read is said");
+    assert!(says(&h, "1500 mm Window: sill 70.70 m, head 71.90 m, 1200 mm high"), "the first window as the elevation draws it");
+    assert!(says(&h, "1200 mm Window: sill 70.80 m, head 72.00 m, 1200 mm high"), "and the second");
+    // It reads and reports: nothing is built, and the project is where it was.
+    assert!(ids(&h, "wall").is_empty() && ids(&h, "window").is_empty(), "the sills and the heads build nothing");
+    assert!(h.state().trace_dialog.as_ref().is_some_and(|d| d.openings.is_some()), "the window keeps what it read");
+}
+
+#[test]
 fn with_the_openings_unticked_a_doorway_is_left_as_the_drawing_has_it() {
     let mut h = linked(&doorway(), None);
     shortcut(&mut h, "TW");

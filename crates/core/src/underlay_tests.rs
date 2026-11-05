@@ -251,6 +251,175 @@ fn an_elevation_part_reports_its_heights_through_the_command() {
     assert!(e.contains("PROSPETTO SUD"), "{e}");
 }
 
+/// A DXF of `lines` ({layer, [x0, y0, x1, y1]}) and `words` ({layer, x, y, height, text}) in a folder of this call's
+/// own, under a plan; the session and the drawing it holds. A survey of a whole set of sheets is both at once: the
+/// plans and the elevations are drawn, and the heights are written.
+fn sheet(lines: &[(&str, [f64; 4])], words: &[(&str, f64, f64, f64, &str)]) -> (Session, crate::model::Underlay) {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-sheet-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tavole.dxf");
+    let mut text = String::from("0\nSECTION\n2\nENTITIES\n");
+    for (layer, [x0, y0, x1, y1]) in lines {
+        text.push_str(&format!("0\nLINE\n8\n{layer}\n10\n{x0}\n20\n{y0}\n11\n{x1}\n21\n{y1}\n"));
+    }
+    for (layer, x, y, height, said) in words {
+        text.push_str(&format!("0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n40\n{height}\n1\n{said}\n"));
+    }
+    text.push_str("0\nENDSEC\n0\nEOF\n");
+    std::fs::write(&path, text).unwrap();
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path.to_string_lossy()})).expect("it comes in");
+    let u = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    (s, u)
+}
+
+/// A survey of one storey: the plan of a house 10 x 6 m with walls 300 thick, two windows in its south wall and one
+/// in its north, and beside it the elevation of the south side, which draws the ground, the eaves and a rectangle
+/// around each of the two windows, with two heights written on it.
+fn a_survey() -> (Session, crate::model::Underlay) {
+    let mut lines: Vec<(&str, [f64; 4])> = vec![
+        // The plan: the four walls, each drawn as its two faces.
+        ("MURI", [0.0, 0.0, 10_000.0, 0.0]),
+        ("MURI", [0.0, 300.0, 10_000.0, 300.0]),
+        ("MURI", [0.0, 6000.0, 10_000.0, 6000.0]),
+        ("MURI", [0.0, 5700.0, 10_000.0, 5700.0]),
+        ("MURI", [0.0, 0.0, 0.0, 6000.0]),
+        ("MURI", [300.0, 0.0, 300.0, 6000.0]),
+        ("MURI", [10_000.0, 0.0, 10_000.0, 6000.0]),
+        ("MURI", [9700.0, 0.0, 9700.0, 6000.0]),
+        // Two windows in the south wall, each marked by its jambs with the glass between them.
+        ("MURI", [3000.0, 0.0, 3000.0, 300.0]),
+        ("MURI", [4500.0, 0.0, 4500.0, 300.0]),
+        ("MURI", [3000.0, 150.0, 4500.0, 150.0]),
+        ("MURI", [6000.0, 0.0, 6000.0, 300.0]),
+        ("MURI", [7200.0, 0.0, 7200.0, 300.0]),
+        ("MURI", [6000.0, 150.0, 7200.0, 150.0]),
+        // And one in the north wall, which the south elevation shows nothing of.
+        ("MURI", [2000.0, 5700.0, 2000.0, 6000.0]),
+        ("MURI", [3200.0, 5700.0, 3200.0, 6000.0]),
+        ("MURI", [2000.0, 5850.0, 3200.0, 5850.0]),
+        // The elevation of the south side, 20 m east of the plan: the ground and the eaves run the width of it.
+        ("PROSPETTO", [20_000.0, 0.0, 30_000.0, 0.0]),
+        ("PROSPETTO", [20_000.0, 3000.0, 30_000.0, 3000.0]),
+    ];
+    // A rectangle around each window: its sill, its head and its two jambs.
+    for [x0, x1, sill, head] in [[23_000.0, 24_500.0, 900.0, 2100.0], [26_000.0, 27_200.0, 1000.0, 2200.0]] {
+        lines.push(("PROSPETTO", [x0, sill, x1, sill]));
+        lines.push(("PROSPETTO", [x0, head, x1, head]));
+        lines.push(("PROSPETTO", [x0, sill, x0, head]));
+        lines.push(("PROSPETTO", [x1, sill, x1, head]));
+    }
+    let words = [
+        ("TESTO", 1000.0, -1200.0, 300.0, "PIANTA PIANO TERRA"),
+        ("TESTO", 21_000.0, -1200.0, 300.0, "PROSPETTO SUD"),
+        // The heights it is drawn to: the ground at 69.80 and the eaves 3 m above it.
+        ("QUOTE", 20_500.0, 0.0, 250.0, "69.80"),
+        ("QUOTE", 20_500.0, 3000.0, 250.0, "72.80"),
+    ];
+    sheet(&lines, &words)
+}
+
+/// That survey with its two parts said and the elevation stood against the plan's south face.
+fn a_survey_in_parts() -> Session {
+    let (mut s, _) = a_survey();
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    // The south face runs from corner to corner of the plan, and the elevation draws those same 10 m from x 20000.
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
+    run(&mut s, "cad_anchor", told).expect("it stands");
+    s
+}
+
+#[test]
+fn the_lines_an_elevation_draws_of_an_opening_are_its_sill_and_its_head() {
+    let (s, u) = a_survey();
+    let region = [P2(19_000.0, -2000.0), P2(31_000.0, 8000.0)];
+    let drawn = crate::underlay::drawn_lines(&s.model, &u, region, Some(69_800.0));
+    let of = |from, to, slack, between| crate::underlay::opening(&drawn, from, to, slack, between);
+    // The first window, 1500 wide: its sill and its head, and not the ground or the eaves, which are drawn the
+    // width of the facade, nor the other window's, which is drawn 1200 wide.
+    let found = of(23_000.0, 24_500.0, 500.0, None);
+    let at: Vec<(f64, Option<f64>)> = found.iter().map(|c| (c.y, c.height)).collect();
+    assert_eq!(at, vec![(900.0, Some(70_700.0)), (2100.0, Some(71_900.0))], "{drawn:?}");
+    assert!(found.iter().all(|c| (c.span - 1500.0).abs() < 1.0), "each is drawn the width of the window: {found:?}");
+    // A stretch of the facade where nothing of that width is drawn at all: nothing, and nothing invented.
+    assert!(of(28_000.0, 29_500.0, 500.0, None).is_empty());
+    // Where the plan puts the opening 400 mm off what the elevation draws, which is two anchor points picked a
+    // little off the face: the same two lines. Farther off than the slack allows: none of them.
+    assert_eq!(of(23_400.0, 24_900.0, 500.0, None).len(), 2, "within the slack it is the same opening");
+    assert!(of(23_800.0, 25_300.0, 500.0, None).is_empty(), "800 mm off, and the slack is 500");
+    // And read between two heights, an opening of another storey is none of this one's.
+    assert!(of(23_000.0, 24_500.0, 500.0, Some((72_000.0, 75_000.0))).is_empty());
+    assert_eq!(of(23_000.0, 24_500.0, 500.0, Some((69_800.0, 72_800.0))).len(), 2);
+    // The facade's own lines are each one line the width of it, however many pieces they are drawn in.
+    let facade: Vec<f64> = drawn.iter().filter(|c| c.width() > 5000.0).map(|c| c.width()).collect();
+    assert_eq!(facade, vec![10_000.0, 10_000.0], "the ground and the eaves");
+}
+
+#[test]
+fn the_openings_a_plan_finds_take_their_sill_and_head_from_the_elevation() {
+    let mut s = a_survey_in_parts();
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA"});
+    let out = run(&mut s, "cad_openings", ask).expect("it reads");
+    assert_eq!(out["datum"], json!(69_800.0), "{out}");
+    assert_eq!((out["found"].as_u64(), out["missed"].as_u64()), (Some(2), Some(0)), "{out}");
+    // The window in the north wall is on no part of the face this elevation draws, so nothing of it is said.
+    assert_eq!(out["elsewhere"], json!(1), "{out}");
+    let holes = out["openings"].as_array().expect("the openings").clone();
+    assert_eq!(holes.len(), 2, "{out}");
+    // In the order the facade draws them, left to right, each with where the elevation draws it.
+    assert_eq!(holes[0]["band"], json!([23_000.0, 24_500.0]), "{out}");
+    assert_eq!(holes[0]["width"], json!(1500.0));
+    assert_eq!(holes[0]["kind"], json!("window"));
+    assert_eq!((holes[0]["sill"].as_f64(), holes[0]["head"].as_f64()), (Some(70_700.0), Some(71_900.0)));
+    assert_eq!(holes[0]["high"], json!(1200.0));
+    assert_eq!(holes[0]["sill_from"], json!("line"));
+    // The elevation stands where the plan says it does, so its lines fall where the plan puts them, and the two
+    // windows are drawn in the one plane of the one wall.
+    assert_eq!((out["shift"].as_f64(), out["plane"].as_f64(), out["off_plane"].as_u64()), (Some(0.0), Some(150.0), Some(0)), "{out}");
+    assert_eq!(holes[1]["band"], json!([26_000.0, 27_200.0]), "{out}");
+    assert_eq!((holes[1]["sill"].as_f64(), holes[1]["head"].as_f64()), (Some(70_800.0), Some(72_000.0)));
+    // How high the sill stands above the storey's floor, where the floor is said: the ground, here.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800});
+    let out = run(&mut s, "cad_openings", ask).expect("it reads");
+    assert_eq!(out["openings"][0]["above"], json!(900.0), "{out}");
+    assert_eq!(out["openings"][1]["above"], json!(1000.0));
+}
+
+#[test]
+fn an_elevation_that_does_not_stand_against_its_plan_reads_no_openings_and_says_so() {
+    let (mut s, _) = a_survey();
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA"});
+    let e = run(&mut s, "cad_openings", ask).expect_err("it does not stand against its plan yet");
+    assert!(e.contains("cad_anchor"), "{e}");
+    // A part it hasn't, and a part that is no plan: both say what the drawing is made of instead.
+    let mut s = a_survey_in_parts();
+    let ask = json!({"part": "PROSPETTO NORD", "plan": "PIANTA PIANO TERRA"});
+    let e = run(&mut s, "cad_openings", ask).expect_err("no such part");
+    assert!(e.contains("PROSPETTO SUD"), "{e}");
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PROSPETTO SUD"});
+    let e = run(&mut s, "cad_openings", ask).expect_err("an elevation is no plan");
+    assert!(e.contains("plan"), "{e}");
+}
+
 #[test]
 fn the_project_keeps_the_path_and_never_the_drawing() {
     let path = drawing("rilievo.dxf");

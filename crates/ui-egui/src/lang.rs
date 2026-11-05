@@ -2775,6 +2775,67 @@ const WORDS: &[[&str; 3]] = &[
     ["None written", "Nenhuma escrita", "Ninguna escrita"],
     ["{} heights, within {} mm", "{} alturas, dentro de {} mm", "{} alturas, dentro de {} mm"],
     ["{} heights, {} mm apart", "{} alturas, {} mm de diferença", "{} alturas, {} mm de diferencia"],
+    ["Openings", "Vãos", "Huecos"],
+    [
+        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
+        "A soleira e o lintel de cada vão, a partir das linhas que um alçado desenha através dele. O alçado tem de estar assentado sobre a sua planta primeiro.",
+        "El antepecho y el dintel de cada hueco, a partir de las líneas que un alzado dibuja a través de él. El alzado tiene que estar asentado sobre su planta primero.",
+    ],
+    [
+        "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
+        "Precisa de uma planta e de um alçado entre as suas partes, e a aba Partes é onde se dizem.",
+        "Necesita una planta y un alzado entre sus partes, y la pestaña Partes es donde se dicen.",
+    ],
+    ["The elevation", "O alçado", "El alzado"],
+    ["The plan", "A planta", "La planta"],
+    ["The storey's floor", "O piso do andar", "El suelo de la planta"],
+    [
+        "A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.",
+        "A soleira de uma porta é o próprio piso, e nenhuma linha é desenhada através dela, por isso é o piso que dá a altura de uma porta.",
+        "El umbral de una puerta es el propio suelo, y no se dibuja ninguna línea a través de él, así que es el suelo lo que da la altura de una puerta.",
+    ],
+    ["Read the Sills and Heads", "Ler as soleiras e os lintéis", "Leer los antepechos y los dinteles"],
+    [
+        "{} openings on this face, {} of them with a sill and a head.",
+        "{} vãos nesta face, {} deles com soleira e lintel.",
+        "{} huecos en esta cara, {} de ellos con antepecho y dintel.",
+    ],
+    [
+        "{} of them have no two lines drawn across them, so nothing is said of their heights.",
+        "{} deles não têm duas linhas desenhadas através, por isso nada se diz das suas alturas.",
+        "{} de ellos no tienen dos líneas dibujadas a través, así que nada se dice de sus alturas.",
+    ],
+    [
+        "{} openings are on another side of the building.",
+        "{} vãos estão noutro lado do edifício.",
+        "{} huecos están en otro lado del edificio.",
+    ],
+    [
+        "The heights written on this elevation do not bear one another out, so what it says of a sill may be out too.",
+        "As alturas escritas neste alçado não se confirmam entre si, por isso o que diz de uma soleira pode estar errado também.",
+        "Las alturas escritas en este alzado no se confirman entre sí, así que lo que dice de un antepecho puede estar mal también.",
+    ],
+    [
+        "{} mm {}: sill {} m, head {} m, {} mm high",
+        "{} mm {}: soleira {} m, lintel {} m, {} mm de altura",
+        "{} mm {}: antepecho {} m, dintel {} m, {} mm de altura",
+    ],
+    ["{} mm {}: nothing is drawn across it.", "{} mm {}: nada é desenhado através dele.", "{} mm {}: nada se dibuja a través de él."],
+    [
+        "{} mm {}: sill {} mm above the floor, {} mm high",
+        "{} mm {}: soleira {} mm acima do piso, {} mm de altura",
+        "{} mm {}: antepecho {} mm sobre el suelo, {} mm de altura",
+    ],
+    [
+        "{} of them stand off the plane the others agree on, so the lines read of them may be another opening's.",
+        "{} deles estão fora do plano em que os outros concordam, por isso as linhas lidas neles podem ser de outro vão.",
+        "{} de ellos están fuera del plano en que coinciden los demás, así que las líneas leídas en ellos pueden ser de otro hueco.",
+    ],
+    [
+        "Their lines fall {} mm from where the plan puts them, so the two points this elevation stands by are that much along the face.",
+        "As suas linhas caem a {} mm de onde a planta as põe, por isso os dois pontos sobre que este alçado assenta estão desviados o mesmo ao longo da face.",
+        "Sus líneas caen a {} mm de donde la planta las pone, así que los dos puntos sobre los que se asienta este alzado están desviados lo mismo a lo largo de la cara.",
+    ],
     ["Place the rooms too", "Colocar também os ambientes", "Colocar también los recintos"],
     ["Place Rooms", "Colocar ambientes", "Colocar recintos"],
     [

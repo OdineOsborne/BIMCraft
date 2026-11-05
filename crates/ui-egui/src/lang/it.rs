@@ -1977,6 +1977,44 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "{} linee non incontrano nessun muro dell'edificio e sono state lasciate fuori.",
     ],
     ["{} of them meet no wall of the building.", "{} di queste non incontrano nessun muro dell'edificio."],
+    ["Openings", "Aperture"],
+    [
+        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
+        "Il davanzale e l'architrave di ogni apertura, dalle linee che un prospetto disegna attraverso di essa. Il prospetto deve prima stare contro la sua pianta.",
+    ],
+    [
+        "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
+        "Gli servono una pianta e un prospetto fra le sue parti, e la scheda Parti è dove si dicono.",
+    ],
+    ["The elevation", "Il prospetto"],
+    ["The plan", "La pianta"],
+    ["The storey's floor", "Quota del pavimento"],
+    [
+        "A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.",
+        "La soglia di una porta è il pavimento stesso, e non c'è nessuna linea disegnata attraverso, quindi è il pavimento a dare l'altezza di una porta.",
+    ],
+    ["Read the Sills and Heads", "Leggi davanzali e architravi"],
+    ["{} openings on this face, {} of them with a sill and a head.", "{} aperture su questa facciata, {} con davanzale e architrave."],
+    [
+        "{} of them have no two lines drawn across them, so nothing is said of their heights.",
+        "{} non hanno due linee disegnate attraverso, quindi delle loro altezze non si dice niente.",
+    ],
+    ["{} openings are on another side of the building.", "{} aperture stanno su un altro lato dell'edificio."],
+    [
+        "The heights written on this elevation do not bear one another out, so what it says of a sill may be out too.",
+        "Le quote scritte su questo prospetto non si confermano fra loro, quindi anche quello che dice di un davanzale può essere sbagliato.",
+    ],
+    ["{} mm {}: sill {} m, head {} m, {} mm high", "{} mm {}: davanzale {} m, architrave {} m, {} mm di altezza"],
+    ["{} mm {}: nothing is drawn across it.", "{} mm {}: non c'è disegnato niente attraverso."],
+    ["{} mm {}: sill {} mm above the floor, {} mm high", "{} mm {}: davanzale a {} mm dal pavimento, alta {} mm"],
+    [
+        "{} of them stand off the plane the others agree on, so the lines read of them may be another opening's.",
+        "{} stanno fuori dal piano su cui le altre concordano, quindi le linee lette su di esse possono essere di un'altra apertura.",
+    ],
+    [
+        "Their lines fall {} mm from where the plan puts them, so the two points this elevation stands by are that much along the face.",
+        "Le loro linee cadono a {} mm da dove le mette la pianta, quindi i due punti su cui sta questo prospetto sono spostati di tanto lungo la facciata.",
+    ],
 ];
 
 /// `english` in Italian, when this table has it.

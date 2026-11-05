@@ -539,6 +539,59 @@ know which of them is the outside of what, and the two differ by a wall's thickn
 none of which the drawing labels. Two clicks settle it, and the arithmetic says at once whether they were the right
 two.
 
+## The sills and the heads of the openings
+
+With the elevation stood against its plan, the two readings can be put together: the plan says where an opening is
+and how wide, the elevation says how high (`underlay::drawn_lines`, `underlay::opening`,
+`cad_openings {"part": …, "plan": …}`). It reads and reports and builds nothing.
+
+What a line of the drawing has to be to be an opening's own is the whole of it. Three things say it:
+
+- **It is level and drawn as one stretch.** Every run drawn flat inside the region is gathered by the height it is
+  drawn at *and by touching*: pieces at one height that meet, or all but meet (100 mm, which is a mullion, a
+  down-pipe, a shutter's hinge), are one line, and two pieces of that height with a window between them are two
+  lines. That is the difference from `courses`, which gathers a height's pieces wherever in the region they are
+  drawn, because a floor drawn across two wings is one floor.
+- **It is as wide as the opening**, to within a tenth of its width or 100 mm, whichever is more. This is what
+  separates a sill from the facade's own lines, which run the width of the building, and — measured on the real
+  file — a ground-floor window from a dormer drawn in the same facade.
+- **It stands where the plan puts it**, within `slack` of it: by default the opening's own width, held between 500
+  and 1500 mm, which is nearer than the next opening of a facade stands.
+
+The sill is the lowest of what is left, the head is the highest, and an opening the elevation draws fewer than two
+lines of gets neither: it is counted in `missed` and said, not invented. A door is that case by nature — its sill is
+the floor itself and the floor runs the width of the facade — so a door takes its sill from `floor`, the height the
+storey's floor stands at as the drawing writes heights, which `cad_heights` reports as a course. `floor` earns its
+keep twice, because with it an opening is read only between that floor and `storey` (3000 mm) above it, and an
+elevation draws every storey of the facade at once.
+
+Three numbers come back that nobody asked for and that are the point of the exercise:
+
+- `off` and `plane`: how far behind the line the elevation was stood against each opening lies, and the middle of
+  where those with a sill and a head lie. A wall's openings are drawn in its one face, so they agree; `off_plane`
+  counts those that do not, whose lines may be those of whatever the elevation draws in front of them.
+- `shift`: how far the lines found lie from where the plan put them. One shift for all of them is two anchor points
+  picked that much along the face, and worth putting right.
+
+Measured on the permesso di costruire's PROSPETTO SUD-EST against its PIANTA PIANO TERRA, which is where all three
+checks were learned. Of the 13 openings the plan finds, 9 are counted elsewhere — 6 whose walls run across the face
+and 3 that stand off the plane and that the elevation draws nothing of — and the facade's three come out:
+
+| the plan | the elevation |
+|---|---|
+| window 1014 mm | sill 70.69, head 72.19, **1500 mm high** |
+| door 962 mm | sill 69.75, head 71.90, **2150 mm high** |
+| window 1085 mm | sill 70.61, head 72.19, **1580 mm high** |
+
+A 1.5 m window on a 0.89 m sill and a 2.15 m door, off a drawing that writes none of those numbers anywhere. All
+three stand 1852 mm behind the line the elevation was stood against, and all three have their lines about 450 mm
+from where the plan put them (−458, −482, −423, so `shift` −453): the two points this elevation was anchored by are
+that much along the face, and the openings were found anyway because the slack is the opening's own width. The
+first reading of the same file found **nothing at all**, because the rule then was that a line had to begin and end
+within the opening's own band; the 450 mm shift put every band beside its window. And the one opening found off the
+plane is an interior door 10.8 m behind the facade whose band happens to fall under a window of it — `off_plane: 1`
+is that, said rather than passed off as a reading.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -584,7 +637,7 @@ hand across one of those, and `place_rooms` again, is what finishes it.
 All of this is a reading, and a reading is to be looked at before it is believed, so the window (`crates/ui-egui/src/trace.rs`,
 Trace Walls, `TW`, beside Link CAD on the Manage tab) shows it and lets it be put right. It opens on the drawing under
 the plan on screen — with no plan open, or no drawing under it, it says so and opens nothing, as Link CAD does — and
-holds two tabs.
+holds four tabs.
 
 **Layers** is a row for each layer the drawing has: whether it is drawn, how many shapes are on it, and the two phases
 it stands in, each picked from the project's own. It is what Link CAD read from the layers' names, there to be
@@ -617,6 +670,17 @@ rooms does not drop what was found, because the rooms are of the walls and not o
 so it places nothing either. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
+
+**Openings** is the two readings put together: the elevation to read the sills and the heads off, the plan the
+openings are found in, the height the storey's floor stands at (0 is not said), and **Read the Sills and Heads**,
+which runs `cad_openings`. It needs a plan and an elevation among the parts, and says so where there is not one of
+each; the two combos hold the parts of each kind and fall back to the first of them, so a part done away with while
+the window stands open leaves nothing stale behind. What comes back is said in the window as it is: how many
+openings are on the face and how many have both a sill and a head, each of them a line of its own (*1500 mm Window:
+sill 70.70 m, head 71.90 m, 1200 mm high*), and an opening the elevation draws nothing of said to be that and no
+more. The three checks are said too, where they have something to say: how many openings stand off the plane the
+others agree on, and how far the lines found fall from where the plan puts them, which is the anchor's own error and
+is read on the Parts tab. It builds nothing, as Find builds nothing.
 
 A Find that comes back with no wall at all is nearly always a drawing linked at the wrong scale, and the window says
 so. Where the drawing measures on itself, it says what the drawing says: `trace_walls` passes `scale_says` on and the

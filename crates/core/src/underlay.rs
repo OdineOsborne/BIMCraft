@@ -197,6 +197,18 @@ pub struct Course {
     pub to: f64,
 }
 
+impl Course {
+    /// How wide it is drawn, from where it begins to where it ends.
+    pub fn width(&self) -> f64 {
+        self.to - self.from
+    }
+
+    /// The middle of that.
+    pub fn middle(&self) -> f64 {
+        (self.from + self.to) / 2.0
+    }
+}
+
 /// How far from level a line may be drawn and still be one: a drawing's floors are drawn flat, and a millimetre over
 /// a run is the rounding of the file and nothing else.
 const COURSE_FLAT: f64 = 1.0;
@@ -213,9 +225,97 @@ const COURSE_SHORTEST: f64 = 500.0;
 /// writes, which [`heights`] reads, and in the lines it draws, which are the floors themselves and are marked only
 /// where the draughtsman thought to.
 pub fn courses(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>, most: usize) -> Vec<Course> {
+    let mut found = gathered(flat(m, u, region, COURSE_SHORTEST), datum);
+    // The most drawn first, so that what is kept of them is the floors and not the sills; and then in order of
+    // height again, as a drawing is read from the ground up.
+    found.sort_by(|a, b| b.span.total_cmp(&a.span));
+    found.truncate(most);
+    found.sort_by(|a, b| a.y.total_cmp(&b.y));
+    found
+}
+
+/// The shortest piece of a line that is drawn at all: shorter than this and it is the rounding of the file.
+const DRAWN_SHORTEST: f64 = 1.0;
+
+/// How far apart two pieces of one line may be drawn and still be one line: a drawing breaks a line where something
+/// crosses it, and a mullion, a down-pipe and a shutter's hinge are no wider than this.
+const DRAWN_GAP: f64 = 100.0;
+
+/// Every line the drawing draws level inside `region`, the lowest first, each as the one stretch it covers: the
+/// pieces drawn at one height that touch, or all but touch, are one line, and two pieces of that height with the
+/// width of a window between them are two. That is what tells an opening's sill from the facade's own lines, which
+/// is the whole use of it: the floor, the eaves and a string course run the width of the building, and a sill runs
+/// the width of its opening. Unlike [`courses`], which gathers a height's pieces wherever in the region they are
+/// drawn, because a floor drawn across two wings is one floor.
+pub fn drawn_lines(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>) -> Vec<Course> {
+    let mut by_height: std::collections::BTreeMap<i64, Vec<(f64, f64, f64)>> = std::collections::BTreeMap::new();
+    for (y, left, right) in flat(m, u, region, DRAWN_SHORTEST) {
+        by_height.entry((y / COURSE_SAME).round() as i64).or_default().push((y, left, right));
+    }
+    let mut out: Vec<Course> = Vec::new();
+    for pieces in by_height.values_mut() {
+        pieces.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut held: Option<Course> = None;
+        for (y, left, right) in pieces.iter() {
+            match &mut held {
+                // Still the same line where this piece begins before the last one ended, or hard after it.
+                Some(line) if *left <= line.to + DRAWN_GAP => {
+                    // What this piece adds to the line, which for a piece drawn over it again is nothing.
+                    line.span += (right - left.max(line.to)).max(0.0);
+                    line.to = line.to.max(*right);
+                }
+                _ => {
+                    out.extend(held.take());
+                    held = Some(Course { y: *y, height: datum.map(|d| y + d), span: right - left, from: *left, to: *right });
+                }
+            }
+        }
+        out.extend(held);
+    }
+    out.sort_by(|a, b| a.y.total_cmp(&b.y));
+    out
+}
+
+/// How far a line's width may differ from the opening's and still be that opening's: a tenth of it, and never less
+/// than [`DRAWN_LEAST`]. The elevation draws the frame a little wider than the hole the plan draws and the opening
+/// itself a little narrower, and farther out than that is another opening of the facade — a dormer above the eaves,
+/// a door beside a window.
+const DRAWN_WIDE: f64 = 0.1;
+const DRAWN_LEAST: f64 = 100.0;
+
+/// The lines of `lines` that are the opening the plan puts between `from` and `to` of this part's own x, the lowest
+/// first: its sill is the first of them and its head the last. An opening is matched by its width and by where it
+/// stands, within `slack` of where the plan puts it, because the two points an elevation stands by are picked off
+/// the drawing by eye and a facade's openings are drawn where the facade is, not where the picking was; `slack` is
+/// no wider than the gap to the next opening, or the next opening is what is read. `between` is the two heights the
+/// opening stands between, where they are known: an elevation draws every storey of the facade, and a dormer's
+/// window is no window of the ground floor's plan.
+pub fn opening(lines: &[Course], from: f64, to: f64, slack: f64, between: Option<(f64, f64)>) -> Vec<Course> {
+    let (x0, x1) = (from.min(to), from.max(to));
+    let (wide, mid) = (x1 - x0, (x0 + x1) / 2.0);
+    if !wide.is_finite() || wide <= 0.0 || !slack.is_finite() || slack < 0.0 {
+        return Vec::new();
+    }
+    let out = (wide * DRAWN_WIDE).max(DRAWN_LEAST);
+    lines
+        .iter()
+        .filter(|line| (line.width() - wide).abs() <= out && (line.middle() - mid).abs() <= slack)
+        .filter(|line| match (between, line.height) {
+            (Some((low, high)), Some(height)) => height >= low && height <= high,
+            (Some(_), None) => false,
+            (None, _) => true,
+        })
+        .copied()
+        .collect()
+}
+
+/// Every level run the drawing draws inside `region` that is at least `shortest` long: how high it is, and where it
+/// begins and ends. The pieces themselves, as they are drawn; what is made of them is [`courses`], the heights of
+/// the building, and [`drawn_lines`], the lines themselves.
+fn flat(m: &Model, u: &Underlay, region: [P2; 2], shortest: f64) -> Vec<(f64, f64, f64)> {
     let [sw, ne] = region;
     let inside = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
-    let mut at: std::collections::BTreeMap<i64, (f64, f64, f64, f64)> = std::collections::BTreeMap::new();
+    let mut out: Vec<(f64, f64, f64)> = Vec::new();
     for (_, points, closed) in lines_by_layer(m, u) {
         let close = match (closed, points.len() > 2, points.first(), points.last()) {
             (true, true, Some(a), Some(b)) => Some((*b, *a)),
@@ -230,22 +330,28 @@ pub fn courses(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>, mos
             .chain(close);
         for (a, b) in runs {
             let len = (b.0 - a.0).abs();
-            if !inside(a) || !inside(b) || (a.1 - b.1).abs() > COURSE_FLAT || len < COURSE_SHORTEST || !len.is_finite() {
+            if !inside(a) || !inside(b) || (a.1 - b.1).abs() > COURSE_FLAT || len < shortest || !len.is_finite() {
                 continue;
             }
-            let y = (a.1 + b.1) / 2.0;
-            let key = (y / COURSE_SAME).round() as i64;
-            let (left, right) = (a.0.min(b.0), a.0.max(b.0));
-            let held = at.entry(key).or_insert((y, 0.0, left, right));
-            held.1 += len;
-            held.2 = held.2.min(left);
-            held.3 = held.3.max(right);
+            out.push(((a.1 + b.1) / 2.0, a.0.min(b.0), a.0.max(b.0)));
         }
+    }
+    out
+}
+
+/// The runs gathered by the height they are drawn at, the lowest first: a floor drawn in two pieces is one height,
+/// and two floors are never a centimetre apart.
+fn gathered(runs: Vec<(f64, f64, f64)>, datum: Option<f64>) -> Vec<Course> {
+    let mut at: std::collections::BTreeMap<i64, (f64, f64, f64, f64)> = std::collections::BTreeMap::new();
+    for (y, left, right) in runs {
+        let key = (y / COURSE_SAME).round() as i64;
+        let held = at.entry(key).or_insert((y, 0.0, left, right));
+        held.1 += right - left;
+        held.2 = held.2.min(left);
+        held.3 = held.3.max(right);
     }
     let mut found: Vec<Course> =
         at.values().map(|(y, span, from, to)| Course { y: *y, height: datum.map(|d| y + d), span: *span, from: *from, to: *to }).collect();
-    found.sort_by(|a, b| b.span.total_cmp(&a.span));
-    found.truncate(most);
     found.sort_by(|a, b| a.y.total_cmp(&b.y));
     found
 }

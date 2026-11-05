@@ -70,6 +70,12 @@ pub(crate) struct TraceDialog {
     /// The level whose plan is on screen: what a part added here is the plan of, until it is said otherwise.
     pub(crate) level: Option<Guid>,
     pub(crate) kind: Option<String>,
+    /// The Openings tab: which elevation the sills and the heads are read off, which plan the openings are found
+    /// in, how high the storey's floor stands as the drawing writes heights (0 is not said), and the last reading.
+    pub(crate) elevation: Option<String>,
+    pub(crate) plan: Option<String>,
+    pub(crate) floor: f64,
+    pub(crate) openings: Option<Value>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
@@ -365,6 +371,137 @@ fn part_json(m: &Model, part: &Part) -> Value {
     })
 }
 
+/// The Openings tab: the sill and the head of every opening, read off an elevation that stands against its plan
+/// (`cad_openings`). It builds nothing and changes nothing: what it says is what the drawing draws, which is what
+/// an opening is then made to.
+fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Value>) {
+    let said = t(
+        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
+    );
+    ui.label(RichText::new(said).color(pal().muted));
+    ui.add_space(6.0);
+    let Some(u) = underlay_of(m, d.underlay) else { return };
+    let named = |plans: bool| -> Vec<String> {
+        u.parts.iter().filter(|part| (part.kind == PartKind::Plan) == plans).map(|part| part.name.clone()).collect()
+    };
+    let (views, plans) = (named(false), named(true));
+    if views.is_empty() || plans.is_empty() {
+        let said = t("It needs a plan and an elevation among its parts, and the Parts tab is where they are said.");
+        ui.label(RichText::new(said).color(pal().muted));
+        return;
+    }
+    // A part done away with, or made a plan, while the window stood open leaves nothing of it to read.
+    let held = |now: &Option<String>, of: &[String]| now.clone().filter(|name| of.contains(name)).or_else(|| of.first().cloned());
+    d.elevation = held(&d.elevation, &views);
+    d.plan = held(&d.plan, &plans);
+    let (Some(elevation), Some(plan)) = (d.elevation.clone(), d.plan.clone()) else { return };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let label = ui.label(t("The elevation"));
+        if let Some(picked) = combo(ui, (d.underlay, "openings-elevation"), label.id, &elevation, &views) {
+            d.elevation = Some(picked);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let label = ui.label(t("The plan"));
+        if let Some(picked) = combo(ui, (d.underlay, "openings-plan"), label.id, &plan, &plans) {
+            d.plan = Some(picked);
+            changed = true;
+        }
+    });
+    ui.add_space(6.0);
+    // A door's sill is the floor itself and the elevation draws no line of its own for it, so the floor is what
+    // gives a door its height: the height the storey's floor stands at, as the elevation writes heights.
+    ui.horizontal(|ui| changed |= measure(ui, "The storey's floor", &mut d.floor, 0.0..=10_000_000.0, " mm"));
+    let said = t("A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.");
+    ui.label(RichText::new(said).color(pal().muted));
+    if changed {
+        d.openings = None;
+    }
+    ui.add_space(8.0);
+    if ui.button(t("Read the Sills and Heads")).clicked() {
+        let mut p = json!({"underlay": d.underlay, "part": elevation, "plan": plan});
+        if d.floor > 0.0 {
+            p["floor"] = json!(d.floor);
+        }
+        *read = Some(p);
+    }
+    ui.add_space(6.0);
+    let Some(report) = &d.openings else { return };
+    openings_shown(ui, report);
+}
+
+/// What the last reading of the sills and the heads said: how many openings the elevation draws, each with where it
+/// draws it, and what it left unsaid rather than inventing.
+fn openings_shown(ui: &mut Ui, report: &Value) {
+    let number = |key: &str| report[key].as_u64().unwrap_or(0);
+    let rows = report["openings"].as_array().cloned().unwrap_or_default();
+    let found = number("found").to_string();
+    ui.label(
+        RichText::new(tf("{} openings on this face, {} of them with a sill and a head.", &[&rows.len().to_string(), &found])).strong(),
+    );
+    if number("missed") > 0 {
+        let said =
+            tf("{} of them have no two lines drawn across them, so nothing is said of their heights.", &[&number("missed").to_string()]);
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    if number("elsewhere") > 0 {
+        let said = tf("{} openings are on another side of the building.", &[&number("elsewhere").to_string()]);
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    // A wall's openings are drawn in its one face, so one that stands off the plane the others agree on is another
+    // wall's, and the lines read of it may be those of whatever the elevation draws in front of it.
+    if number("off_plane") > 0 {
+        let said = tf(
+            "{} of them stand off the plane the others agree on, so the lines read of them may be another opening's.",
+            &[&number("off_plane").to_string()],
+        );
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    // One shift for all of them is two anchor points picked that much off the face, which is worth putting right:
+    // the openings are drawn where the facade is, not where the picking was.
+    if let Some(shift) = report["shift"].as_f64().filter(|shift| shift.abs() > 100.0) {
+        let said = tf(
+            "Their lines fall {} mm from where the plan puts them, so the two points this elevation stands by are that much along the face.",
+            &[&format!("{shift:.0}")],
+        );
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    // The heights an elevation writes should all put its datum in the same place; where they do not, what it says
+    // of a sill stands on the same shaky ground.
+    if report["agree"].as_bool() == Some(false) {
+        let said = t("The heights written on this elevation do not bear one another out, so what it says of a sill may be out too.");
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    ScrollArea::vertical().max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
+        for row in &rows {
+            let width = format!("{:.0}", row["width"].as_f64().unwrap_or_default());
+            let what = category(if row["kind"] == json!("window") { "window" } else { "door" }, false);
+            // One that stands off the plane the rest agree on is said in the colour of what is wrong with it: the
+            // lines read of it may be those of whatever the elevation draws in front of it.
+            let colour = match (row["on_plane"].as_bool(), row["high"].as_f64()) {
+                (Some(false), _) => pal().error,
+                (_, None) => pal().muted,
+                _ => pal().text,
+            };
+            let said = match (row["sill"].as_f64(), row["head"].as_f64(), row["high"].as_f64(), row["above"].as_f64()) {
+                // Where the storey's floor is known, how high the sill stands above it and how tall the opening
+                // is: the two numbers an opening is made to, rather than the heights the drawing writes.
+                (Some(_), Some(_), Some(high), Some(above)) => {
+                    tf("{} mm {}: sill {} mm above the floor, {} mm high", &[&width, &what, &format!("{above:.0}"), &format!("{high:.0}")])
+                }
+                (Some(sill), Some(head), Some(high), None) => {
+                    let (sill, head) = (format!("{:.2}", sill / 1000.0), format!("{:.2}", head / 1000.0));
+                    tf("{} mm {}: sill {} m, head {} m, {} mm high", &[&width, &what, &sill, &head, &format!("{high:.0}")])
+                }
+                _ => tf("{} mm {}: nothing is drawn across it.", &[&width, &what]),
+            };
+            ui.label(RichText::new(said).color(colour));
+        }
+    });
+}
+
 /// The Walls tab: what to look for, Find, Build, and what the last Find said.
 fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build: &mut bool) {
     let said = t("A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall. What to look for:");
@@ -567,6 +704,10 @@ impl BimApp {
             crop,
             level: Some(here),
             kind: None,
+            elevation: None,
+            plan: None,
+            floor: 0.0,
+            openings: None,
             found,
             holes,
             report: None,
@@ -593,7 +734,7 @@ impl BimApp {
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
-        let mut parts = None::<Value>;
+        let (mut parts, mut read) = (None::<Value>, None::<Value>);
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -610,7 +751,7 @@ impl BimApp {
                 ui.set_min_height(360.0);
                 ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
                 ui.add_space(6.0);
-                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true)];
+                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true), t("Openings").to_string()];
                 ui.horizontal(|ui| {
                     for (i, label) in tabs.iter().enumerate() {
                         if ui.selectable_label(d.tab == i, label).clicked() {
@@ -622,7 +763,8 @@ impl BimApp {
                 match d.tab {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
-                    _ => walls_tab(ui, &mut d, &model, &mut find, &mut build),
+                    2 => walls_tab(ui, &mut d, &model, &mut find, &mut build),
+                    _ => openings_tab(ui, &mut d, &model, &mut read),
                 }
                 if !d.error.is_empty() {
                     ui.add_space(6.0);
@@ -631,11 +773,13 @@ impl BimApp {
                 ui.add_space(8.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
-        let asked = match (layers, parts, find || build) {
-            (Some(p), _, _) => Some(("cad_layers", p)),
-            (_, Some(p), _) => Some(("cad_parts", p)),
-            (None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, false) => None,
+        let reading = read.is_some();
+        let asked = match (layers, parts, read, find || build) {
+            (Some(p), _, _, _) => Some(("cad_layers", p)),
+            (_, Some(p), _, _) => Some(("cad_parts", p)),
+            (_, _, Some(p), _) => Some(("cad_openings", p)),
+            (None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -646,6 +790,8 @@ impl BimApp {
                     d.holes = reply["holes"].as_array().into_iter().flatten().filter_map(hole).collect();
                     d.report = Some(reply);
                 }
+                // What the drawing says of the sills and the heads: read off the elevation, and nothing built.
+                Some(reply) if reading => d.openings = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();
@@ -661,6 +807,7 @@ impl BimApp {
                 None => {
                     d.error = std::mem::take(&mut self.status.text);
                     self.status = crate::Status::default();
+                    d.openings = None;
                     d.stale();
                 }
             }

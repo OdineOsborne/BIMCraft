@@ -1703,6 +1703,44 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["None written", "未标注"],
     ["{} heights, within {} mm", "{} 个标高，误差在 {} 毫米内"],
     ["{} heights, {} mm apart", "{} 个标高，相差 {} 毫米"],
+    ["Openings", "洞口"],
+    [
+        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
+        "每个洞口的窗台和过梁，取自立面图在它上面画出的线。立面图必须先与它的平面图对位。",
+    ],
+    [
+        "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
+        "它的分部分里需要一张平面图和一张立面图，而分部分选项卡就是说明它们的地方。",
+    ],
+    ["The elevation", "立面图"],
+    ["The plan", "平面图"],
+    ["The storey's floor", "本层地面标高"],
+    [
+        "A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.",
+        "门的门槛就是地面本身，没有线画过它，所以门的高度由地面标高给出。",
+    ],
+    ["Read the Sills and Heads", "读取窗台和过梁"],
+    ["{} openings on this face, {} of them with a sill and a head.", "本面上有 {} 个洞口，其中 {} 个有窗台和过梁。"],
+    [
+        "{} of them have no two lines drawn across them, so nothing is said of their heights.",
+        "其中 {} 个没有两条线画过，所以它们的高度无从可说。",
+    ],
+    ["{} openings are on another side of the building.", "{} 个洞口在建筑的另一侧。"],
+    [
+        "The heights written on this elevation do not bear one another out, so what it says of a sill may be out too.",
+        "这张立面图上写的标高彼此不符，所以它说的窗台也可能有偏差。",
+    ],
+    ["{} mm {}: sill {} m, head {} m, {} mm high", "{} 毫米 {}：窗台 {} 米，过梁 {} 米，高 {} 毫米"],
+    ["{} mm {}: nothing is drawn across it.", "{} 毫米 {}：没有线画过它。"],
+    ["{} mm {}: sill {} mm above the floor, {} mm high", "{} 毫米 {}：窗台高出地面 {} 毫米，高 {} 毫米"],
+    [
+        "{} of them stand off the plane the others agree on, so the lines read of them may be another opening's.",
+        "其中 {} 个不在其余洞口一致的那个面上，所以读到的线可能是别的洞口的。",
+    ],
+    [
+        "Their lines fall {} mm from where the plan puts them, so the two points this elevation stands by are that much along the face.",
+        "它们的线与平面图所定的位置相差 {} 毫米，所以这张立面图所依的两个点沿着这面墙也偏了同样的距离。",
+    ],
     ["Place the rooms too", "同时放置房间"],
     ["Place Rooms", "放置房间"],
     [
