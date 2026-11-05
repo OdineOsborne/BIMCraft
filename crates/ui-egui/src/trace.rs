@@ -372,8 +372,8 @@ fn part_json(m: &Model, part: &Part) -> Value {
 }
 
 /// The Openings tab: the sill and the head of every opening, read off an elevation that stands against its plan
-/// (`cad_openings`). It builds nothing and changes nothing: what it says is what the drawing draws, which is what
-/// an opening is then made to.
+/// (`cad_openings`). Reading builds nothing and changes nothing: what it says is what the drawing draws. Apply then
+/// gives that to the openings the Walls tab built, which until then stand at the size a starter type is.
 fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Value>) {
     let said = t(
         "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
@@ -420,12 +420,31 @@ fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<V
         d.openings = None;
     }
     ui.add_space(8.0);
-    if ui.button(t("Read the Sills and Heads")).clicked() {
-        let mut p = json!({"underlay": d.underlay, "part": elevation, "plan": plan});
-        if d.floor > 0.0 {
-            p["floor"] = json!(d.floor);
+    // What was read, and then what was read given to the openings already built: a plan says nothing of a height,
+    // so each of them stands at the size the project's own starter type is until an elevation says otherwise. The
+    // floor has to be said for that, since a sill is made so far above the floor of its storey.
+    let (underlay, floor, had) = (d.underlay, d.floor, d.openings.is_some());
+    let params = |apply: bool| {
+        let mut p = json!({"underlay": underlay, "part": elevation.clone(), "plan": plan.clone()});
+        if floor > 0.0 {
+            p["floor"] = json!(floor);
         }
-        *read = Some(p);
+        if apply {
+            p["apply"] = json!(true);
+        }
+        p
+    };
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Sills and Heads")).clicked() {
+            *read = Some(params(false));
+        }
+        if ui.add_enabled(had && floor > 0.0, Button::new(t("Apply These Heights"))).clicked() {
+            *read = Some(params(true));
+        }
+    });
+    if had && floor <= 0.0 {
+        let said = t("Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.");
+        ui.label(RichText::new(said).color(pal().muted));
     }
     ui.add_space(6.0);
     let Some(report) = &d.openings else { return };
@@ -441,6 +460,22 @@ fn openings_shown(ui: &mut Ui, report: &Value) {
     ui.label(
         RichText::new(tf("{} openings on this face, {} of them with a sill and a head.", &[&rows.len().to_string(), &found])).strong(),
     );
+    // What was given to the openings already built, where that was asked for: what each of them is made to now,
+    // and what was left as it was rather than made to a reading that says nothing.
+    if let Some(applied) = report["applied"].as_u64() {
+        let said = tf("{} openings were given the heights the elevation draws.", &[&applied.to_string()]);
+        ui.label(RichText::new(said).strong().color(pal().text));
+        let made: Vec<String> = report["made"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)).collect();
+        if !made.is_empty() {
+            ui.label(
+                RichText::new(tf("{} types were made for them: {}.", &[&made.len().to_string(), &made.join(", ")])).color(pal().muted),
+            );
+        }
+        if let Some(left) = report["left"].as_u64().filter(|left| *left > 0) {
+            let said = tf("{} of them were left as they were, each saying why.", &[&left.to_string()]);
+            ui.label(RichText::new(said).color(pal().error));
+        }
+    }
     if number("missed") > 0 {
         let said =
             tf("{} of them have no two lines drawn across them, so nothing is said of their heights.", &[&number("missed").to_string()]);
@@ -485,7 +520,11 @@ fn openings_shown(ui: &mut Ui, report: &Value) {
                 (_, None) => pal().muted,
                 _ => pal().text,
             };
-            let said = match (row["sill"].as_f64(), row["head"].as_f64(), row["high"].as_f64(), row["above"].as_f64()) {
+            // What it is made to where it was given these heights, and what the elevation draws of it where it was
+            // not: a door is made from the floor it opens onto, and the elevation may draw its threshold a step
+            // under that, so the two are not always the same number.
+            let (how_high, how_far) = (row["made"].as_f64().or(row["high"].as_f64()), row["made_sill"].as_f64().or(row["above"].as_f64()));
+            let said = match (row["sill"].as_f64(), row["head"].as_f64(), how_high, how_far) {
                 // Where the storey's floor is known, how high the sill stands above it and how tall the opening
                 // is: the two numbers an opening is made to, rather than the heights the drawing writes.
                 (Some(_), Some(_), Some(high), Some(above)) => {
@@ -496,6 +535,12 @@ fn openings_shown(ui: &mut Ui, report: &Value) {
                     tf("{} mm {}: sill {} m, head {} m, {} mm high", &[&width, &what, &sill, &head, &format!("{high:.0}")])
                 }
                 _ => tf("{} mm {}: nothing is drawn across it.", &[&width, &what]),
+            };
+            // And what stood in the way of giving it what was read, in the core's own words: one that was given it
+            // says nothing more, since the sentence above is what it is made to.
+            let said = match row["left"].as_str() {
+                Some(why) => format!("{said} \u{2014} {why}"),
+                None => said,
             };
             ui.label(RichText::new(said).color(colour));
         }

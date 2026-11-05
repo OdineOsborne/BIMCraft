@@ -223,11 +223,14 @@ pub static ALL: &[Command] = &[
          draws each of them, which is how a reading is held against the drawing",
         cad_anchor,
     ),
-    other(
+    edit(
         "cad_openings",
         "CAD Openings",
-        "{underlay?, part, plan, floor?, storey?, slack?, depth?, thin?, thick?, shortest?, skew?} the sill and the \
-         head of every opening an elevation draws, read and reported without changing the project: the openings \
+        &[],
+        "{underlay?, part, plan, floor?, storey?, slack?, depth?, apply?, level?, thin?, thick?, shortest?, skew?} \
+         the sill and the \
+         head of every opening an elevation draws, read and reported without changing the project unless `apply` \
+         asks for it: the openings \
          found in the plan `plan`, as Trace Walls finds them, each stood against the elevation `part` where its \
          anchor says, and the lines the elevation draws of it. `part` is an elevation or a section that stands \
          against its plan (`cad_anchor`), and `plan` is the plan the openings are found in. A line of the drawing \
@@ -256,9 +259,17 @@ pub static ALL: &[Command] = &[
          of the building's, and is counted in `elsewhere` too; where nothing was found at all there is no plane to \
          go by, and every opening is listed, which is what says the anchor itself may be wrong. `shift` is the \
          middle of how far their lines lie from where the plan put them: one shift for all of them is an anchor \
-         picked that much off the face, and worth putting right. Returns `id`, `part`, \
+         picked that much off the face, and worth putting right. `apply` gives what was read to the openings \
+         `trace_walls` built, which until then stand at the sizes the project's own starter types are: each is \
+         found by where the plan puts it, in a wall of the plan's own level (or of `level`), and comes in a type of \
+         its own width and the height that was read, made if the project has none, with a window's sill set to how \
+         far above the floor the elevation draws it; `apply` needs `floor`, since that is what a sill stands above. \
+         An opening the elevation drew nothing across, one off the plane the others agree on, one no wall was built \
+         for, and one that would stand higher than the wall it is in are left as they were, each saying in `left` \
+         why; `applied` is how many were given it, `applied_ids` which, `made` the types that had to be made, and \
+         `too_high` how many would not fit their wall. Returns `id`, `part`, \
          `plan`, `datum`, `agree`, `along`, `openings`, `found`, `missed`, `elsewhere`, `plane`, `off_plane` and \
-         `shift`",
+         `shift`, and with `apply` also `applied`, `applied_ids`, `left`, `made` and `too_high`",
         cad_openings,
     ),
     edit(
@@ -2410,6 +2421,27 @@ const STOREY_UNDER: f64 = 200.0;
 const SLACK_LEAST: f64 = 500.0;
 const SLACK_MOST: f64 = 1500.0;
 
+/// How far from where the plan puts an opening the one built for it may stand: the same drawing read again puts it
+/// in the same place, and this is the slack of a wall built at a round thickness.
+const BUILT_NEAR: f64 = 50.0;
+
+/// The least an opening is made: under this the two lines read of it are one line read twice, and no opening.
+const LEAST_HIGH: f64 = 100.0;
+
+/// An opening the plan found, as the elevation read it: where the plan puts it, how far off the face it stands,
+/// what the elevation said of its height, and the row said of it.
+struct ReadOpening {
+    x0: f64,
+    off: f64,
+    both: bool,
+    at: P2,
+    window: bool,
+    high: Option<f64>,
+    above: Option<f64>,
+    up: Option<f64>,
+    row: Value,
+}
+
 fn cad_openings(s: &mut Session, p: &Value) -> R {
     let c = "cad_openings";
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
@@ -2458,6 +2490,15 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
             return Err(bad(c, format!("`{key}` is a length in mm, and {} is none", said.unwrap_or_default())));
         }
     }
+    // Giving the openings what was read needs the floor: an opening is made with its sill so far above the floor of
+    // its storey, and the heights an elevation writes say nothing by themselves of where that floor stands.
+    let apply = flag(c, p, "apply")?;
+    if apply && floor.is_none() {
+        return Err(bad(
+            c,
+            "`apply` needs `floor`: an opening is made with its sill so far above the floor of its storey, and `floor` is what says where that floor stands",
+        ));
+    }
     // The two heights an opening of this storey stands between, where the floor is known: a sill stands on the
     // floor or above it, and the head of an opening of this storey is under the next storey's floor. Without them
     // an elevation's every storey is read at once, and a dormer's window may be read as the ground floor's.
@@ -2478,7 +2519,7 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
     // Every line the elevation draws level, read once: the drawing is walked for them, not for each opening.
     let drawn = crate::underlay::drawn_lines(&s.model, &u, part.region, read.datum);
     let square = FACADE_SQUARE.to_radians().sin();
-    let mut rows: Vec<(f64, f64, bool, Value)> = Vec::new();
+    let mut rows: Vec<ReadOpening> = Vec::new();
     let mut shifts: Vec<f64> = Vec::new();
     let (mut found, mut missed, mut elsewhere) = (0usize, 0usize, 0usize);
     for h in &reading.holes {
@@ -2527,6 +2568,22 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
             false => missed += 1,
         }
         let height = |y: f64| read.datum.map(|d| hundredth(y + d));
+        // How tall it is, and how high above the floor of its storey its sill stands: the two numbers an opening is
+        // made to, where the heights the elevation writes are what the drawing is read for.
+        let high = match (sill, head) {
+            (Some(low), Some(high)) => Some(high - low),
+            _ => None,
+        };
+        let above = match (sill.and_then(height), floor) {
+            (Some(sill), Some(floor)) => Some(sill - floor),
+            _ => None,
+        };
+        // And how far above that floor its head stands, which is how high a door is made: a door's hole begins at
+        // the floor it opens onto, whatever the elevation draws under it — a threshold is laid a step down.
+        let up = match (head.and_then(height), floor) {
+            (Some(head), Some(floor)) => Some(head - floor),
+            _ => None,
+        };
         let mut row = json!({
             "kind": if h.window { "window" } else { "door" },
             "width": hundredth(h.width),
@@ -2539,29 +2596,26 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
             "lines": heights,
             "sill": sill.and_then(height),
             "head": head.and_then(height),
-            "high": match (sill, head) {
-                (Some(low), Some(high)) => Some(hundredth(high - low)),
-                _ => None,
-            },
+            "high": high.map(hundredth),
         });
         if let Some(whence) = whence {
             row["sill_from"] = json!(whence);
         }
-        if let (Some(sill), Some(floor)) = (sill.and_then(height), floor) {
-            row["above"] = json!(hundredth(sill - floor));
+        if let Some(above) = above {
+            row["above"] = json!(hundredth(above));
         }
-        rows.push((x0, off, both, row));
+        rows.push(ReadOpening { x0, off, both, at: mid, window: h.window, high, above, up, row });
         if let Some(shift) = shift {
             shifts.push(shift);
         }
     }
     // In the order the elevation draws them, left to right across the face, which is the order they are read in.
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows.sort_by(|a, b| a.x0.total_cmp(&b.x0));
     // The plane the openings stand on: the middle of how far behind the line each of those with a sill and a head
     // lies. A wall's openings are drawn in its one face, so they agree; one that does not is an opening of another
     // plane of the facade, which this elevation may draw behind what stands in front of it, and the lines read
     // across it may be those of whatever does. It is said and nothing is thrown away over it.
-    let mut planes: Vec<f64> = rows.iter().filter(|(_, _, both, _)| *both).map(|(_, off, _, _)| *off).collect();
+    let mut planes: Vec<f64> = rows.iter().filter(|r| r.both).map(|r| r.off).collect();
     planes.sort_by(f64::total_cmp);
     let plane = planes.get(planes.len() / 2).copied();
     let off_plane = match plane {
@@ -2573,34 +2627,149 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
     // reported as one the elevation was silent about. Where nothing was found at all there is no plane to go by,
     // and every opening stays listed, which is what says the anchor itself may be wrong.
     let (mut kept, left): (Vec<_>, Vec<_>) =
-        rows.into_iter().partition(|(_, off, both, _)| *both || plane.is_none_or(|plane| (off - plane).abs() <= ONE_PLANE));
+        rows.into_iter().partition(|r| r.both || plane.is_none_or(|plane| (r.off - plane).abs() <= ONE_PLANE));
     elsewhere += left.len();
     missed = missed.saturating_sub(left.len());
     // And each of those that is left says whether it stands on that plane, so that the one that does not is read
     // for what it is and not taken for a reading of the face.
-    for (_, off, _, row) in &mut kept {
-        row["on_plane"] = json!(plane.is_none_or(|plane| (*off - plane).abs() <= ONE_PLANE));
+    for r in &mut kept {
+        r.row["on_plane"] = json!(plane.is_none_or(|plane| (r.off - plane).abs() <= ONE_PLANE));
     }
-    let rows = kept;
     // And the shift they agree on, which is the anchor's own error: a facade's openings are drawn where the facade
     // is, so one shift for all of them is two points picked a little off, and no shift is an anchor that is right.
     shifts.sort_by(f64::total_cmp);
     let shift = shifts.get(shifts.len() / 2).copied();
-    Ok(json!({
+    // And, where it is asked for, the openings already built are given what was read: a plan says nothing of a
+    // height, so what `trace_walls` built stands at the sizes the project's own starter types are until an
+    // elevation says otherwise. Only what this elevation read of this face is given, and what is not is left as it
+    // was and says why: an opening off the plane the others agree on may have been read across whatever stands in
+    // front of it, and one the elevation draws nothing across has no height to be given.
+    let (mut applied, mut types_made, mut too_high) = (Vec::<Id>::new(), Vec::<String>::new(), 0usize);
+    if apply {
+        // The storey whose openings these are: the plan's own level, which is the one its walls were built on.
+        let level = match p.get("level") {
+            v if !absent(v) => level_param(c, &s.model, p, "level")?,
+            _ => plan.level.unwrap_or(u.level),
+        };
+        for r in &mut kept {
+            let (Some(high), Some(above)) = (r.high, r.above) else {
+                r.row["left"] = json!("the elevation draws nothing across it");
+                continue;
+            };
+            if r.row["on_plane"].as_bool() == Some(false) {
+                r.row["left"] = json!("it stands off the plane the others agree on");
+                continue;
+            }
+            // A window is made as high as the elevation draws it between its sill and its head; a door is made as
+            // high as its head stands above the floor it opens onto, because that is where its hole begins and the
+            // step a threshold is laid down is no part of it. Built as a wall is: to the nearest 10 mm, which is
+            // nearer than a line is drawn or a height is read.
+            let high = match (r.window, r.up) {
+                (false, Some(up)) => up,
+                _ => high,
+            };
+            let high = (high / 10.0).round() * 10.0;
+            let sill = match r.window {
+                true => (above / 10.0).round() * 10.0,
+                false => 0.0,
+            };
+            if high < LEAST_HIGH {
+                r.row["left"] = json!("the two lines read of it stand at one height");
+                continue;
+            }
+            if sill < 0.0 {
+                r.row["left"] = json!("its sill reads below the floor of its storey");
+                continue;
+            }
+            // The opening built for it: the one of its kind nearest where the plan puts it, in a wall of this
+            // storey. None where the walls have not been built, or where it was another plan's that were.
+            let built = s
+                .model
+                .elements
+                .iter()
+                .filter_map(|(id, e)| match e {
+                    Element::Door(o) if !r.window => Some((*id, o)),
+                    Element::Window(o) if r.window => Some((*id, o)),
+                    _ => None,
+                })
+                .filter(|(_, o)| s.model.wall(o.host).is_some_and(|w| w.level == level))
+                .filter_map(|(id, o)| Some((id, o.offset, o.type_name.clone(), o.host, s.model.anchor(id)?.dist(r.at))))
+                .filter(|(_, _, _, _, away)| *away <= BUILT_NEAR)
+                .min_by(|a, b| a.4.total_cmp(&b.4));
+            let Some((hole, offset, was, host, _)) = built else {
+                r.row["left"] = json!("no opening is built there");
+                continue;
+            };
+            // Made at the width its type is built at already: the plan measured that, and an elevation is read for
+            // the heights alone.
+            let types = if r.window { &s.model.types.window } else { &s.model.types.door };
+            let width = types.get(&was).map(|t| t.width).unwrap_or_else(|| by_ten(r.row["width"].as_f64().unwrap_or_default()) as f64);
+            // What the drawing says may not fit the wall it was built in, whose height came from the project and
+            // not from the drawing: it is left as it was rather than made to stand through its own wall.
+            let fits = match s.model.wall(host) {
+                Some(w) => sill + high <= walls::top_at(&s.model, w, offset) - s.model.own_base(w) + 1.0,
+                None => false,
+            };
+            if !fits {
+                too_high += 1;
+                r.row["left"] = json!("it would stand higher than the wall it is in");
+                continue;
+            }
+            let (name, make) = opening_type_high(&s.model, !r.window, width, high);
+            // Given it a second time nothing is touched, because there is nothing left to give: an opening that
+            // stands at what the drawing says already makes no undo step to take back.
+            let same = matches!(s.model.elements.get(hole), Some(Element::Door(o) | Element::Window(o))
+                if o.type_name == name && (o.sill - sill).abs() < 0.001);
+            if !same {
+                let m = s.model_mut();
+                if make {
+                    let kind = crate::model::OpeningType { width, height: high, sill };
+                    match r.window {
+                        true => m.types.window.insert(name.clone(), kind),
+                        false => m.types.door.insert(name.clone(), kind),
+                    };
+                    types_made.push(name.clone());
+                }
+                if let Some(Element::Door(o) | Element::Window(o)) = m.elements.get_mut(hole) {
+                    o.type_name = name.clone();
+                    o.sill = sill;
+                }
+            }
+            r.row["applied"] = json!(hole);
+            r.row["type"] = json!(name);
+            r.row["made"] = json!(high);
+            r.row["made_sill"] = json!(sill);
+            applied.push(hole);
+        }
+    }
+    let read_rows = kept.len();
+    let mut out = json!({
         "id": id,
         "part": part.name,
         "plan": plan.name,
         "datum": read.datum.map(hundredth),
         "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
         "along": anchor.along().map(|d| hundredth(d.1.atan2(d.0).to_degrees())),
-        "openings": rows.into_iter().map(|(_, _, _, row)| row).collect::<Vec<Value>>(),
+        "openings": kept.into_iter().map(|r| r.row).collect::<Vec<Value>>(),
         "found": found,
         "missed": missed,
         "elsewhere": elsewhere,
         "plane": plane.map(hundredth),
         "off_plane": off_plane,
         "shift": shift.map(hundredth),
-    }))
+    });
+    if apply {
+        out["applied"] = json!(applied.len());
+        out["applied_ids"] = json!(applied);
+        out["left"] = json!(read_rows.saturating_sub(applied.len()));
+        if !types_made.is_empty() {
+            out["made"] = json!(types_made);
+        }
+        if too_high > 0 {
+            out["too_high"] = json!(too_high);
+        }
+    }
+    Ok(out)
 }
 
 /// The parts of the drawing `id` is, as the project holds them.
@@ -2632,6 +2801,23 @@ fn opening_type_for(m: &Model, door: bool, wanted: f64) -> (String, bool) {
         true => format!("Single {} x {}", wanted as i64, DOOR_HIGH as i64),
         false => format!("Fixed {} x {}", wanted as i64, WINDOW_HIGH as i64),
     };
+    if !types.contains_key(&base) {
+        return (base, true);
+    }
+    let free = (2..100).map(|n| format!("{base} ({n})")).find(|n| !types.contains_key(n));
+    (free.unwrap_or(base), true)
+}
+
+/// The door or window type an opening `width` mm wide and `high` mm high comes in as, and whether it has to be
+/// made: the project's own of that width and that height, or a name for a new one. This is for what an elevation
+/// measured, so the width is the one the opening is built at already and the height is the one that was read.
+fn opening_type_high(m: &Model, door: bool, width: f64, high: f64) -> (String, bool) {
+    let types = if door { &m.types.door } else { &m.types.window };
+    let same = types.iter().find(|(_, t)| (t.width - width).abs() <= 1.0 && (t.height - high).abs() <= 1.0);
+    if let Some((name, _)) = same {
+        return (name.clone(), false);
+    }
+    let base = format!("{} {} x {}", if door { "Single" } else { "Fixed" }, width as i64, high as i64);
     if !types.contains_key(&base) {
         return (base, true);
     }

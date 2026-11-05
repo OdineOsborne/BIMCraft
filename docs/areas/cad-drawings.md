@@ -543,7 +543,8 @@ two.
 
 With the elevation stood against its plan, the two readings can be put together: the plan says where an opening is
 and how wide, the elevation says how high (`underlay::drawn_lines`, `underlay::opening`,
-`cad_openings {"part": …, "plan": …}`). It reads and reports and builds nothing.
+`cad_openings {"part": …, "plan": …}`). It reads and reports and changes nothing, until it is asked to give what it
+read to the openings that are built.
 
 What a line of the drawing has to be to be an opening's own is the whole of it. Three things say it:
 
@@ -591,6 +592,35 @@ first reading of the same file found **nothing at all**, because the rule then w
 within the opening's own band; the 450 mm shift put every band beside its window. And the one opening found off the
 plane is an interior door 10.8 m behind the facade whose band happens to fall under a window of it — `off_plane: 1`
 is that, said rather than passed off as a reading.
+
+### Giving them to the openings that are built
+
+Reading is half of it. The openings `trace_walls` built came out of a plan, which says nothing of a height, so each
+of them stands at the size the project's own starter type is: every window 1500 high on a 900 sill, every door 2100.
+`cad_openings {"apply": true, "floor": …}` gives them what was read, and the **Apply These Heights** button beside
+Read does the same. Each opening read is found by where the plan puts it — the nearest of its kind within 50 mm, in
+a wall of the plan's own level, or of `level` — and comes in a type of the width it is built at already (the plan
+measured that; an elevation is read for the heights alone) and the height that was read: the project's own type of
+that width and height where it has one, else one made and named for it, *Fixed 1500 x 1200*. A window's own sill is
+set to how far above the floor the elevation draws it. Heights are built to the nearest 10 mm, as a wall's thickness
+is. `apply` needs `floor`, because that is what a sill stands above and the heights an elevation writes say nothing
+by themselves of where the floor is.
+
+A window is made as high as the elevation draws it between its sill and its head; a door is made as high as its
+**head stands above the floor**, because a door's hole begins at the floor it opens onto and a threshold is laid a
+step under that. The permesso di costruire's door shows why: the elevation draws a line at 69.75 and another at
+69.80, so `high` reads 2150 from the lower one to the head at 71.90, and the door is made 2100 — which is the
+project's own *Single 900 x 2100* and no new type at all. The row says both: `high` is what the drawing draws
+between its two lines, `made` and `made_sill` are what the opening now is.
+
+Four things stop an opening being given anything, and each says in `left` which rather than being made to a guess:
+the elevation draws nothing across it, it stands off the plane the others agree on (its lines may be another
+opening's), no opening is built there, or what was read would stand higher than the wall it is in — the wall's
+height came from the project, not from the drawing, so the drawing's own reading is kept and the wall is left to be
+put right first. `applied` is how many were given it, `applied_ids` which, `left` how many were not, `made` the
+types that had to be made, and `too_high` how many would not fit their wall. It is one undo step for the lot, and
+an opening that stands at what the drawing says already is not touched at all, so giving it a second time is no
+step to take back.
 
 ## The rooms those walls shut in
 
@@ -680,7 +710,13 @@ openings are on the face and how many have both a sill and a head, each of them 
 sill 70.70 m, head 71.90 m, 1200 mm high*), and an opening the elevation draws nothing of said to be that and no
 more. The three checks are said too, where they have something to say: how many openings stand off the plane the
 others agree on, and how far the lines found fall from where the plan puts them, which is the anchor's own error and
-is read on the Parts tab. It builds nothing, as Find builds nothing.
+is read on the Parts tab. Reading builds nothing, as Find builds nothing.
+
+**Apply These Heights**, beside Read, gives what was read to the openings the Walls tab built: it is greyed until
+there is a reading to give and the storey's floor is said, and the window says which of the two is missing. What it
+did is said where the reading is — how many openings were given the heights the elevation draws, what types had to
+be made for them (*Fixed 1500 x 1200, Fixed 1200 x 1200*), how many were left as they were, and on each of those
+what stood in the way, after the line that says what the drawing draws of it.
 
 A Find that comes back with no wall at all is nearly always a drawing linked at the wrong scale, and the window says
 so. Where the drawing measures on itself, it says what the drawing says: `trace_walls` passes `scale_says` on and the

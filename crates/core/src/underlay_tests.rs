@@ -399,6 +399,138 @@ fn the_openings_a_plan_finds_take_their_sill_and_head_from_the_elevation() {
     assert_eq!(out["openings"][1]["above"], json!(1000.0));
 }
 
+/// Every window of the project, as it was built: how high its type is and how high its own sill stands, in one
+/// order whatever order they were made in.
+fn windows_of(s: &Session) -> Vec<(f64, f64)> {
+    let m = &s.model;
+    let mut all: Vec<(f64, f64)> = m
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Window(o) => Some((m.types.window.get(&o.type_name)?.height, o.sill)),
+            _ => None,
+        })
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    all
+}
+
+#[test]
+fn the_openings_a_plan_built_are_given_the_heights_the_elevation_draws() {
+    let mut s = a_survey_in_parts();
+    // The plan's walls and its openings, built as a plan gives them: a plan says nothing of a height, so every
+    // window comes in 1500 high on a 900 sill, which is the size the project's own starter type is.
+    let built = run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    assert_eq!(built["windows"], json!(3), "{built}");
+    assert_eq!(windows_of(&s), vec![(1500.0, 900.0); 3], "{built}");
+    // A reading changes nothing of it, however much it says.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800});
+    run(&mut s, "cad_openings", ask.clone()).expect("it reads");
+    assert_eq!(windows_of(&s), vec![(1500.0, 900.0); 3], "a reading builds nothing and changes nothing");
+    // Asked for, it gives the two the elevation draws what it draws of them: 1200 high each, their sills 900 and
+    // 1000 above the floor. The window in the north wall, which this elevation draws nothing of, is left as it was.
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_openings", told.clone()).expect("it gives them");
+    assert_eq!((out["applied"].as_u64(), out["left"].as_u64()), (Some(2), Some(0)), "{out}");
+    assert_eq!(windows_of(&s), vec![(1200.0, 900.0), (1200.0, 1000.0), (1500.0, 900.0)], "{out}");
+    // Each in a type of its own width and the height that was read, made because the project has no such type.
+    assert_eq!(out["made"], json!(["Fixed 1500 x 1200", "Fixed 1200 x 1200"]), "{out}");
+    assert_eq!(out["openings"][0]["type"], json!("Fixed 1500 x 1200"), "{out}");
+    assert!(out["openings"][0]["applied"].as_u64().is_some(), "{out}");
+    // Given again, the same, and nothing made twice: those types are the project's own now.
+    let out = run(&mut s, "cad_openings", told).expect("again");
+    assert_eq!((out["applied"].as_u64(), out["made"].clone()), (Some(2), Value::Null), "{out}");
+    assert_eq!(windows_of(&s), vec![(1200.0, 900.0), (1200.0, 1000.0), (1500.0, 900.0)]);
+    // Giving them it is one undo step, and a reading is none: one step back is the openings as the plan built
+    // them, and the second giving, which had nothing left to give, was no step at all.
+    run(&mut s, "undo", json!({})).expect("it goes back");
+    assert_eq!(windows_of(&s), vec![(1500.0, 900.0); 3], "one step takes back the lot");
+    // And nothing is given without the floor, which is what a sill stands above.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "apply": true});
+    let e = run(&mut s, "cad_openings", ask).expect_err("it needs the floor");
+    assert!(e.contains("`floor`"), "{e}");
+}
+
+#[test]
+fn a_door_is_made_as_high_as_its_head_stands_above_the_floor_it_opens_onto() {
+    // A plan with a doorway 1 m wide in its south wall, drawn as a gap in both faces of it, and 20 m east the
+    // elevation of that side: the ground, the eaves, and the door with its head 2300 above the floor and its
+    // threshold laid a step under it.
+    let mut lines: Vec<(&str, [f64; 4])> = vec![
+        ("MURI", [0.0, 0.0, 4000.0, 0.0]),
+        ("MURI", [5000.0, 0.0, 10_000.0, 0.0]),
+        ("MURI", [0.0, 300.0, 4000.0, 300.0]),
+        ("MURI", [5000.0, 300.0, 10_000.0, 300.0]),
+        ("MURI", [0.0, 6000.0, 10_000.0, 6000.0]),
+        ("MURI", [0.0, 5700.0, 10_000.0, 5700.0]),
+        ("MURI", [0.0, 0.0, 0.0, 6000.0]),
+        ("MURI", [300.0, 0.0, 300.0, 6000.0]),
+        ("MURI", [10_000.0, 0.0, 10_000.0, 6000.0]),
+        ("MURI", [9700.0, 0.0, 9700.0, 6000.0]),
+        ("PROSPETTO", [20_000.0, 0.0, 30_000.0, 0.0]),
+        ("PROSPETTO", [20_000.0, 3000.0, 30_000.0, 3000.0]),
+    ];
+    let [x0, x1, sill, head] = [24_000.0, 25_000.0, -50.0, 2300.0];
+    lines.push(("PROSPETTO", [x0, sill, x1, sill]));
+    lines.push(("PROSPETTO", [x0, head, x1, head]));
+    lines.push(("PROSPETTO", [x0, sill, x0, head]));
+    lines.push(("PROSPETTO", [x1, sill, x1, head]));
+    let words = [
+        ("TESTO", 1000.0, -1200.0, 300.0, "PIANTA PIANO TERRA"),
+        ("TESTO", 21_000.0, -1200.0, 300.0, "PROSPETTO SUD"),
+        ("QUOTE", 20_500.0, 0.0, 250.0, "69.80"),
+        ("QUOTE", 20_500.0, 3000.0, 250.0, "72.80"),
+    ];
+    let (mut s, _) = sheet(&lines, &words);
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
+    run(&mut s, "cad_anchor", told).expect("it stands");
+    let built = run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    assert_eq!((built["doors"].as_u64(), built["windows"].as_u64()), (Some(1), Some(0)), "{built}");
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "apply": true});
+    let out = run(&mut s, "cad_openings", ask).expect("it reads");
+    let door = &out["openings"][0];
+    // The elevation draws 2350 between the two lines it draws across the door, the lower of them being the
+    // threshold; what is made is 2300 high, from the floor the door opens onto to the head the elevation draws.
+    assert_eq!((door["kind"].clone(), door["high"].clone()), (json!("door"), json!(2350.0)), "{out}");
+    assert_eq!((door["made"].clone(), door["made_sill"].clone()), (json!(2300.0), json!(0.0)), "{out}");
+    assert_eq!(out["made"], json!(["Single 900 x 2300"]), "{out}");
+    let doors: Vec<(f64, f64)> = s
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Door(o) => Some((s.model.types.door.get(&o.type_name)?.height, o.sill)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(doors, vec![(2300.0, 0.0)], "the door stands on its floor and reaches the head that was drawn");
+}
+
+#[test]
+fn an_opening_the_elevation_says_nothing_of_is_left_as_it_was_and_says_why() {
+    let mut s = a_survey_in_parts();
+    run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    // Read against the storey above, where this elevation draws none of these openings: every one of them keeps
+    // what it was built at, and each says what was in the way of giving it anything else.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 72_800, "apply": true});
+    let out = run(&mut s, "cad_openings", ask).expect("it reads");
+    assert_eq!((out["applied"].as_u64(), out["found"].as_u64()), (Some(0), Some(0)), "{out}");
+    assert_eq!(out["openings"][0]["left"], json!("the elevation draws nothing across it"), "{out}");
+    assert_eq!(windows_of(&s), vec![(1500.0, 900.0); 3], "nothing of the project is changed over a reading like that");
+    // And where the walls were never built, there is nothing to give it to: it is said, not invented.
+    let mut bare = a_survey_in_parts();
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "apply": true});
+    let out = run(&mut bare, "cad_openings", ask).expect("it reads");
+    assert_eq!((out["applied"].as_u64(), out["left"].as_u64()), (Some(0), Some(2)), "{out}");
+    assert_eq!(out["openings"][0]["left"], json!("no opening is built there"), "{out}");
+}
+
 #[test]
 fn an_elevation_that_does_not_stand_against_its_plan_reads_no_openings_and_says_so() {
     let (mut s, _) = a_survey();

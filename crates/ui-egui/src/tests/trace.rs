@@ -210,8 +210,66 @@ fn the_openings_it_found_are_drawn_over_the_plan_and_come_in_as_doors_and_window
 
 #[test]
 fn the_openings_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_nothing() {
-    // A survey of one storey: the plan of a room with two windows in its south wall, and 20 m east of it the
-    // elevation of that side, which draws the ground, the eaves, a rectangle around each window, and two heights.
+    let mut h = a_storey_with_an_elevation();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Openings");
+    // The elevation and the plan it is a view of, each the first of its kind among the parts.
+    assert_eq!((combo_value(&h, "The elevation"), combo_value(&h, "The plan")), ("PROSPETTO SUD".to_string(), "PIANTA".to_string()));
+    press(&mut h, "Read the Sills and Heads");
+    assert!(says(&h, "2 openings on this face, 2 of them with a sill and a head."), "what it read is said");
+    assert!(says(&h, "1500 mm Window: sill 70.70 m, head 71.90 m, 1200 mm high"), "the first window as the elevation draws it");
+    assert!(says(&h, "1200 mm Window: sill 70.80 m, head 72.00 m, 1200 mm high"), "and the second");
+    // It reads and reports: nothing is built, and the project is where it was.
+    assert!(ids(&h, "wall").is_empty() && ids(&h, "window").is_empty(), "the sills and the heads build nothing");
+    assert!(h.state().trace_dialog.as_ref().is_some_and(|d| d.openings.is_some()), "the window keeps what it read");
+}
+
+#[test]
+fn the_openings_tab_gives_what_it_read_to_the_openings_the_walls_tab_built() {
+    let mut h = a_storey_with_an_elevation();
+    // The walls and their openings built from the plan, as the Walls tab builds them: a plan says nothing of a
+    // height, so each window comes in at the size the project's own starter type is.
+    h.state_mut().session.execute("trace_walls", &json!({"part": "PIANTA", "openings": true})).expect("it builds");
+    h.run();
+    assert_eq!(windows_of(&h), vec![(1500.0, 900.0); 2], "the starter size, until an elevation says otherwise");
+    shortcut(&mut h, "TW");
+    press(&mut h, "Openings");
+    press(&mut h, "Read the Sills and Heads");
+    // Nothing is given until the floor of the storey is said, which is what a sill is made so far above: the
+    // ground, written 69.80 on this elevation.
+    assert!(says(&h, "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it."));
+    assert_eq!(windows_of(&h), vec![(1500.0, 900.0); 2], "and read again it is still a reading");
+    if let Some(d) = h.state_mut().trace_dialog.as_mut() {
+        d.floor = 69_800.0;
+    }
+    h.run();
+    press(&mut h, "Read the Sills and Heads");
+    assert!(says(&h, "1500 mm Window: sill 900 mm above the floor, 1200 mm high"), "what it read, in the two numbers it is made to");
+    press(&mut h, "Apply These Heights");
+    assert!(says(&h, "2 openings were given the heights the elevation draws."), "what was given");
+    assert!(says(&h, "2 types were made for them: Fixed 1500 x 1200, Fixed 1200 x 1200."), "at their own widths and the heights read");
+    assert_eq!(windows_of(&h), vec![(1200.0, 900.0), (1200.0, 1000.0)], "each as the elevation draws it");
+}
+
+/// Every window of the project: how high the type it is of stands, and how high its own sill does.
+fn windows_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
+    let m = &h.state().session.model;
+    let mut all: Vec<(f64, f64)> = m
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            bimcraft_core::model::Element::Window(o) => Some((m.types.window.get(&o.type_name)?.height, o.sill)),
+            _ => None,
+        })
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    all
+}
+
+/// A survey of one storey, linked and in its parts, with the elevation stood against the plan: the plan of a room
+/// with two windows in its south wall, and 20 m east of it the elevation of that side, which draws the ground, the
+/// eaves, a rectangle around each window, and the two heights it is drawn to.
+fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     let mut lines = room("MURI", [0.0, 0.0, 10_000.0, 6000.0], 300.0);
     for [x0, x1] in [[3000.0, 4500.0], [6000.0, 7200.0]] {
         lines.push(("MURI".to_string(), [x0, 0.0, x0, 300.0]));
@@ -238,17 +296,7 @@ fn the_openings_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_n
     let anchor = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
     h.state_mut().session.execute("cad_anchor", &anchor).expect("it stands");
     h.run();
-    shortcut(&mut h, "TW");
-    press(&mut h, "Openings");
-    // The elevation and the plan it is a view of, each the first of its kind among the parts.
-    assert_eq!((combo_value(&h, "The elevation"), combo_value(&h, "The plan")), ("PROSPETTO SUD".to_string(), "PIANTA".to_string()));
-    press(&mut h, "Read the Sills and Heads");
-    assert!(says(&h, "2 openings on this face, 2 of them with a sill and a head."), "what it read is said");
-    assert!(says(&h, "1500 mm Window: sill 70.70 m, head 71.90 m, 1200 mm high"), "the first window as the elevation draws it");
-    assert!(says(&h, "1200 mm Window: sill 70.80 m, head 72.00 m, 1200 mm high"), "and the second");
-    // It reads and reports: nothing is built, and the project is where it was.
-    assert!(ids(&h, "wall").is_empty() && ids(&h, "window").is_empty(), "the sills and the heads build nothing");
-    assert!(h.state().trace_dialog.as_ref().is_some_and(|d| d.openings.is_some()), "the window keeps what it read");
+    h
 }
 
 #[test]

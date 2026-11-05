@@ -1994,6 +1994,14 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "La soglia di una porta è il pavimento stesso, e non c'è nessuna linea disegnata attraverso, quindi è il pavimento a dare l'altezza di una porta.",
     ],
     ["Read the Sills and Heads", "Leggi davanzali e architravi"],
+    ["Apply These Heights", "Applica queste quote"],
+    [
+        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
+        "Per dare queste quote alle aperture serve la quota del pavimento del piano, perché il davanzale si misura da lì.",
+    ],
+    ["{} openings were given the heights the elevation draws.", "{} aperture hanno preso le quote disegnate dal prospetto."],
+    ["{} types were made for them: {}.", "Sono stati creati {} tipi per loro: {}."],
+    ["{} of them were left as they were, each saying why.", "{} sono rimaste come erano, e ognuna dice perché."],
     ["{} openings on this face, {} of them with a sill and a head.", "{} aperture su questa facciata, {} con davanzale e architrave."],
     [
         "{} of them have no two lines drawn across them, so nothing is said of their heights.",

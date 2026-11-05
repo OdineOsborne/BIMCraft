@@ -2795,6 +2795,23 @@ const WORDS: &[[&str; 3]] = &[
         "El umbral de una puerta es el propio suelo, y no se dibuja ninguna línea a través de él, así que es el suelo lo que da la altura de una puerta.",
     ],
     ["Read the Sills and Heads", "Ler as soleiras e os lintéis", "Leer los antepechos y los dinteles"],
+    ["Apply These Heights", "Aplicar estas alturas", "Aplicar estas alturas"],
+    [
+        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
+        "Dar estas alturas aos vãos exige que se diga o piso do andar, pois a soleira é feita a essa altura acima dele.",
+        "Dar estas alturas a los huecos exige decir el suelo de la planta, pues el antepecho se hace a esa altura sobre él.",
+    ],
+    [
+        "{} openings were given the heights the elevation draws.",
+        "{} vãos receberam as alturas que o alçado desenha.",
+        "{} huecos recibieron las alturas que dibuja el alzado.",
+    ],
+    ["{} types were made for them: {}.", "{} tipos foram criados para eles: {}.", "{} tipos se crearon para ellos: {}."],
+    [
+        "{} of them were left as they were, each saying why.",
+        "{} deles ficaram como estavam, dizendo cada um porquê.",
+        "{} de ellos quedaron como estaban, diciendo cada uno por qué.",
+    ],
     [
         "{} openings on this face, {} of them with a sill and a head.",
         "{} vãos nesta face, {} deles com soleira e lintel.",

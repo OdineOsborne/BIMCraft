@@ -1720,6 +1720,14 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "门的门槛就是地面本身，没有线画过它，所以门的高度由地面标高给出。",
     ],
     ["Read the Sills and Heads", "读取窗台和过梁"],
+    ["Apply These Heights", "应用这些高度"],
+    [
+        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
+        "要把这些高度赋给洞口，需先说明本层地面标高，因为窗台高度是从地面算起的。",
+    ],
+    ["{} openings were given the heights the elevation draws.", "{} 个洞口已采用立面所绘的高度。"],
+    ["{} types were made for them: {}.", "已为它们新建 {} 个类型：{}。"],
+    ["{} of them were left as they were, each saying why.", "其中 {} 个保持原样，各自说明了原因。"],
     ["{} openings on this face, {} of them with a sill and a head.", "本面上有 {} 个洞口，其中 {} 个有窗台和过梁。"],
     [
         "{} of them have no two lines drawn across them, so nothing is said of their heights.",
