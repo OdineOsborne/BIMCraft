@@ -210,6 +210,20 @@ pub static ALL: &[Command] = &[
         cad_heights,
     ),
     edit(
+        "cad_anchor",
+        "CAD Anchor",
+        &[],
+        "{underlay?, part, plan?, drawn?, at?} where a part of a drawing stands against the plan it is a view of: two \
+         points of the building as the plan draws them (`plan`) and the same two as the part draws them (`drawn`). An \
+         elevation shows one face of the building at the plan's own scale, so two points that both lie on that face fix \
+         the whole of it, and the two distances must come out the same, which is the check that they are the same two \
+         points: where they are not, it is refused and both distances are said. Without `plan` and `drawn` nothing \
+         changes and what the part stands at is reported: `along`, the degrees its face runs at in plan, and `out`, \
+         how far the two distances differ. `at` is a list of points in the plan, and `drawn_at` is where the part \
+         draws each of them, which is how a reading is held against the drawing",
+        cad_anchor,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -2123,7 +2137,7 @@ fn cad_layers(s: &mut Session, p: &Value) -> R {
 }
 
 /// What a part of a drawing may be told about itself.
-const PART_FIELDS: [&str; 5] = ["name", "kind", "region", "level", "phase"];
+const PART_FIELDS: [&str; 6] = ["name", "kind", "region", "level", "phase", "anchor"];
 
 /// One part of a drawing, read from what the user said of it.
 fn part_told(c: &str, m: &Model, row: &Value) -> Result<crate::model::Part, String> {
@@ -2151,7 +2165,87 @@ fn part_told(c: &str, m: &Model, row: &Value) -> Result<crate::model::Part, Stri
         _ => Some(m.guid(level_param(c, m, row, "level")?)),
     };
     let phase = string(c, row, "phase")?;
-    Ok(crate::model::Part { name, kind, region, level, phase })
+    let anchor = match row.get("anchor") {
+        v if absent(v) => None,
+        Some(Value::Object(_)) => Some(anchor_told(c, &row["anchor"])?),
+        Some(v) => return Err(bad(c, format!("`anchor` is {{plan, drawn}}, each two points, not {v}"))),
+        None => None,
+    };
+    Ok(crate::model::Part { name, kind, region, level, phase, anchor })
+}
+
+/// Where a part stands against its plan, read from what the user said of it.
+fn anchor_told(c: &str, row: &Value) -> Result<crate::model::Anchor, String> {
+    let pair = |key: &str| match points(c, row, key)?.as_slice() {
+        [a, b] => Ok([*a, *b]),
+        _ => Err(bad(c, format!("an anchor's `{key}` is two points, [[x, y], [x, y]]"))),
+    };
+    let anchor = crate::model::Anchor { plan: pair("plan")?, drawn: pair("drawn")? };
+    // An elevation draws its face at the plan's own scale, so the two distances must come out the same. Where they
+    // do not, the two points are not the same two points, or they do not both lie on the face it draws.
+    if anchor.out() > crate::model::ANCHOR_AGREE {
+        let (across, drawn) = (anchor.plan[1].dist(anchor.plan[0]), (anchor.drawn[1].0 - anchor.drawn[0].0).abs());
+        return Err(bad(
+            c,
+            format!(
+                "the plan has those two points {across:.0} mm apart and the part draws them {drawn:.0} mm apart: \
+                 pick two points that both lie on the face it draws, a corner at each end of it"
+            ),
+        ));
+    }
+    Ok(anchor)
+}
+
+fn cad_anchor(s: &mut Session, p: &Value) -> R {
+    let c = "cad_anchor";
+    let (id, mut u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which part of the drawing to stand against the plan"))?;
+    let at = match p.get("at") {
+        v if absent(v) => Vec::new(),
+        _ => points(c, p, "at")?,
+    };
+    let told = match (p.get("plan"), p.get("drawn")) {
+        (Some(_), Some(_)) => Some(anchor_told(c, p)?),
+        (None, None) => None,
+        _ => return Err(bad(c, "an anchor needs both `plan` and `drawn`, two points each")),
+    };
+    let was = u.clone();
+    if let Some(anchor) = told {
+        // Refused where the drawing has no part of that name, which says what it is made of instead.
+        part_of(c, &u, &name)?;
+        if let Some(part) = u.parts.iter_mut().find(|part| part.name == name) {
+            part.anchor = Some(anchor);
+        }
+    }
+    let part = part_of(c, &u, &name)?;
+    if u != was {
+        match s.model_mut().elements.get_mut(id) {
+            Some(Element::Underlay(slot)) => *slot = u,
+            _ => return Err(bad(c, format!("{id} is no drawing under a plan"))),
+        }
+    }
+    // Where the part draws the points asked about, which is how what it says is checked against what is drawn.
+    let drawn_at: Vec<Value> = match &part.anchor {
+        Some(anchor) => at.iter().filter_map(|p| anchor.drawn_x(*p)).map(hundredth).map(Value::from).collect(),
+        None => Vec::new(),
+    };
+    Ok(json!({
+        "id": id,
+        "part": part.name,
+        "anchor": part.anchor.as_ref().map(anchor_json),
+        "drawn_at": drawn_at,
+    }))
+}
+
+/// An anchor as a command reports it.
+fn anchor_json(anchor: &crate::model::Anchor) -> Value {
+    let point = |p: P2| json!([hundredth(p.0), hundredth(p.1)]);
+    json!({
+        "plan": [point(anchor.plan[0]), point(anchor.plan[1])],
+        "drawn": [point(anchor.drawn[0]), point(anchor.drawn[1])],
+        "along": anchor.along().map(|d| hundredth(d.1.atan2(d.0).to_degrees())),
+        "out": hundredth(anchor.out()),
+    })
 }
 
 /// What a part says of itself, as the command reports it.
@@ -2163,6 +2257,7 @@ fn part_json(m: &Model, part: &crate::model::Part) -> Value {
         "region": [[hundredth(sw.0), hundredth(sw.1)], [hundredth(ne.0), hundredth(ne.1)]],
         "level": part.level.map(|g| m.elements.id(g)),
         "phase": part.phase,
+        "anchor": part.anchor.as_ref().map(anchor_json),
     })
 }
 
@@ -2235,7 +2330,15 @@ fn cad_heights(s: &mut Session, p: &Value) -> R {
     // draughtsman thought to mark, and draws every one of them.
     let courses: Vec<Value> = crate::underlay::courses(&s.model, &u, part.region, read.datum, MOST_COURSES)
         .iter()
-        .map(|course| json!({"height": course.height.map(hundredth), "y": hundredth(course.y), "span": hundredth(course.span)}))
+        .map(|course| {
+            json!({
+                "height": course.height.map(hundredth),
+                "y": hundredth(course.y),
+                "span": hundredth(course.span),
+                "from": hundredth(course.from),
+                "to": hundredth(course.to),
+            })
+        })
         .collect();
     Ok(json!({
         "id": id,

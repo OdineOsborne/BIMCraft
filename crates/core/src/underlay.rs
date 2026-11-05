@@ -192,6 +192,9 @@ pub struct Course {
     pub height: Option<f64>,
     /// How much line is drawn at it, in millimetres, taking every piece together.
     pub span: f64,
+    /// How far it reaches, left and right, in the project's millimetres: where the pieces drawn at it begin and end.
+    pub from: f64,
+    pub to: f64,
 }
 
 /// How far from level a line may be drawn and still be one: a drawing's floors are drawn flat, and a millimetre over
@@ -212,7 +215,7 @@ const COURSE_SHORTEST: f64 = 500.0;
 pub fn courses(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>, most: usize) -> Vec<Course> {
     let [sw, ne] = region;
     let inside = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
-    let mut at: std::collections::BTreeMap<i64, (f64, f64)> = std::collections::BTreeMap::new();
+    let mut at: std::collections::BTreeMap<i64, (f64, f64, f64, f64)> = std::collections::BTreeMap::new();
     for (_, points, closed) in lines_by_layer(m, u) {
         let close = match (closed, points.len() > 2, points.first(), points.last()) {
             (true, true, Some(a), Some(b)) => Some((*b, *a)),
@@ -232,11 +235,15 @@ pub fn courses(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>, mos
             }
             let y = (a.1 + b.1) / 2.0;
             let key = (y / COURSE_SAME).round() as i64;
-            let held = at.entry(key).or_insert((y, 0.0));
+            let (left, right) = (a.0.min(b.0), a.0.max(b.0));
+            let held = at.entry(key).or_insert((y, 0.0, left, right));
             held.1 += len;
+            held.2 = held.2.min(left);
+            held.3 = held.3.max(right);
         }
     }
-    let mut found: Vec<Course> = at.values().map(|(y, span)| Course { y: *y, height: datum.map(|d| y + d), span: *span }).collect();
+    let mut found: Vec<Course> =
+        at.values().map(|(y, span, from, to)| Course { y: *y, height: datum.map(|d| y + d), span: *span, from: *from, to: *to }).collect();
     found.sort_by(|a, b| b.span.total_cmp(&a.span));
     found.truncate(most);
     found.sort_by(|a, b| a.y.total_cmp(&b.y));

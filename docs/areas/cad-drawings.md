@@ -515,6 +515,30 @@ What is a height and what is not: a word is a height where it reads as a number 
 `HEIGHTS_AGREE` is 50 mm, which is wider than a mark written to the centimetre and placed by eye, and narrower than
 one storey's mark read as another's.
 
+## Standing an elevation against its plan
+
+Reading heights is one thing; knowing which window they belong to is another. In the vertical the drawing anchors
+itself, because its marks say what height they are. Sideways it says nothing: no mark in a DXF ties a point of an
+elevation to a point of the plan beside it. So the user says it, with two points (`Part::anchor`, `cad_anchor`): two
+points of the building as the plan draws them, and the same two as the elevation draws them.
+
+Two is exactly enough, and only if both lie on the face the elevation shows. An elevation is that face seen square
+on at the plan's own scale, so the direction the face runs in plan is the direction between the two plan points, and
+the offset is what carries one to the other. Where a plan point falls off the face, it falls onto it: `drawn_x`
+projects, which is what an elevation does.
+
+And because the scale is the plan's, **the two distances must come out the same** — which is the check that they
+are the same two points. It is worth its keep. Anchoring the permesso di costruire's PROSPETTO SUD-EST by the ends
+of the traced south wall against the ends of the elevation's outline is refused: *the plan has those two points 8850
+mm apart and the part draws them 9287 mm apart*. The 437 mm is half a wall at each end — a traced wall's axis runs
+down the middle of it, and the elevation draws the outside. Anchored by the outer corners instead, it comes out
+`out: 0`, `along: 0°`, and a point halfway along the facade lands halfway along the drawing.
+
+What is not attempted is finding the anchor by itself. Matching the plan's outline to the elevation's would need to
+know which of them is the outside of what, and the two differ by a wall's thickness, an eaves overhang and a plinth,
+none of which the drawing labels. Two clicks settle it, and the arithmetic says at once whether they were the right
+two.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an

@@ -686,6 +686,51 @@ pub struct Part {
     /// its own, so a part says the phase of everything in it, whatever its layers say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Where it stands against the plan it is a view of, for an elevation or a section: none until it is said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Anchor>,
+}
+
+/// Where a view of the building stands against its plan: two points of the building as the plan draws them, and the
+/// same two as this part draws them. An elevation shows one face at the plan's own scale, so two points that both
+/// lie on that face fix the whole of it, which way it looks and where its left-hand edge is; and because the scale
+/// is the plan's, the two distances must come out the same, which is the check that they were the same two points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Anchor {
+    /// The two points where the plan draws them, in the project's millimetres.
+    pub plan: [P2; 2],
+    /// The same two where this part draws them.
+    pub drawn: [P2; 2],
+}
+
+/// How far the two distances of an anchor may differ and still be the same two points: a point is picked by snapping
+/// to what the drawing draws, so a few centimetres is the picking, and anything more is two different corners.
+pub const ANCHOR_AGREE: f64 = 100.0;
+
+impl Anchor {
+    /// The way the face runs in plan, as a unit vector: none where the two points are one point.
+    pub fn along(&self) -> Option<P2> {
+        let d = self.plan[1] - self.plan[0];
+        let len = d.dist(P2(0.0, 0.0));
+        (len.is_finite() && len > 1e-9).then(|| P2(d.0 / len, d.1 / len))
+    }
+
+    /// How far the two distances differ, in millimetres: nothing where both points lie on the face the part draws,
+    /// and as much as the points are out of it where they do not.
+    pub fn out(&self) -> f64 {
+        let across = self.plan[1].dist(self.plan[0]);
+        let drawn = (self.drawn[1].0 - self.drawn[0].0).abs();
+        (across - drawn).abs()
+    }
+
+    /// Where the part draws the plan's point `p`: how far along its own x. None where it is no anchor.
+    pub fn drawn_x(&self, p: P2) -> Option<f64> {
+        let along = self.along()?;
+        let forward = self.drawn[1].0 >= self.drawn[0].0;
+        let s = along.dot(p - self.plan[0]);
+        Some(self.drawn[0].0 + if forward { s } else { -s })
+    }
 }
 
 impl Part {
@@ -4036,6 +4081,18 @@ impl Model {
                             && !self.phases.iter().any(|p| p == phase)
                         {
                             return Err(format!("{what}: there's no phase `{phase}` for it to be in"));
+                        }
+                        if let Some(anchor) = &part.anchor {
+                            let points = [anchor.plan[0], anchor.plan[1], anchor.drawn[0], anchor.drawn[1]];
+                            if !points.iter().all(|p| p.0.is_finite() && p.1.is_finite()) {
+                                return Err(format!("{what}: where it stands against the plan must be four points"));
+                            }
+                            if anchor.along().is_none() {
+                                return Err(format!("{what}: the two points in the plan are one point, and two are needed"));
+                            }
+                            if (anchor.drawn[1].0 - anchor.drawn[0].0).abs() <= 1e-9 {
+                                return Err(format!("{what}: the two points it draws stand one above the other, and a face runs sideways"));
+                            }
                         }
                         if u.parts.iter().filter(|other| other.name == part.name).count() > 1 {
                             return Err(format!("{who}: it has two parts called `{}`, and a part is named to be named", part.name));

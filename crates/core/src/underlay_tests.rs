@@ -199,6 +199,35 @@ fn the_heights_a_section_draws_lines_across_at_are_read_with_how_much_is_drawn_a
 }
 
 #[test]
+fn an_elevation_is_stood_against_its_plan_by_two_points_whose_distances_must_agree() {
+    let (mut s, _) = written(&[("TESTO", 0.0, 0.0, 250.0, "PROSPETTO SUD")]);
+    let parts = json!([{"name": "PROSPETTO SUD", "kind": "elevation", "region": [[-50_000, -50_000], [50_000, 50_000]]}]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes it");
+    // The face runs 8 m east in the plan, and the elevation draws those same 8 m starting at x 20000.
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [8000, 0]], "drawn": [[20_000, 0], [28_000, 0]]});
+    let out = run(&mut s, "cad_anchor", told).expect("it stands");
+    assert_eq!(out["anchor"]["along"], json!(0.0), "{out}");
+    assert_eq!(out["anchor"]["out"], json!(0.0));
+    // A point of the plan is drawn where its distance along the face puts it, and one off the face falls onto it.
+    let ask = json!({"part": "PROSPETTO SUD", "at": [[4000, 0], [4000, 3000], [0, 0], [8000, 0]]});
+    let out = run(&mut s, "cad_anchor", ask).expect("it says");
+    assert_eq!(out["drawn_at"], json!([24_000.0, 24_000.0, 20_000.0, 28_000.0]), "{out}");
+    // Two points that are not the same two points are refused, and both distances are said.
+    let bad = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [8000, 0]], "drawn": [[20_000, 0], [25_000, 0]]});
+    let e = run(&mut s, "cad_anchor", bad).expect_err("5 m is not 8 m");
+    assert!(e.contains("8000") && e.contains("5000"), "{e}");
+    // What it was stays what it was: a refused reading leaves the project alone.
+    let out = run(&mut s, "cad_anchor", json!({"part": "PROSPETTO SUD"})).expect("it reads");
+    assert_eq!(out["anchor"]["drawn"], json!([[20_000.0, 0.0], [28_000.0, 0.0]]));
+    // A face running north, drawn right to left: the far end of the plan is the near end of the drawing.
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [0, 8000]], "drawn": [[28_000, 0], [20_000, 0]]});
+    run(&mut s, "cad_anchor", told).expect("it stands");
+    let out = run(&mut s, "cad_anchor", json!({"part": "PROSPETTO SUD", "at": [[0, 2000]]})).expect("it says");
+    assert_eq!(out["anchor"]["along"], json!(90.0), "{out}");
+    assert_eq!(out["drawn_at"], json!([26_000.0]));
+}
+
+#[test]
 fn an_elevation_part_reports_its_heights_through_the_command() {
     let words = [
         ("QUOTE", 0.0, 0.0, 250.0, "69.70"),

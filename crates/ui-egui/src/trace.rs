@@ -255,7 +255,7 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
         let name = bimcraft_core::underlay::caption(m, u, region)
             .filter(|said| !taken(said))
             .unwrap_or_else(|| tf("Part {}", &[&(parts.len() + 1).to_string()]));
-        parts.push(Part { name, kind: PartKind::Plan, region, level: d.level, phase: None });
+        parts.push(Part { name, kind: PartKind::Plan, region, level: d.level, phase: None, anchor: None });
         changed = true;
     }
     ui.add_space(6.0);
@@ -348,15 +348,20 @@ fn kind_word(kind: PartKind) -> &'static str {
     }
 }
 
-/// A part as `cad_parts` takes it.
+/// A part as `cad_parts` takes it. Everything it holds goes back, the anchor included: the list is the whole of
+/// what the drawing is made of, so what this leaves out is thrown away.
 fn part_json(m: &Model, part: &Part) -> Value {
     let [sw, ne] = part.region;
+    let point = |p: bimcraft_core::geom::P2| json!([p.0, p.1]);
     json!({
         "name": part.name,
         "kind": part.kind.word(),
         "region": [[sw.0, sw.1], [ne.0, ne.1]],
         "level": part.level.map(|g| m.elements.id(g)),
         "phase": part.phase,
+        "anchor": part.anchor.as_ref().map(|a| {
+            json!({"plan": [point(a.plan[0]), point(a.plan[1])], "drawn": [point(a.drawn[0]), point(a.drawn[1])]})
+        }),
     })
 }
 
