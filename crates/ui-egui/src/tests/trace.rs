@@ -322,6 +322,35 @@ fn the_heights_tab_builds_the_slab_the_elevation_draws_under_this_storeys_floor(
     assert!(says(&h, "A slab of 60.00 m² was built, the floor of Level 1."));
 }
 
+#[test]
+fn the_walls_tab_builds_the_stair_the_plan_draws_at_the_going_it_draws_it() {
+    let mut h = a_storey_with_an_elevation();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    press(&mut h, "Read the Stair");
+    // The going and the width are what a plan draws at the size they are built to; how high one step rises is
+    // the storey's, which is where the level above stands.
+    assert!(says(&h, "This stair climbs 3000 mm in 9 risers of 333 mm, each step 280 mm deep."), "what it read");
+    assert!(says(&h, "It is 1000 mm wide and climbs north."));
+    // Nine risers up three metres is a ladder, and the rule of thumb says so rather than letting it pass.
+    assert!(says(&h, "Two risers and a going come to 947 mm"));
+    assert!(stairs_of(&h).is_empty(), "a reading builds nothing");
+    press(&mut h, "Build This Stair");
+    assert_eq!(stairs_of(&h), vec![(1000.0, 280.0, 9)], "as deep and as wide as the plan draws it");
+}
+
+/// Every stair of the project: how wide it is, the going of one step, and how many risers it climbs in.
+fn stairs_of(h: &Harness<BimApp>) -> Vec<(f64, f64, u32)> {
+    let m = &h.state().session.model;
+    m.elements
+        .values()
+        .filter_map(|e| match e {
+            bimcraft_core::model::Element::Stair(st) => Some((st.width, st.tread, m.flight(st).0)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every slab of the project: how thick the type it is of is, and how far its top stands above its level.
 fn slabs_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
     let m = &h.state().session.model;
@@ -381,7 +410,7 @@ fn windows_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
 }
 
 /// A survey of one storey, linked and in its parts, with the elevation stood against the plan: the plan of a room
-/// with two windows in its south wall, and 20 m east of it the elevation of that side, which draws the ground, the
+/// with two windows in its south wall and a flight of nine steps against its north wall, and 20 m east of it the elevation of that side, which draws the ground, the
 /// line the walls stop at, the underside of the slab this floor is, the two rakes of the roof, a rectangle around
 /// each window, and the two heights it is drawn to.
 fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
@@ -390,6 +419,11 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
         lines.push(("MURI".to_string(), [x0, 0.0, x0, 300.0]));
         lines.push(("MURI".to_string(), [x1, 0.0, x1, 300.0]));
         lines.push(("MURI".to_string(), [x0, 150.0, x1, 150.0]));
+    }
+    // A flight of nine steps 280 apart and 1000 wide, standing in the plan against its north wall.
+    for n in 0..9 {
+        let y = 3300.0 + 280.0 * f64::from(n);
+        lines.push(("SCALA".to_string(), [7000.0, y, 8000.0, y]));
     }
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));

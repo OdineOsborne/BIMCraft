@@ -374,6 +374,39 @@ pub static ALL: &[Command] = &[
         cad_floor,
     ),
     edit(
+        "cad_stair",
+        "CAD Stair",
+        &[],
+        "{underlay?, part?, plan?, level?, region?, flight?, height?, risers?, going?, width?, flip?, apply?} the \
+         stair a plan draws, read and reported without changing the project unless `apply` asks for it. A plan \
+         draws the steps of a stair one behind another, at the going they are built to, so the going and the width \
+         are the two things of a stair a plan gives at their true size; how high one step rises it gives nothing of \
+         at all, and that comes from the storey. `flights` is every run of lines the plan draws alike, parallel and \
+         evenly apart, the longest first: how many `steps` it holds, the `going` they stand apart and the `width` \
+         they are drawn, the `length` of the run, where it `starts` and which way it `climbs`, whether it `could` \
+         be a stair, and which one was `taken`. A hatch, a fence, a run of joists and a ladder are all drawn the \
+         way a flight is, so one of them could be a stair where its steps stand 200 to 400 mm apart and are drawn \
+         600 to 2500 mm long; what is left is said and never built. `flight` takes one by its place in that list \
+         where the longest is not the one wanted, and `going` and `width` say either outright. \
+         \
+         `height` is how far it climbs: where the level above stands, or what `height` says, and `height_from` \
+         which it was. `risers` is how many it climbs in, which is how many steps the plan draws, since the lines \
+         of a flight are its risers and the first of them stands where the stair starts; a plan cut partway up a \
+         flight draws only the steps under the cut, and `risers` says the whole number outright. `riser` is the \
+         height over that, and `ratio` is two of those and a going, which is about 630 mm on a stair anyone climbs \
+         (Blondel's rule): `comfortable` is whether it falls between 600 and 660, which is what says a count read \
+         off a cut plan is one step out. \
+         \
+         Which end of a run is its foot is the one thing a plan draws nothing of, so the run is read from its \
+         south end, or from its west where it runs east and west, and `flip` turns it round; `starts` and `climbs` \
+         say where that puts it. `apply` builds it on the plan's own level (or `level`), climbing to the level \
+         above, as `stair` builds one; given again from the same reading it builds no second stair. Returns `id`, \
+         `part`, `level`, `flights`, `steps`, `going`, `width`, `length`, `start`, `angle`, `climbs`, `height`, \
+         `height_from`, `risers`, `riser`, `ratio` and `comfortable`, and with `apply` also `stair`, which it \
+         built",
+        cad_stair,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -3567,6 +3600,225 @@ fn floor_type_for(m: &Model, wanted: f64) -> (String, bool) {
     }
     let free = (2..100).map(|n| format!("{base} ({n})")).find(|n| !m.types.floor.contains_key(n));
     (free.unwrap_or(base), true)
+}
+
+/// How deep the going of one step may be, in millimetres: lines drawn closer than this are a hatch, a fence or a
+/// run of joists, and no stair is built with a tread deeper than that.
+const GOING_LEAST: f64 = 200.0;
+const GOING_MOST: f64 = 400.0;
+
+/// How wide a stair's steps are drawn, in millimetres: narrower is a ladder or a hatch, wider is a floor hatched.
+const STAIR_NARROW: f64 = 600.0;
+const STAIR_WIDE: f64 = 2500.0;
+
+/// What two risers and a going come to on a stair anyone climbs, in millimetres: Blondel's rule, which has
+/// outlived every building code written since, and which is what says a count of steps read off a plan that was
+/// cut partway up the flight is one short.
+const BLONDEL_LEAST: f64 = 600.0;
+const BLONDEL_MOST: f64 = 660.0;
+
+/// Which way a bearing points, as a plan is read. The core's words stay English, because agents read them.
+fn compass(angle: f64) -> &'static str {
+    const POINTS: [&str; 8] = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    let at = ((angle.rem_euclid(360.0) / 45.0).round() as usize) % 8;
+    POINTS.get(at).copied().unwrap_or("east")
+}
+
+fn cad_stair(s: &mut Session, p: &Value) -> R {
+    let c = "cad_stair";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    // The plan to read, where one is named: its area and its level in one word.
+    let told: Option<crate::model::Part> = match string(c, p, "part")?.or(string(c, p, "plan")?) {
+        None => None,
+        Some(name) => Some(part_of(c, &u, &name)?),
+    };
+    if let Some(part) = &told
+        && part.kind != crate::model::PartKind::Plan
+    {
+        return Err(bad(
+            c,
+            format!(
+                "`{}` is {} and no plan: a plan draws the steps of a stair one behind another, at the going they are built to, \
+                 where an elevation draws them one over another",
+                part.name,
+                part.kind.word()
+            ),
+        ));
+    }
+    let (told_going, told_width, told_height) = (num(c, p, "going")?, num(c, p, "width")?, num(c, p, "height")?);
+    for (key, said) in [("going", told_going), ("width", told_width), ("height", told_height)] {
+        if said.is_some_and(|said| !said.is_finite()) {
+            return Err(bad(c, format!("`{key}` is a measure in mm, and that must be a number")));
+        }
+    }
+    if told_going.is_some_and(|going| !(GOING_LEAST..=GOING_MOST).contains(&going)) {
+        return Err(bad(c, format!("`going` is how deep one step is, from {GOING_LEAST} to {GOING_MOST} mm")));
+    }
+    if told_width.is_some_and(|wide| !(STAIR_NARROW..=STAIR_WIDE).contains(&wide)) {
+        return Err(bad(c, format!("`width` is how wide the stair is, from {STAIR_NARROW} to {STAIR_WIDE} mm")));
+    }
+    if told_height.is_some_and(|high| high <= 0.0) {
+        return Err(bad(c, "`height` is how far the stair climbs, in millimetres, and never none"));
+    }
+    let told_risers = match num(c, p, "risers")? {
+        None => None,
+        Some(n) if n.is_finite() && (2.0..=200.0).contains(&n) && n.fract() == 0.0 => Some(n as usize),
+        Some(n) => return Err(bad(c, format!("`risers` is how many risers it climbs in, 2 to 200, and {n} is none"))),
+    };
+    let which = match num(c, p, "flight")? {
+        None => None,
+        Some(n) if n.is_finite() && (0.0..1e6).contains(&n) && n.fract() == 0.0 => Some(n as usize),
+        Some(n) => return Err(bad(c, format!("`flight` is which of the flights found to take, counted from 0, and {n} is none"))),
+    };
+    let flip = flag(c, p, "flip")?;
+    let apply = flag(c, p, "apply")?;
+    // The storey the stair stands on: the plan's own level, which is the one its walls were built on.
+    let level = match (p.get("level"), &told) {
+        (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
+        (_, Some(part)) => part.level.unwrap_or(u.level),
+        _ => u.level,
+    };
+    let was = crate::trace::How::default();
+    let how = crate::trace::How {
+        // The area to look in: the one asked for, or the part's own, as `trace_walls` takes it.
+        within: match (p.get("region"), &told) {
+            (v, _) if !absent(v) => match points(c, p, "region")?.as_slice() {
+                [sw, ne] => Some((*sw, *ne)),
+                _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
+            },
+            (_, Some(part)) => Some((part.region[0], part.region[1])),
+            _ => None,
+        },
+        ..was
+    };
+    let found = crate::trace::flights(&s.model, &u, &how).map_err(|e| bad(c, e))?;
+    // Which of them could be a stair: a hatch, a fence, a run of joists and a ladder are all drawn the way a
+    // flight is, and it is the measure of the steps that tells a stair from those.
+    let could = |f: &crate::trace::Flight| (GOING_LEAST..=GOING_MOST).contains(&f.going) && (STAIR_NARROW..=STAIR_WIDE).contains(&f.width);
+    // The one taken: the one asked for, or else the longest that could be a stair, the list being the longest
+    // first already.
+    let at = match which {
+        Some(at) => Some(at).filter(|at| found.get(*at).is_some_and(could)),
+        None => found.iter().position(could),
+    };
+    let flight = at.and_then(|at| found.get(at));
+    // Which way it climbs: the way the run was read, or the other way. A plan draws the steps and not the arrow
+    // on them, so neither is read off the lines and `flip` is what says it.
+    let way = |f: &crate::trace::Flight| match flip {
+        true => degrees(f.angle + 180.0),
+        false => degrees(f.angle),
+    };
+    // Where it starts: the middle of its first riser, which is the line at the foot of the run.
+    let foot = |f: &crate::trace::Flight| {
+        let end = if flip { f.steps.last() } else { f.steps.first() };
+        end.map(|[a, b]| (*a + *b) * 0.5)
+    };
+    let listed: Vec<Value> = found
+        .iter()
+        .enumerate()
+        .map(|(n, f)| {
+            json!({
+                "steps": f.steps.len(),
+                "going": hundredth(f.going),
+                "width": hundredth(f.width),
+                "length": hundredth(f.going * (f.steps.len().saturating_sub(1)) as f64),
+                "starts": foot(f).map(|at| [hundredth(at.0), hundredth(at.1)]),
+                "climbs": compass(way(f)),
+                "could": could(f),
+                "taken": at == Some(n),
+            })
+        })
+        .collect();
+    let on = s.model.level_above(level);
+    let (height, height_from) = match (told_height, on) {
+        (Some(told), _) => (Some(told), "told"),
+        (None, Some(on)) => (Some(s.model.elevation(on) - s.model.elevation(level)), "levels"),
+        (None, None) => (None, "nothing"),
+    };
+    let going = told_going.or_else(|| flight.map(|f| (f.going * 100.0).round() / 100.0));
+    let width = told_width.or_else(|| flight.map(|f| (f.width * 100.0).round() / 100.0));
+    // How many risers it climbs in: as many as the plan draws lines, because the lines of a flight are its risers
+    // and the stair starts at the first of them. A plan cut partway up draws only those under the cut.
+    let risers = told_risers.or_else(|| flight.map(|f| f.steps.len()));
+    let riser = match (height, risers) {
+        (Some(height), Some(risers)) if risers > 0 => Some(height / risers as f64),
+        _ => None,
+    };
+    let ratio = match (riser, going) {
+        (Some(riser), Some(going)) => Some(riser * 2.0 + going),
+        _ => None,
+    };
+    let mut out = json!({
+        "id": id,
+        "part": told.as_ref().map(|part| part.name.clone()),
+        "level": s.model.level(level).map(|l| l.name.clone()),
+        "flights": listed,
+        "steps": flight.map(|f| f.steps.len()),
+        "going": going.map(hundredth),
+        "width": width.map(hundredth),
+        "length": match (going, risers) {
+            (Some(going), Some(risers)) => Some(hundredth(going * (risers.saturating_sub(1)) as f64)),
+            _ => None,
+        },
+        "start": flight.and_then(foot).map(|at| [hundredth(at.0), hundredth(at.1)]),
+        "angle": flight.map(|f| hundredth(way(f))),
+        "climbs": flight.map(|f| compass(way(f))),
+        "height": height.map(hundredth),
+        "height_from": height_from,
+        "risers": risers,
+        "riser": riser.map(hundredth),
+        "ratio": ratio.map(hundredth),
+        "comfortable": ratio.map(|ratio| (BLONDEL_LEAST..=BLONDEL_MOST).contains(&ratio)),
+    });
+    if !apply {
+        return Ok(out);
+    }
+    let (Some(flight), Some(going), Some(width)) = (flight, going, width) else {
+        return Err(bad(
+            c,
+            format!(
+                "no run of lines in this plan measures like a stair: a stair's steps are drawn {GOING_LEAST} to {GOING_MOST} mm \
+                 apart and {STAIR_NARROW} to {STAIR_WIDE} mm long, and {} runs of lines were found drawn alike and evenly apart. \
+                 `going` and `width` say either outright, and `flight` takes one of them by its place in the list",
+                found.len()
+            ),
+        ));
+    };
+    let (Some(height), Some(riser)) = (height, riser) else {
+        return Err(bad(
+            c,
+            format!(
+                "{} has no level above it for a stair to climb to; `height` is how to say how far it climbs",
+                level_name(&s.model, level)
+            ),
+        ));
+    };
+    let Some(start) = foot(flight) else {
+        return Err(bad(c, "the flight found has no first step for the stair to start at"));
+    };
+    let st = Stair {
+        params: Default::default(),
+        level,
+        // Up to the level above where that is what gives the height, so the stair follows it as a wall does.
+        top_level: told_height.is_none().then_some(on).flatten(),
+        height,
+        start,
+        angle: degrees(way(flight)),
+        width,
+        // The riser is a stair's greatest, and `Model::flight` takes as many as keep each under it: one of this
+        // height is that many exactly.
+        riser,
+        tread: going,
+        landings: Vec::new(),
+    };
+    // The stair this reading already built is left as it is: read and given again, there is nothing left to build.
+    let same = s.model.elements.iter().find(|(_, e)| matches!(e, Element::Stair(had) if *had == st)).map(|(id, _)| id);
+    let built = match same {
+        Some(id) => *id,
+        None => s.model_mut().insert(Element::Stair(st)),
+    };
+    out["stair"] = json!(built);
+    Ok(out)
 }
 
 /// The edges of a footprint grouped by the way they run, each group in the order the edges are numbered: one

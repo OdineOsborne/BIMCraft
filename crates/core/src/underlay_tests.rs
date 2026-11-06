@@ -817,6 +817,131 @@ fn an_elevation_that_draws_no_line_under_the_floor_builds_no_slab_and_says_so() 
     assert!(e.contains("`floor`"), "{e}");
 }
 
+/// The same survey with a stair drawn in its plan: a flight of nine steps 280 apart and 1000 wide standing against
+/// the north wall, and, in the middle of the room, a hatch of eight lines 50 apart drawn the same length — which
+/// is drawn exactly as a flight is and is no stair. The walls are traced from it, so the stair has a storey.
+fn a_stair() -> Session {
+    let (s, _) = a_survey();
+    let path = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.path.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    let mut more = String::new();
+    for n in 0..9 {
+        let y = 3300.0 + 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n{y}\n11\n8000\n21\n{y}\n"));
+    }
+    for n in 0..8 {
+        let y = 1000.0 + 50.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nRETINI\n10\n2000\n20\n{y}\n11\n3000\n21\n{y}\n"));
+    }
+    let text = std::fs::read_to_string(&path).expect("the file").replace("0\nENDSEC\n0\nEOF\n", &format!("{more}0\nENDSEC\n0\nEOF\n"));
+    std::fs::write(&path, text).expect("it is written");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    s
+}
+
+/// Every stair of the project: how wide it is, the going of one step, how many risers it climbs in and how high
+/// each of those rises.
+fn stairs_of(s: &Session) -> Vec<(f64, f64, u32, f64)> {
+    s.model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Stair(st) => {
+                let (risers, each, _) = s.model.flight(st);
+                Some((st.width, st.tread, risers, (each * 100.0).round() / 100.0))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_stair_a_plan_draws_climbs_in_as_many_risers_as_it_draws_steps() {
+    let mut s = a_stair();
+    let ask = json!({"part": "PIANTA PIANO TERRA"});
+    let out = run(&mut s, "cad_stair", ask.clone()).expect("it reads");
+    // Both runs of lines are found, and only one of them measures like a stair: a hatch is drawn exactly as a
+    // flight is, so it is said and not taken rather than quietly built as a stair.
+    let said: Vec<(Value, Value, Value)> = out["flights"]
+        .as_array()
+        .expect("the flights")
+        .iter()
+        .map(|f| (f["going"].clone(), f["could"].clone(), f["taken"].clone()))
+        .collect();
+    assert_eq!(said, vec![(json!(280.0), json!(true), json!(true)), (json!(50.0), json!(false), json!(false))], "{out}");
+    // What the plan draws at the size it is built to: the going of one step and how wide the stair is.
+    assert_eq!((out["going"].clone(), out["width"].clone()), (json!(280.0), json!(1000.0)), "{out}");
+    assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(9), json!(9)), "{out}");
+    assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("north"), json!([7500.0, 3300.0])), "{out}");
+    // The rise is no business of the plan's: it is the storey, which is where the level above stands.
+    assert_eq!((out["height"].clone(), out["height_from"].clone()), (json!(3000.0), json!("levels")), "{out}");
+    // And the two together give the one thing neither says on its own: how high one step rises, held against the
+    // rule that two risers and a going come to about 630.
+    assert_eq!((out["riser"].clone(), out["ratio"].clone()), (json!(333.33), json!(946.67)), "{out}");
+    assert_eq!(out["comfortable"], json!(false), "nine risers up three metres is a ladder: {out}");
+    assert!(stairs_of(&s).is_empty(), "it read and changed nothing: {out}");
+    // Asked for, one stair climbs the storey in nine risers, each step as deep as the plan draws it.
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_stair", told.clone()).expect("it builds");
+    assert!(out["stair"].as_u64().is_some(), "{out}");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 9, 333.33)], "{out}");
+    // One undo step takes it back, and given again from the same reading it builds no second stair.
+    run(&mut s, "undo", json!({})).expect("it goes back");
+    assert!(stairs_of(&s).is_empty());
+    run(&mut s, "cad_stair", told.clone()).expect("again");
+    run(&mut s, "cad_stair", told).expect("and again");
+    assert_eq!(stairs_of(&s).len(), 1, "the second giving built no stair of its own");
+}
+
+#[test]
+fn how_many_risers_it_climbs_in_is_told_where_the_plan_draws_a_part_of_the_flight() {
+    let mut s = a_stair();
+    // Eighteen risers up that storey, which is what a going of 280 is drawn for: the rule of thumb bears it out,
+    // and the plan drew nine of them because the rest stand over the height the plan is cut at.
+    let told = json!({"part": "PIANTA PIANO TERRA", "risers": 18, "apply": true});
+    let out = run(&mut s, "cad_stair", told).expect("it builds");
+    assert_eq!((out["riser"].clone(), out["ratio"].clone()), (json!(166.67), json!(613.33)), "{out}");
+    assert_eq!(out["comfortable"], json!(true), "{out}");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 18, 166.67)], "{out}");
+    // Which end of a run is its foot is the one thing a plan draws nothing of, so it is read one way and turned
+    // round by asking: the other end, and the other way.
+    let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "flip": true})).expect("the other way");
+    assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("south"), json!([7500.0, 5540.0])), "{out}");
+}
+
+#[test]
+fn a_plan_that_draws_no_flight_builds_no_stair_and_says_so() {
+    // The survey's own plan draws walls and windows and no stair at all: the two faces of a wall are a run of two
+    // lines drawn alike, and two lines are no flight.
+    let mut s = a_survey_in_parts();
+    run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA"})).expect("it reads");
+    assert_eq!(out["flights"], json!([]), "{out}");
+    let e = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "apply": true})).expect_err("no flight");
+    assert!(e.contains("no run of lines"), "{e}");
+    // An elevation draws a stair's steps one over another and not one behind another, so it is refused.
+    let e = run(&mut s, "cad_stair", json!({"part": "PROSPETTO SUD"})).expect_err("an elevation");
+    assert!(e.contains("and no plan"), "{e}");
+    // And a going no stair is built to is refused where it is told outright.
+    let e = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "going": 50})).expect_err("no going");
+    assert!(e.contains("`going`"), "{e}");
+}
+
 #[test]
 fn a_door_is_made_as_high_as_its_head_stands_above_the_floor_it_opens_onto() {
     // A plan with a doorway 1 m wide in its south wall, drawn as a gap in both faces of it, and 20 m east the

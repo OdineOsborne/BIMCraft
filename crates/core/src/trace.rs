@@ -247,6 +247,19 @@ impl Face {
 /// is not loaded holds none.
 pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
+    let (faces, names, marks, longest) = faces_of(m, u, &how)?;
+    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks);
+    Ok(Reading { walls, holes, faces: faces.len(), longest, alone })
+}
+
+/// What a drawing is read into before anything is made of it: the faces, the names of the layers they are on,
+/// every run of it however short, and the longest of those.
+type Lines = (Vec<Face>, Vec<String>, Vec<(P2, P2)>, f64);
+
+/// Every straight run of the drawing long enough to be a wall's face, in the project's millimetres: those faces,
+/// the names of the layers they are on, every run of it however short (what marks an opening is drawn with those),
+/// and the longest run of all.
+fn faces_of(m: &Model, u: &Underlay, how: &How) -> Result<Lines, String> {
     let mut names: Vec<String> = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
     // Every run of the drawing, however short: a wall's faces are the long ones, and what marks an opening in a wall
@@ -291,8 +304,135 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
             faces.push(Face { layer: at, dir: (b - a).unit(), at: a, len });
         }
     }
-    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks);
-    Ok(Reading { walls, holes, faces: faces.len(), longest, alone })
+    Ok((faces, names, marks, longest))
+}
+
+/// How far apart two lines of one flight may stand, in millimetres: no step has a going deeper than this, and
+/// lines further apart than it are across a room from one another.
+const FLIGHT_APART: f64 = 500.0;
+
+/// How few lines are no flight at all: two lines are the faces of a wall as readily as a pair of steps.
+const LEAST_STEPS: usize = 3;
+
+/// A flight of steps a plan draws: a run of lines drawn alike, parallel and evenly apart, which is how a plan
+/// draws the risers of a stair — the one thing of a stair a plan draws at the size it is built to. A hatch, a
+/// fence, a run of joists and a ladder are all drawn that way too, so what tells a stair from those is the
+/// measure of it, which is `cad_stair`'s business and not this one's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flight {
+    /// Its steps, each the two ends of the line drawn across the run, from the south end of it to the north, or
+    /// from the west to the east where it runs that way. Which end is the foot is not drawn at all, so the order
+    /// is the one the drawing can always be read in and never a guess at the climb.
+    pub steps: Vec<[P2; 2]>,
+    /// How far apart they stand, which is the going of one step.
+    pub going: f64,
+    /// How long they are drawn, which is how wide the stair is.
+    pub width: f64,
+    /// Which way the run goes, in degrees counter-clockwise from east, from the first line to the last.
+    pub angle: f64,
+}
+
+/// The flights of steps the drawing `u` holds, in the project's millimetres and where it stands, the longest
+/// first.
+///
+/// Two lines belong to one flight where they are drawn the same length, the whole of each runs alongside the whole
+/// of the other, and they stand no further apart than a step is deep. Those three are what keep the building out
+/// of it: the face of a wall beside a stair runs on past the flight and is no line of it, and a line that merely
+/// clips another is none either — the same asymmetry [`rungs`] turns on, which this reads the other way round.
+/// Of what that gathers, a flight is the longest stretch of them standing evenly apart, so a line drawn across a
+/// stair, or the edge of the landing it climbs to, falls off one end instead of making the going a lie.
+pub fn flights(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Flight>, String> {
+    let how = how.checked()?;
+    let (faces, ..) = faces_of(m, u, &how)?;
+    let squares = Squares::of(&faces.iter().map(|f| (f.at, f.end())).collect::<Vec<(P2, P2)>>());
+    let mut beside: Vec<Vec<usize>> = vec![Vec::new(); faces.len()];
+    for i in 0..faces.len() {
+        let a = &faces[i];
+        for j in squares.near(a.at, a.end(), FLIGHT_APART) {
+            let Some(b) = faces.get(j).filter(|_| j > i) else { continue };
+            if (a.len - b.len).abs() > a.len.max(b.len) / 10.0 {
+                continue;
+            }
+            let Some((d, run)) = alongside(a, b, &how) else { continue };
+            if d == 0.0 || d.abs() > FLIGHT_APART || run < a.len * 0.9 || run < b.len * 0.9 {
+                continue;
+            }
+            beside[i].push(j);
+            beside[j].push(i);
+        }
+    }
+    // The lines that hang together, each gathering taken in one sweep out from the first of it.
+    let mut seen = vec![false; faces.len()];
+    let mut out: Vec<Flight> = Vec::new();
+    for i in 0..faces.len() {
+        if seen[i] || beside[i].is_empty() {
+            continue;
+        }
+        seen[i] = true;
+        let mut group = vec![i];
+        let mut at = 0;
+        while let Some(held) = group.get(at).copied() {
+            for j in beside[held].clone() {
+                if !seen[j] {
+                    seen[j] = true;
+                    group.push(j);
+                }
+            }
+            at += 1;
+        }
+        if let Some(flight) = evenly(&faces, &group, &how) {
+            out.push(flight);
+        }
+    }
+    out.sort_by_key(|f| std::cmp::Reverse(f.steps.len()));
+    Ok(out)
+}
+
+/// The longest stretch of lines standing evenly apart in `group`, as a flight: in order across the run, with the
+/// going they keep, how wide they are drawn and which way the run goes. None where too few of them stand evenly
+/// to be a flight at all.
+fn evenly(faces: &[Face], group: &[usize], how: &How) -> Option<Flight> {
+    let first = faces.get(*group.first()?)?;
+    let middle = |f: &Face| f.at + f.dir * (f.len / 2.0);
+    // Measured along the run, from its south end, or from its west end where it runs east and west: which way the
+    // first of the lines happens to be drawn is no business of the reading's.
+    let n = first.dir.perp();
+    let across = match n.1 < -1e-9 || (n.1.abs() <= 1e-9 && n.0 < 0.0) {
+        true => n * -1.0,
+        false => n,
+    };
+    let mut along: Vec<(f64, usize)> = group.iter().filter_map(|i| Some((across.dot(middle(faces.get(*i)?)), *i))).collect();
+    along.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The longest stretch of them whose gaps agree. The last line of one stretch is the first of the next, so a
+    // flight with something drawn over it is read as the longer of the two halves and not as neither.
+    let mut best: Option<(usize, usize)> = None;
+    let mut at = 0;
+    while at + 1 < along.len() {
+        let gap = along[at + 1].0 - along[at].0;
+        let mut to = at + 1;
+        while to + 1 < along.len() && ((along[to + 1].0 - along[to].0) - gap).abs() <= how.slack(gap) {
+            to += 1;
+        }
+        if best.is_none_or(|(from, had)| to - at > had - from) {
+            best = Some((at, to));
+        }
+        at = to;
+    }
+    let (from, to) = best?;
+    let kept: Vec<&Face> = along.get(from..=to)?.iter().filter_map(|(_, i)| faces.get(*i)).collect();
+    if kept.len() < LEAST_STEPS {
+        return None;
+    }
+    // The going over the whole flight and not one gap of it: a drawing is out by a tenth of a millimetre here and
+    // there, and what is built is the step the flight keeps.
+    let going = (along.get(to)?.0 - along.get(from)?.0) / (to - from) as f64;
+    let climb = middle(kept.last()?) - middle(kept.first()?);
+    Some(Flight {
+        steps: kept.iter().map(|f| [f.at, f.end()]).collect(),
+        going,
+        width: kept.iter().map(|f| f.len).sum::<f64>() / kept.len() as f64,
+        angle: climb.1.atan2(climb.0).to_degrees(),
+    })
 }
 
 /// What the two faces of one wall would measure: how far `b` lies to the left of `a`, and the stretch of `a` the two
@@ -1508,6 +1648,56 @@ mod tests {
         for wall in &walls {
             assert!(wall.start.dist(corner).min(wall.end.dist(corner)) < 1e-6, "{wall:?} reaches the corner");
         }
+    }
+
+    /// The flights of steps those lines hold, by the default rule.
+    fn flown(lines: &[(&str, [f64; 4])]) -> Vec<Flight> {
+        let (m, u) = with(lines);
+        flights(&m, &u, &How::default()).expect("it reads")
+    }
+
+    #[test]
+    fn a_flight_is_the_lines_drawn_alike_and_evenly_apart_and_never_the_wall_that_runs_past_them() {
+        // The same survey again: ten treads 280 apart and 1000 wide, under the north wall of the house, which runs
+        // 7600 and whose own two faces stand 350 apart.
+        let mut lines: Vec<(&str, [f64; 4])> = vec![
+            ("MURI", [0.0, 3272.0, 7600.0, 3272.0]),
+            ("MURI", [350.0, 2922.0, 6200.0, 2922.0]),
+            ("MURI", [6300.0, 2922.0, 7300.0, 2922.0]),
+        ];
+        for n in 0..10 {
+            let y = 2842.0 - 280.0 * n as f64;
+            lines.push(("SCALA", [6300.0, y, 7300.0, y]));
+        }
+        let flights = flown(&lines);
+        let [flight] = &flights[..] else { panic!("one flight, not {}: {flights:?}", flights.len()) };
+        // The wall's faces run 7600 and 5850 where the steps run 1000, so neither is drawn alike with them; the
+        // short piece of the inner face over the stair is 1000 long and does lie alongside them, and it is read as
+        // the step it looks like, which costs nothing: the going is what it is either way.
+        assert!((flight.going - 280.0).abs() < 1e-6, "{flight:?}");
+        assert!((flight.width - 1000.0).abs() < 1e-6, "{flight:?}");
+        assert!((flight.angle - 90.0).abs() < 1e-6, "the run climbs north or south, and north is how it is read: {flight:?}");
+        // And the walls are still walls: reading the flight takes nothing away from them.
+        assert_eq!(found(&lines).len(), 1, "{:?}", found(&lines));
+    }
+
+    #[test]
+    fn two_lines_are_no_flight_and_a_stray_line_over_one_does_not_make_the_going_a_lie() {
+        // Two lines are the faces of a wall as readily as a pair of steps, so they are no flight.
+        assert!(flown(&[("SCALA", [0.0, 0.0, 1000.0, 0.0]), ("SCALA", [0.0, 280.0, 1000.0, 280.0])]).is_empty());
+        // Six steps 280 apart with a seventh line drawn 100 over the fourth: the longest evenly spaced stretch is
+        // what is read, and the stray line is no step of it.
+        let mut lines: Vec<(&str, [f64; 4])> = Vec::new();
+        for n in 0..6 {
+            lines.push(("SCALA", [0.0, 280.0 * n as f64, 1000.0, 280.0 * n as f64]));
+        }
+        lines.push(("SCALA", [0.0, 940.0, 1000.0, 940.0]));
+        // 0, 280, 560 and 840 stand evenly; 940, 1120 and 1400 do not, so the four under the stray line are the
+        // flight and the going is the one they keep.
+        let flights = flown(&lines);
+        let [flight] = &flights[..] else { panic!("one flight, not {}: {flights:?}", flights.len()) };
+        assert_eq!(flight.steps.len(), 4, "the four under the stray one: {flight:?}");
+        assert!((flight.going - 280.0).abs() < 1e-6, "{flight:?}");
     }
 
     #[test]

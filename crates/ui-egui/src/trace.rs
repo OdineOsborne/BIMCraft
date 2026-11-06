@@ -91,6 +91,12 @@ pub(crate) struct TraceDialog {
     /// the ones it could be (none: the highest of them, which is what the command picks for itself).
     pub(crate) slab: Option<Value>,
     pub(crate) under: Option<f64>,
+    /// The Walls tab's reading of the stair the plan draws, with the flight picked out of the runs of lines it
+    /// found (none: the longest that could be a stair, which is what the command picks for itself) and whether it
+    /// was turned round, since which end of a run is its foot is the one thing a plan draws nothing of.
+    pub(crate) stair: Option<Value>,
+    pub(crate) flight: Option<usize>,
+    pub(crate) turned: bool,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
@@ -125,6 +131,31 @@ impl TraceDialog {
             // A Find builds nothing, so it places no rooms either: the rooms are of the walls, not of the drawing.
             true => p["preview"] = json!(true),
             false => p["rooms"] = json!(self.rooms),
+        }
+        p
+    }
+
+    /// What `cad_stair` is given: the same sheet of the drawing the walls are read from, the flight picked out of
+    /// what it finds, which way round it climbs, and whether to build it.
+    fn stair_params(&self, apply: bool) -> Value {
+        let mut p = json!({"underlay": self.underlay});
+        match &self.what {
+            What::Whole => {}
+            What::Crop => {
+                if let Some([sw, ne]) = self.crop {
+                    p["region"] = json!([[sw.0, sw.1], [ne.0, ne.1]]);
+                }
+            }
+            What::Part(name) => p["part"] = json!(name),
+        }
+        if let Some(flight) = self.flight {
+            p["flight"] = json!(flight);
+        }
+        if self.turned {
+            p["flip"] = json!(true);
+        }
+        if apply {
+            p["apply"] = json!(true);
         }
         p
     }
@@ -857,7 +888,7 @@ fn openings_shown(ui: &mut Ui, report: &Value) {
 }
 
 /// The Walls tab: what to look for, Find, Build, and what the last Find said.
-fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build: &mut bool) {
+fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build: &mut bool, stair: &mut Option<Value>) {
     let said = t("A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall. What to look for:");
     ui.label(RichText::new(said).color(pal().muted));
     ui.add_space(6.0);
@@ -925,12 +956,90 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
         *build = ui.add_enabled(count > 0, Button::new(tf("Build {}", &[&count.to_string()]))).clicked();
     });
     ui.add_space(6.0);
-    let Some(report) = &d.report else {
-        let said = t("Find reads the drawing and draws the walls it found over the plan; nothing is built until Build.");
-        ui.label(RichText::new(said).color(pal().muted));
-        return;
-    };
-    found_shown(ui, report, d.how.alone);
+    match &d.report {
+        Some(report) => found_shown(ui, report, d.how.alone),
+        None => {
+            let said = t("Find reads the drawing and draws the walls it found over the plan; nothing is built until Build.");
+            ui.label(RichText::new(said).color(pal().muted));
+        }
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    // The stair: a plan draws the steps of one behind one another at the going they are built to, which is the
+    // one thing of a stair drawn at its true size. How high each rises is the storey's business, not the plan's.
+    ui.label(RichText::new(t("The stair it draws, step by step:")).color(pal().muted));
+    // Which run of lines is the stair: a hatch, a fence and a run of joists are drawn the way a flight is, so
+    // each is said by what it measures and the longest that could be a stair is taken until another is picked.
+    let runs: Vec<(usize, String)> = d
+        .stair
+        .iter()
+        .flat_map(|report| report["flights"].as_array().cloned().unwrap_or_default())
+        .enumerate()
+        .filter_map(|(n, f)| {
+            let (steps, going) = (f["steps"].as_u64()?, f["going"].as_f64()?);
+            Some((n, tf("{} steps {} mm apart", &[&steps.to_string(), &format!("{going:.0}")])))
+        })
+        .collect();
+    let read_stair = d.stair.is_some();
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Stair")).clicked() {
+            *stair = Some(d.stair_params(false));
+        }
+        if !runs.is_empty() {
+            let taken =
+                d.stair.as_ref().and_then(|report| report["flights"].as_array()?.iter().position(|f| f["taken"].as_bool() == Some(true)));
+            let now = d.flight.or(taken).and_then(|at| runs.iter().find(|(n, _)| *n == at)).map(|(_, said)| said.clone());
+            let options: Vec<String> = runs.iter().map(|(_, said)| said.clone()).collect();
+            let label = ui.label(t("Which flight"));
+            if let Some(picked) = combo(ui, (d.underlay, "stair-flight"), label.id, &now.unwrap_or_default(), &options) {
+                d.flight = runs.iter().find(|(_, said)| *said == picked).map(|(n, _)| *n);
+            }
+        }
+    });
+    // Which end of a run is its foot is the one thing a plan draws nothing of, so it is read one way and turned
+    // round here; the reading is taken again at once, so what is said is what would be built.
+    if read_stair && ui.checkbox(&mut d.turned, t("It climbs the other way")).changed() {
+        *stair = Some(d.stair_params(false));
+    }
+    if ui.add_enabled(read_stair, Button::new(t("Build This Stair"))).clicked() {
+        *stair = Some(d.stair_params(true));
+    }
+    if let Some(report) = &d.stair {
+        stair_shown(ui, report);
+    }
+}
+
+/// What the last reading of the stair said: how it climbs, how wide and which way; and where two risers and a
+/// going come to no stair anyone climbs, which is what says a count read off a cut plan is short.
+fn stair_shown(ui: &mut Ui, report: &Value) {
+    let said = |key: &str| report[key].as_f64().map(|v| format!("{v:.0}"));
+    match (said("height"), report["risers"].as_u64(), said("riser"), said("going")) {
+        (Some(height), Some(risers), Some(riser), Some(going)) => {
+            let said =
+                tf("This stair climbs {} mm in {} risers of {} mm, each step {} mm deep.", &[&height, &risers.to_string(), &riser, &going]);
+            ui.label(RichText::new(said).strong());
+        }
+        _ => {
+            let said = t("No run of lines in this plan measures like a stair: a step is drawn 200 to 400 mm deep and 600 to 2500 mm long.");
+            ui.label(RichText::new(said).color(pal().error));
+            return;
+        }
+    }
+    if let (Some(width), Some(climbs)) = (said("width"), report["climbs"].as_str()) {
+        ui.label(RichText::new(tf("It is {} mm wide and climbs {}.", &[&width, t(climbs)])).color(pal().muted));
+    }
+    if report["comfortable"].as_bool() == Some(false)
+        && let Some(ratio) = said("ratio")
+    {
+        let said = tf(
+            "Two risers and a going come to {} mm, where a stair anyone climbs is about 630: the plan may draw only the steps under the height it is cut at.",
+            &[&ratio],
+        );
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    if let Some(id) = report["stair"].as_u64() {
+        ui.label(RichText::new(tf("Stair {} was built.", &[&id.to_string()])).strong());
+    }
 }
 
 /// What the last Find found: how much, of what thickness and type, in which phase, what it left out, and the layers
@@ -1067,6 +1176,9 @@ impl BimApp {
             gables: None,
             slab: None,
             under: None,
+            stair: None,
+            flight: None,
+            turned: false,
             top: None,
             found,
             holes,
@@ -1096,6 +1208,7 @@ impl BimApp {
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
         let (mut parts, mut read) = (None::<Value>, None::<Value>);
         let (mut storey, mut roofing, mut slabbing) = (None::<Value>, None::<Value>, None::<Value>);
+        let mut stairing = None::<Value>;
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -1124,7 +1237,7 @@ impl BimApp {
                 match d.tab {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
-                    2 => walls_tab(ui, &mut d, &model, &mut find, &mut build),
+                    2 => walls_tab(ui, &mut d, &model, &mut find, &mut build, &mut stairing),
                     _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
                 }
                 if !d.error.is_empty() {
@@ -1135,16 +1248,17 @@ impl BimApp {
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
         let (reading, storeying) = (read.is_some(), storey.is_some());
-        let (roofed, slabbed) = (roofing.is_some(), slabbing.is_some());
-        let asked = match (layers, parts, read, storey, roofing, slabbing, find || build) {
+        let (roofed, slabbed, staired) = (roofing.is_some(), slabbing.is_some(), stairing.is_some());
+        let asked = match (layers, parts, read, storey, roofing, slabbing, stairing, find || build) {
             (Some(p), ..) => Some(("cad_layers", p)),
             (_, Some(p), ..) => Some(("cad_parts", p)),
             (_, _, Some(p), ..) => Some(("cad_openings", p)),
             (_, _, _, Some(p), ..) => Some(("cad_storey", p)),
             (_, _, _, _, Some(p), ..) => Some(("cad_roof", p)),
-            (_, _, _, _, _, Some(p), _) => Some(("cad_floor", p)),
-            (None, None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, None, None, None, None, false) => None,
+            (_, _, _, _, _, Some(p), ..) => Some(("cad_floor", p)),
+            (_, _, _, _, _, _, Some(p), _) => Some(("cad_stair", p)),
+            (None, None, None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, None, None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -1163,6 +1277,8 @@ impl BimApp {
                 Some(reply) if roofed => d.roof = Some(reply),
                 // And of the slab over them: how thick it is, which no plan draws either.
                 Some(reply) if slabbed => d.slab = Some(reply),
+                // And what the plan says of the stair in it, which is the going of its steps and how wide.
+                Some(reply) if staired => d.stair = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();
@@ -1178,7 +1294,7 @@ impl BimApp {
                 None => {
                     d.error = std::mem::take(&mut self.status.text);
                     self.status = crate::Status::default();
-                    (d.openings, d.storey, d.roof, d.slab) = (None, None, None, None);
+                    (d.openings, d.storey, d.roof, d.slab, d.stair) = (None, None, None, None, None);
                     d.stale();
                 }
             }

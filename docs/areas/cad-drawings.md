@@ -693,6 +693,42 @@ above the floor and the ridge **4670**; of the shapes over that footprint, the o
 ridge at **4690**, twenty millimetres out. `apply` builds it: one roof on the level above, and built again from the
 same reading it builds no second one.
 
+## The stair the plan draws
+
+A plan draws the steps of a stair one behind another, at the going they are built to, so the going and the width
+are the two measures of a stair a plan gives at their true size. How high one step rises it gives nothing of at
+all: that is the storey. `cad_stair {"part": …}` reads the plan and puts the two together.
+
+What it reads is a flight: a run of lines drawn alike, parallel and evenly apart (`trace::flights`). Two lines
+belong to one flight where they are drawn the same length, the whole of each runs alongside the whole of the
+other, and they stand no further apart than a step is deep — the same asymmetry [the ladder rule](#the-walls-a-survey-already-draws)
+turns on, read the other way round. That is what keeps the building out of it: the face of a wall beside a stair
+runs on past the flight and is no line of it. Of what that gathers, a flight is the longest stretch standing
+evenly apart, so a line drawn across a stair, or the edge of the landing it climbs to, falls off one end instead
+of making the going a lie.
+
+A hatch, a fence, a run of joists and a ladder are all drawn the way a flight is, so every flight found is
+reported and one of them `could` be a stair only where its steps stand 200 to 400 mm apart and are drawn 600 to
+2500 mm long. The longest that could be is the one taken; `flight` takes another by its place in the list, and
+`going` and `width` say either outright. What is left is said and never built.
+
+The lines of a flight are its risers, and the stair starts at the middle of the first of them, so it climbs in as
+many risers as the plan draws lines — and a plan cut partway up a flight draws only the steps under the cut, which
+is what `risers` is for. The height comes from where the level above stands, or from `height`. Those two give the
+one thing neither says on its own, `riser`, and that is held against the rule that has outlived every building
+code written since: two risers and a going come to about 630 mm on a stair anyone climbs (`ratio`,
+`comfortable`), which is what says a count read off a cut plan is short.
+
+Which end of a run is its foot is the one thing a plan draws nothing of. The run is read from its south end, or
+from its west where it runs east and west, `flip` turns it round, and `start` and `climbs` say where that puts it.
+
+Measured on the permesso di costruire: the plan of the ground floor holds one flight and it measures like a stair
+— **12 steps 280 mm apart and 1000 mm wide**, climbing **north** up the east side of the north wing, where the
+survey draws it. Over the 3 m to the level above that is a riser of 250 and a ratio of **780**, which is no stair
+anyone climbs: either the flight turns, or the plan draws only the steps under its cut. Told `risers` 17 the ratio
+comes to 633 and the rule of thumb is satisfied, and the run then reaches past the wing — the reading says both
+and settles neither, because the drawing does not.
+
 ## The slab under the floor of a storey
 
 A plan draws the outline of a slab and nothing of how thick it is. An elevation draws the floor of the storey as a
@@ -800,6 +836,13 @@ rooms does not drop what was found, because the rooms are of the walls and not o
 so it places nothing either. What was found was found with the measurements, the type and the layers as they were, so
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
+
+The stair, at the foot of the same tab: **Read the Stair** runs `cad_stair` over the same sheet the walls are
+read from and says how far it climbs, in how many risers of what height, how deep each step is, how wide it is
+and which way it climbs. **Which flight** beside it holds every run of lines found, each by how many steps it has
+and how far apart, the one that measures like a stair being taken until another is picked; **It climbs the other
+way** turns it round, since a plan draws the steps and not which end is the foot. **Build This Stair** builds it,
+and where two risers and a going come to no stair anyone climbs, that is said in red rather than passed over.
 
 **Heights** is everything an elevation says of the storey it draws: the elevation to read it off, the plan whose
 walls and openings they are, the height the storey's floor stands at (0 is not said), and then four groups, the
