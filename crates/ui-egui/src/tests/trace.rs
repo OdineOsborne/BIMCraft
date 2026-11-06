@@ -274,6 +274,44 @@ fn the_heights_tab_gives_the_walls_of_the_storey_the_height_the_elevation_draws(
     assert_eq!(walls_of(&h), vec![(2800.0, false); 4], "each unattached at the height the elevation draws");
 }
 
+#[test]
+fn the_heights_tab_builds_the_roof_the_elevation_draws_over_those_walls() {
+    let mut h = a_storey_with_an_elevation();
+    h.state_mut().session.execute("trace_walls", &json!({"part": "PIANTA", "openings": true})).expect("it builds");
+    h.run();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Heights");
+    if let Some(d) = h.state_mut().trace_dialog.as_mut() {
+        d.floor = 69_800.0;
+    }
+    h.run();
+    press(&mut h, "Read the Storey's Top");
+    press(&mut h, "Give the Walls This Height");
+    press(&mut h, "Read the Roof");
+    // The pitch no plan draws, off the two rakes, and how far outside the facade their feet are drawn.
+    assert!(says(&h, "This roof rises 26.57 degrees, its eaves 2800 mm above the floor."), "what it read");
+    assert!(says(&h, "It reaches 500 mm past its walls, which is how far outside this facade its slopes are drawn."));
+    // A gable end and a hipped end are drawn alike, and the apex the drawing draws is what settles which.
+    assert!(says(&h, "Its ridge is drawn 5550 mm above the floor, and the roof is built with gable ends."));
+    assert!(roofs_of(&h).is_empty(), "a reading builds nothing");
+    press(&mut h, "Build This Roof");
+    assert_eq!(roofs_of(&h), vec![(26.57, 50.0)], "at the pitch it draws, its base over the walls' faces");
+}
+
+/// Every roof of the project: the pitch it is built at and how far its base stands above its level.
+fn roofs_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
+    h.state()
+        .session
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            bimcraft_core::model::Element::Roof(r) => Some((r.slope, r.offset)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every wall of the project: how high it is made, and whether it still goes up to the level above.
 fn walls_of(h: &Harness<BimApp>) -> Vec<(f64, bool)> {
     let mut all: Vec<(f64, bool)> = h
@@ -318,6 +356,10 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     }
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));
+    // And the two rakes of the roof over them, from 500 mm outside each end of the eaves to the apex over the
+    // middle: one in two, which over the 11 m the roof spans with its overhang is that apex exactly.
+    lines.push(("PROSPETTO".to_string(), [19_500.0, 2800.0, 25_000.0, 5550.0]));
+    lines.push(("PROSPETTO".to_string(), [30_500.0, 2800.0, 25_000.0, 5550.0]));
     for [x0, x1, sill, head] in [[23_000.0, 24_500.0, 900.0, 2100.0], [26_000.0, 27_200.0, 1000.0, 2200.0]] {
         lines.push(("PROSPETTO".to_string(), [x0, sill, x1, sill]));
         lines.push(("PROSPETTO".to_string(), [x0, head, x1, head]));

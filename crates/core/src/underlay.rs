@@ -309,6 +309,99 @@ pub fn opening(lines: &[Course], from: f64, to: f64, slack: f64, between: Option
         .collect()
 }
 
+/// A line a drawing draws at a slope: in an elevation, the rake of a gable and the hip of a roof; lower down, a
+/// ramp, a stair or the fall of the ground. What makes one a roof's is how steeply it rises and where its foot
+/// stands, so both ends are reported and neither is thrown away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slant {
+    /// Its lower end, where it is in the project, in millimetres.
+    pub foot: P2,
+    /// And its upper end.
+    pub head: P2,
+    /// How steeply it rises, in degrees up from level: from 0 to 90, whichever way it leans.
+    pub rise: f64,
+    /// Which way it leans: true where it rises toward the drawing's own east.
+    pub east: bool,
+    /// How far it runs across, from its foot to its head, in millimetres.
+    pub run: f64,
+    /// What heights its two ends stand at, as the drawing writes heights: `y + datum`.
+    pub low: Option<f64>,
+    pub high: Option<f64>,
+}
+
+/// The shortest a slope may run across and be a line of the building: shorter than this and it is a hatch's
+/// stroke, an arrowhead, the corner of a symbol or the kink in a line drawn by hand.
+const SLANT_SHORTEST: f64 = 500.0;
+
+/// How near two pieces must be drawn to be pieces of one slope: the same lean to within half a degree, and the
+/// line the two of them lie on passing within 20 mm of the same place.
+const SLANT_SAME_RISE: f64 = 0.5;
+const SLANT_SAME_LINE: f64 = 20.0;
+
+/// Every line the drawing draws at a slope inside `region`, the lowest foot first: the pieces that lie along one
+/// line are one slope, as a rake broken where a down-pipe crosses it is one rake, and two parallel slopes stay
+/// two. A roof says its pitch here and nowhere else: a plan draws it flat and the heights an elevation writes are
+/// written against its level lines, while the rake of a gable and the hip of a hipped end are drawn at the angle
+/// they really rise at.
+pub fn slopes(m: &Model, u: &Underlay, region: [P2; 2], datum: Option<f64>) -> Vec<Slant> {
+    let [sw, ne] = region;
+    let inside = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
+    let mut by_line: std::collections::BTreeMap<(i64, i64), Vec<(P2, P2)>> = std::collections::BTreeMap::new();
+    for (_, points, closed) in lines_by_layer(m, u) {
+        let close = match (closed, points.len() > 2, points.first(), points.last()) {
+            (true, true, Some(a), Some(b)) => Some((*b, *a)),
+            _ => None,
+        };
+        let runs = points
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] => Some((*a, *b)),
+                _ => None,
+            })
+            .chain(close);
+        for (a, b) in runs {
+            let (foot, head) = if a.1 <= b.1 { (a, b) } else { (b, a) };
+            let (run, rise) = ((head.0 - foot.0).abs(), head.1 - foot.1);
+            if !inside(a) || !inside(b) || !run.is_finite() || !rise.is_finite() {
+                continue;
+            }
+            // Drawn level it is a course and not a slope, and drawn shorter than this it is no line of the
+            // building at all.
+            if rise <= COURSE_FLAT || run < SLANT_SHORTEST {
+                continue;
+            }
+            // Which way it leans is part of what makes it one line, so that the two rakes of a gable, drawn at
+            // the one angle, stay the two they are.
+            let lean = rise.atan2(head.0 - foot.0).to_degrees();
+            // And how far from the region's corner the line the piece lies on passes, so that the pieces of one
+            // line gather and two slopes drawn parallel do not.
+            let d = foot - sw;
+            let away = ((head.0 - foot.0) * d.1 - rise * d.0) / rise.hypot(run);
+            let key = ((lean / SLANT_SAME_RISE).round() as i64, (away / SLANT_SAME_LINE).round() as i64);
+            by_line.entry(key).or_default().push((foot, head));
+        }
+    }
+    let mut out: Vec<Slant> = by_line
+        .values()
+        .filter_map(|pieces| {
+            let foot = pieces.iter().map(|(foot, _)| *foot).reduce(|a, b| if b.1 < a.1 { b } else { a })?;
+            let head = pieces.iter().map(|(_, head)| *head).reduce(|a, b| if b.1 > a.1 { b } else { a })?;
+            let (run, rise) = ((head.0 - foot.0).abs(), head.1 - foot.1);
+            (run >= SLANT_SHORTEST && rise > COURSE_FLAT).then_some(Slant {
+                foot,
+                head,
+                rise: rise.atan2(run).to_degrees(),
+                east: head.0 > foot.0,
+                run,
+                low: datum.map(|d| foot.1 + d),
+                high: datum.map(|d| head.1 + d),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.foot.1.total_cmp(&b.foot.1).then(a.foot.0.total_cmp(&b.foot.0)));
+    out
+}
+
 /// Every level run the drawing draws inside `region` that is at least `shortest` long: how high it is, and where it
 /// begins and ends. The pieces themselves, as they are drawn; what is made of them is [`courses`], the heights of
 /// the building, and [`drawn_lines`], the lines themselves.

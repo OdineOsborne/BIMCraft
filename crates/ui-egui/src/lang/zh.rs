@@ -1712,6 +1712,30 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Read the Storey's Top", "读取本层顶高"],
     ["Its top", "顶部"],
     ["Give the Walls This Height", "按此高度设置墙"],
+    ["The roof over them, as the elevation draws its pitch:", "其上的屋顶，按立面图所绘的坡度："],
+    ["Read the Roof", "读取屋顶"],
+    ["Its shape", "其形状"],
+    [
+        "The ridge each shape would reach, and how many edges of the roof stand upright in it.",
+        "每种形状所达的屋脊高度，以及其中有多少条屋顶边线竖立。",
+    ],
+    ["Build This Roof", "建造此屋顶"],
+    ["This roof rises {} degrees, its eaves {} mm above the floor.", "该屋顶坡度 {} 度，檐口在地面以上 {} mm。"],
+    [
+        "This elevation draws nothing above the floor at a pitch a roof is built at, so nothing on it says how steeply this roof rises.",
+        "该立面图在地面以上没有画出任何屋顶坡度的线，因此无从得知该屋顶有多陟。",
+    ],
+    ["Its ridge is drawn {} mm above the floor, and the roof is built with gable ends.", "其屋脊绘于地面以上 {} mm，屋顶按山墙两端建造。"],
+    ["Its ridge is drawn {} mm above the floor, and the roof is built hipped all round.", "其屋脊绘于地面以上 {} mm，屋顶四面均为坡面。"],
+    [
+        "The roof this builds puts its ridge {} mm above the floor, which is not where the drawing draws it.",
+        "按此建造的屋顶屋脊在地面以上 {} mm，与图纸所绘不符。",
+    ],
+    [
+        "It reaches {} mm past its walls, which is how far outside this facade its slopes are drawn.",
+        "它挑出墙外 {} mm，即其坡面画在该立面之外的距离。",
+    ],
+    ["Roof {} was built, standing on {}.", "已建造屋顶 {}，位于 {}。"],
     ["The openings in them, as the elevation draws their sills and their heads:", "其中的洞口，按立面图所绘的窗台和过梁："],
     ["This storey stands {} mm high, its top drawn at {} m.", "本层高 {} mm，顶部绘于 {} m。"],
     [

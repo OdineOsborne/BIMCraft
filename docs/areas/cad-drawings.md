@@ -654,6 +654,45 @@ The level above is reported and never moved. On the permesso di costruire it sta
 the 2830 that was read, and `level_above.agrees` is false: moving it would move whatever else stands on it, which
 is no business of a drawing of one facade.
 
+## The pitch of the roof over them
+
+A plan draws a roof flat, and the heights an elevation writes are written against the lines it draws level, so the
+one place a pitch is drawn at the angle it really rises at is the elevation — or the section — that draws a gable
+or a hipped end. `cad_roof {"part": …, "plan": …, "floor": …}` reads it there.
+
+What it reads is the lines the drawing draws at a slope (`underlay::slopes`): the pieces that lie along one line are
+one slope, as a rake broken where a down-pipe crosses it is one rake, and two drawn parallel stay two. One of them
+is the roof's where it rises between 5 and 75 degrees, its foot stands at least 100 mm above the floor, and its head
+stands above the top of the walls it covers — that last is the whole of what tells a rake from everything else a
+facade slopes, because the fall of the ground, a ramp up to a door, a stair in a section and the edge of a symbol
+all stay under the eaves. The pitch is the one most drawn of them, since the rakes and the hips of a roof run across
+the facade while whatever else slopes above the floor runs across a part of it; `slope` says it outright.
+
+The eaves is the lowest foot of the slopes at that pitch and the ridge the highest head, both as they stand above
+the floor. Where the drawing slopes nothing, the eaves is read off the walls already built, which is what a roof
+stands on, and `eaves_from` says which it was. A roof's base is not its eaves: `roof` puts the base over the faces
+of the walls and lets the overhang fall below it down the slope, so `base` is the eaves carried back up the pitch,
+and `offset` is that from the level the roof stands on — the one above the walls'.
+
+How far the feet of those slopes stand outside the ends of the facade (`beyond`) is how far the roof reaches past
+the walls it covers, and it is taken for the `overhang` where both sides reach the same far and neither falls short
+of the facade. The ends of the facade are the two points the elevation stands against its plan by (`cad_anchor`).
+
+A gable end and a hipped end are drawn alike, two slopes meeting over the facade, and what tells them apart is how
+high they meet: a gable carries the ridge the whole way across the building the other way, where hips all round
+bring it down to the middle of the narrowest span. So the shape is not guessed. Each way the footprint runs is
+tried as the one left upright, hips as well, the ridge each would reach is worked out from the roof itself, and the
+drawing settles it: `shapes` is all of them with their ridges, `gables` the edges taken, `made_ridge` where that
+puts the ridge and `ridge_agrees` whether the drawing bears it out. `gables` says it outright, an empty list for
+hips all round.
+
+Measured on the permesso di costruire: PROSPETTO SUD-EST is an eaves side, and of the three lines it slopes, all
+three stand below the floor — the terrain. It reads no pitch there and says so rather than taking the steepest
+thing above the ground for a roof. The elevation that draws the gable reads **17.01 degrees**, the eaves **2600 mm**
+above the floor and the ridge **4670**; of the shapes over that footprint, the one the drawing agrees with puts the
+ridge at **4690**, twenty millimetres out. `apply` builds it: one roof on the level above, and built again from the
+same reading it builds no second one.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -734,8 +773,8 @@ changing any of them drops it and it has to be found again: the drawing on scree
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
 
 **Heights** is everything an elevation says of the storey it draws: the elevation to read it off, the plan whose
-walls and openings they are, the height the storey's floor stands at (0 is not said), and then two groups, the walls
-and the openings.
+walls and openings they are, the height the storey's floor stands at (0 is not said), and then three groups, the
+walls, the roof over them and the openings in them.
 
 The walls: **Read the Storey's Top** runs `cad_storey` and says how high the storey stands and how many walls are on
 it, with **Its top** beside it, a combo of every line the elevation draws the width of its facade within a storey of
@@ -744,6 +783,14 @@ another is picked. **Give the Walls This Height** gives it to them, and says how
 have an opening that would stand through it, and how many are attached to a roof or a floor. Where the level above
 does not stand at that height it is said in the same breath and left alone: moving it would move whatever else
 stands on it, and that is no business of this drawing's.
+
+The roof: **Read the Roof** runs `cad_roof` and says the pitch the elevation draws it at and how high its eaves
+stands, how far it reaches past its walls where the slopes say, and where the ridge is drawn — with, in the same
+breath, whether the roof is built with gable ends or hipped all round, since that is what the ridge settled. **Its
+shape** beside it is a combo of every shape the footprint could take, each as the ridge it would reach and how many
+of the roof's edges stand upright in it, the one the drawing agrees with until another is picked. **Build This
+Roof** builds it, and where the ridge of what was built is not where the drawing draws it, that is said and not
+hidden.
 
 The openings: **Read the Sills and Heads**, which runs `cad_openings`. It needs a plan and an elevation among the parts, and says so where there is not one of
 each; the two combos hold the parts of each kind and fall back to the first of them, so a part done away with while

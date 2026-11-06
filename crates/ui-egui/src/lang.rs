@@ -2790,6 +2790,50 @@ const WORDS: &[[&str; 3]] = &[
     ["Its top", "O seu topo", "Su remate"],
     ["Give the Walls This Height", "Dar esta altura às paredes", "Dar esta altura a los muros"],
     [
+        "The roof over them, as the elevation draws its pitch:",
+        "O telhado sobre elas, como o alçado desenha a sua inclinação:",
+        "La cubierta sobre ellos, como el alzado dibuja su pendiente:",
+    ],
+    ["Read the Roof", "Ler o telhado", "Leer la cubierta"],
+    ["Its shape", "A sua forma", "Su forma"],
+    [
+        "The ridge each shape would reach, and how many edges of the roof stand upright in it.",
+        "A cumeeira a que cada forma chegaria, e quantas arestas do telhado ficam ao alto nela.",
+        "La cumbrera a la que llegaría cada forma, y cuántas aristas de la cubierta quedan verticales en ella.",
+    ],
+    ["Build This Roof", "Construir este telhado", "Construir esta cubierta"],
+    [
+        "This roof rises {} degrees, its eaves {} mm above the floor.",
+        "Este telhado sobe {} graus, com o beiral {} mm acima do piso.",
+        "Esta cubierta sube {} grados, con el alero {} mm sobre el suelo.",
+    ],
+    [
+        "This elevation draws nothing above the floor at a pitch a roof is built at, so nothing on it says how steeply this roof rises.",
+        "Este alçado não desenha nada acima do piso com uma inclinação de telhado, por isso nada nele diz quão inclinado este telhado sobe.",
+        "Este alzado no dibuja nada sobre el suelo con una pendiente de cubierta, así que nada en él dice cuánto sube esta cubierta.",
+    ],
+    [
+        "Its ridge is drawn {} mm above the floor, and the roof is built with gable ends.",
+        "A sua cumeeira está desenhada a {} mm acima do piso, e o telhado é construído com empenas.",
+        "Su cumbrera está dibujada a {} mm sobre el suelo, y la cubierta se construye con hastiales.",
+    ],
+    [
+        "Its ridge is drawn {} mm above the floor, and the roof is built hipped all round.",
+        "A sua cumeeira está desenhada a {} mm acima do piso, e o telhado é construído em tacaniça por todos os lados.",
+        "Su cumbrera está dibujada a {} mm sobre el suelo, y la cubierta se construye a cuatro aguas.",
+    ],
+    [
+        "The roof this builds puts its ridge {} mm above the floor, which is not where the drawing draws it.",
+        "O telhado que isto constrói põe a cumeeira a {} mm acima do piso, que não é onde o desenho a desenha.",
+        "La cubierta que esto construye pone la cumbrera a {} mm sobre el suelo, que no es donde el dibujo la dibuja.",
+    ],
+    [
+        "It reaches {} mm past its walls, which is how far outside this facade its slopes are drawn.",
+        "Avança {} mm para além das suas paredes, que é o quanto as suas águas são desenhadas fora desta fachada.",
+        "Vuela {} mm más allá de sus muros, que es cuanto sus faldones se dibujan fuera de esta fachada.",
+    ],
+    ["Roof {} was built, standing on {}.", "O telhado {} foi construído, assente em {}.", "La cubierta {} fue construida, asentada en {}."],
+    [
         "The openings in them, as the elevation draws their sills and their heads:",
         "Os vãos nelas, como o alçado desenha as suas soleiras e os seus lintéis:",
         "Los huecos en ellos, como el alzado dibuja sus antepechos y sus dinteles:",

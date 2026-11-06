@@ -1987,6 +1987,36 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Read the Storey's Top", "Leggi l'altezza del piano"],
     ["Its top", "La sommità"],
     ["Give the Walls This Height", "Dai questa altezza ai muri"],
+    ["The roof over them, as the elevation draws its pitch:", "Il tetto sopra, come il prospetto ne disegna la pendenza:"],
+    ["Read the Roof", "Leggi il tetto"],
+    ["Its shape", "La sua forma"],
+    [
+        "The ridge each shape would reach, and how many edges of the roof stand upright in it.",
+        "Il colmo a cui arriverebbe ogni forma, e quanti bordi del tetto restano verticali.",
+    ],
+    ["Build This Roof", "Costruisci questo tetto"],
+    ["This roof rises {} degrees, its eaves {} mm above the floor.", "Questo tetto sale di {} gradi, con la gronda a {} mm dal pavimento."],
+    [
+        "This elevation draws nothing above the floor at a pitch a roof is built at, so nothing on it says how steeply this roof rises.",
+        "Questo prospetto non disegna niente sopra il pavimento con una pendenza da tetto, quindi niente dice quanto sale questo tetto.",
+    ],
+    [
+        "Its ridge is drawn {} mm above the floor, and the roof is built with gable ends.",
+        "Il suo colmo è disegnato a {} mm dal pavimento, e il tetto è costruito a capanna.",
+    ],
+    [
+        "Its ridge is drawn {} mm above the floor, and the roof is built hipped all round.",
+        "Il suo colmo è disegnato a {} mm dal pavimento, e il tetto è costruito a padiglione.",
+    ],
+    [
+        "The roof this builds puts its ridge {} mm above the floor, which is not where the drawing draws it.",
+        "Il tetto che così si costruisce porta il colmo a {} mm dal pavimento, che non è dove lo disegna il disegno.",
+    ],
+    [
+        "It reaches {} mm past its walls, which is how far outside this facade its slopes are drawn.",
+        "Sporge {} mm oltre i muri, che è quanto le sue falde sono disegnate fuori da questa facciata.",
+    ],
+    ["Roof {} was built, standing on {}.", "Il tetto {} è stato costruito, appoggiato su {}."],
     [
         "The openings in them, as the elevation draws their sills and their heads:",
         "Le aperture, come il prospetto ne disegna davanzali e architravi:",

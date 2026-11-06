@@ -300,6 +300,47 @@ pub static ALL: &[Command] = &[
         cad_storey,
     ),
     edit(
+        "cad_roof",
+        "CAD Roof",
+        &[],
+        "{underlay?, part, plan?, level?, floor?, slope?, eaves?, overhang?, gables?, type?, apply?} the roof an \
+         elevation draws, read and reported without changing the project unless `apply` asks for it. A plan draws a \
+         roof flat, and the heights an elevation writes are written against the lines it draws level, so the one \
+         place a pitch is drawn at the angle it really rises at is the elevation that draws a gable or a hipped \
+         end. `slopes` is every line the drawing draws at a slope inside `part`, at most 16 of them, the lowest \
+         first: how steeply it rises in degrees (`rise`), how far it runs across (`run`), which way it leans \
+         (`east`), its `foot` and its `head` in the project, how far `above` the floor its foot stands and how far \
+         `up` its head, and whether it is `taken` for one of the roof's. One is the roof's where it rises between 5 \
+         and 75 degrees and its foot stands at least 100 mm above `floor`, the height the storey's floor stands at \
+         as the drawing writes heights (`cad_heights` reports it as a course): what is left of what a drawing \
+         slopes is the fall of the ground, a ramp up to a door, a stair in a section. The pitch (`slope`) is the \
+         one most drawn of them, because the rakes and the hips of a roof run across the facade while whatever \
+         else slopes above the floor runs across a part of it; `slope` says it outright, in degrees. `eaves` is \
+         the lowest foot of the slopes at that pitch as it stands above the floor, and `ridge` the highest head of \
+         them; `eaves_from` is whether that was read off the slopes, told outright, or taken from the top of the \
+         walls already built, which is what a roof stands on where the drawing slopes nothing. `beyond` is how far \
+         their feet stand outside the ends of the facade the elevation stands against its plan by (`cad_anchor`), \
+         which is how far the roof reaches past the walls it covers: it is taken for the `overhang` where both \
+         sides reach the same far and neither falls short of the facade, and `overhang_from` says which it was. \
+         `apex` is whether two of them meet over the facade, which is what a gable end and a hipped end both \
+         look like; what tells those apart is how high they meet, since a gable carries the ridge the whole way \
+         across the building the other way while hips all round bring it down to the middle of the narrowest \
+         span. So the shape is not guessed: each way the footprint runs is tried as the one left upright, hips \
+         all round as well, and `shapes` is every one of them with the `ridge` it would reach and which was \
+         `picked`, the one the ridge the drawing draws agrees with. `gables` is the edges left upright in it \
+         (edge i runs from point i of the footprint to the next), `gables_from` how that was settled, \
+         `made_ridge` how high it puts the ridge above the same floor, and `ridge_agrees` whether the drawing \
+         bears it out. `gables` says it outright, an empty list for hips all round. `apply` builds the \
+         roof on the level above the walls', its base where the eaves was read (`offset` from that level), over \
+         the walls of the level below as `roof` builds one; it needs `floor`, and given again from the same \
+         reading it builds no second roof. Returns `id`, `part`, `level`, `datum`, `agree`, `floor`, `slopes`, \
+         `slope`, `eaves`, `eaves_from`, `base`, `ridge`, `beyond`, `overhang`, `overhang_from`, `apex`, \
+         `shapes`, `gables`, `gables_from`, `made_ridge`, `offset` and `ridge_agrees`, and with `apply` also \
+         `roof`, which it built, \
+         and `on`, the level it stands on",
+        cad_roof,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -2978,6 +3019,330 @@ fn cad_storey(s: &mut Session, p: &Value) -> R {
         }
     }
     Ok(out)
+}
+
+/// How steeply a line must rise to be a roof's slope: flatter than this and it is a floor drawn out of true, the
+/// fall of the ground or a ramp, and [`MAX_SLOPE`] is as steep as any roof is built.
+const ROOF_LEAST: f64 = 5.0;
+
+/// How far two slopes' rises may differ and still be two sides of the one roof, in degrees: the rakes of a drawing
+/// are drawn to its pitch and the file rounds them, and a degree is 90 mm over a 5 m run.
+const PITCH_AGREE: f64 = 2.0;
+
+/// How near two things read off a drawing must stand to be the same thing, in millimetres: two slopes meeting at
+/// an apex, two feet standing the same far beyond the facade, a ridge built where the drawing draws it.
+const ROOF_AGREE: f64 = 100.0;
+
+/// How far apart two edges of a footprint may run and still run the same way, in degrees.
+const SAME_WAY: f64 = 5.0;
+
+/// How far a roof reaches past the walls it covers where nothing says: what `roof` itself gives.
+const ROOF_OVER: f64 = 500.0;
+
+fn cad_roof(s: &mut Session, p: &Value) -> R {
+    let c = "cad_roof";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the roof off"))?;
+    let part = part_of(c, &u, &name)?;
+    if part.kind == crate::model::PartKind::Plan {
+        return Err(bad(
+            c,
+            format!("`{name}` is a plan: a plan draws a roof flat, and the pitch of it is drawn by an elevation or a section"),
+        ));
+    }
+    let (floor, told_slope, told_eaves, told_over) =
+        (num(c, p, "floor")?, num(c, p, "slope")?, num(c, p, "eaves")?, num(c, p, "overhang")?);
+    for (key, said) in [("floor", floor), ("slope", told_slope), ("eaves", told_eaves), ("overhang", told_over)] {
+        if said.is_some_and(|said| !said.is_finite()) {
+            return Err(bad(c, format!("`{key}` is a number, of millimetres or of degrees, and that is none")));
+        }
+    }
+    if told_slope.is_some_and(|slope| !(0.0..=MAX_SLOPE).contains(&slope)) {
+        return Err(bad(c, format!("`slope` is the pitch in degrees, from 0 (flat) to {MAX_SLOPE}")));
+    }
+    if told_over.is_some_and(|over| over < 0.0) {
+        return Err(bad(c, "`overhang` is how far the roof reaches past the walls in millimetres, and never less than none"));
+    }
+    let apply = flag(c, p, "apply")?;
+    if apply && floor.is_none() {
+        return Err(bad(
+            c,
+            "`apply` needs `floor`: a roof's eaves is read as the height it stands above the floor of the storey under it, and \
+             `floor` is what says where that floor is",
+        ));
+    }
+    let gables_told: Option<Vec<usize>> = shaped(c, p, "gables", "a list of edge numbers")?;
+    let type_name = type_param(c, p, &s.model, "roof")?;
+    // The storey this roof covers: the plan's own level, which is the one its walls were built on.
+    let level = match (p.get("level"), string(c, p, "plan")?) {
+        (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
+        (_, Some(name)) => {
+            let plan = part_of(c, &u, &name)?;
+            if plan.kind != crate::model::PartKind::Plan {
+                return Err(bad(c, format!("`{name}` is {} and no plan: the walls a roof covers are found in a plan", plan.kind.word())));
+            }
+            plan.level.unwrap_or(u.level)
+        }
+        _ => u.level,
+    };
+    let floor_z = s.model.elevation(level);
+    let read = crate::underlay::heights(&s.model, &u, part.region);
+    let drawn = crate::underlay::slopes(&s.model, &u, part.region, read.datum);
+    let above = |height: Option<f64>| match (height, floor) {
+        (Some(height), Some(floor)) => Some(height - floor),
+        _ => None,
+    };
+    let by_tens = |mm: f64| (mm / 10.0).round() * 10.0;
+    let most = |held: Option<f64>, one: f64| Some(held.map_or(one, |held: f64| held.max(one)));
+    // How high the walls of that storey stand above its floor: what a roof over them rises from and over.
+    let walls_top = s
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Wall(w) if w.level == level => Some(s.model.own_top(w) - floor_z),
+            _ => None,
+        })
+        .fold(None, most);
+    // A roof's slopes rise, are not upright, stand above the floor of the storey and rise over the top of the
+    // walls they cover, which is what a roof does and what nothing else a facade slopes does: the fall of the
+    // ground, a ramp up to a door, a stair in a section, the edge of a symbol all stay under the eaves.
+    let could: Vec<crate::underlay::Slant> = drawn
+        .iter()
+        .copied()
+        .filter(|slant| (ROOF_LEAST..=MAX_SLOPE).contains(&slant.rise))
+        .filter(|slant| above(slant.low).is_none_or(|up| up >= LEAST_HIGH))
+        .filter(|slant| match (above(slant.high), walls_top) {
+            (Some(up), Some(top)) => up > top,
+            _ => true,
+        })
+        .collect();
+    // The pitch is the one most drawn of them: the rakes and the hips of a roof run across the facade, and
+    // whatever else slopes above the floor is drawn across a part of it.
+    let pitch = told_slope.or_else(|| could.iter().max_by(|a, b| a.run.total_cmp(&b.run)).map(|slant| hundredth(slant.rise)));
+    let taken: Vec<crate::underlay::Slant> = match pitch {
+        Some(pitch) => could.iter().copied().filter(|slant| (slant.rise - pitch).abs() <= PITCH_AGREE).collect(),
+        None => Vec::new(),
+    };
+    let least = |held: Option<f64>, one: f64| Some(held.map_or(one, |held: f64| held.min(one)));
+    // The eaves is the lowest foot of them and the ridge the highest head: the two sides of a roof stand on the
+    // one eaves, and where they meet is the ridge.
+    let read_eaves = taken.iter().filter_map(|slant| above(slant.low)).fold(None, least).map(by_tens);
+    let ridge = taken.iter().filter_map(|slant| above(slant.high)).fold(None, most).map(by_tens);
+    // How far the feet of those slopes stand beyond the ends of the facade: that is how far the roof reaches past
+    // the walls it covers, where both of its sides reach the same far and neither falls short of the facade.
+    let ends = part.anchor.map(|a| (a.drawn[0].0.min(a.drawn[1].0), a.drawn[0].0.max(a.drawn[1].0)));
+    let outs: Vec<f64> = match ends {
+        Some((left, right)) => taken.iter().map(|slant| if slant.east { left - slant.foot.0 } else { slant.foot.0 - right }).collect(),
+        None => Vec::new(),
+    };
+    let (low, high) = outs.iter().fold((f64::MAX, f64::MIN), |(low, high), out| (low.min(*out), high.max(*out)));
+    let beyond = (!outs.is_empty() && low >= 0.0 && high - low <= ROOF_AGREE).then(|| by_tens(low));
+    let (overhang, overhang_from) = match (told_over, beyond) {
+        (Some(told), _) => (told, "told"),
+        (None, Some(read)) => (read, "slopes"),
+        (None, None) => (ROOF_OVER, "default"),
+    };
+    // Where the drawing slopes nothing, the eaves is read off the walls that are built, which is what a roof
+    // stands on: their top is where its underside crosses them, and its eaves hangs below that by as much as the
+    // overhang falls. Told outright, it is what it is told.
+    let tan = pitch.map(|pitch| pitch.to_radians().tan());
+    let (eaves, eaves_from) = match (told_eaves, read_eaves, walls_top, tan) {
+        (Some(told), ..) => (Some(told), Some("told")),
+        (None, Some(read), ..) => (Some(read), Some("slopes")),
+        (None, None, Some(top), Some(tan)) => (Some(top - overhang * tan), Some("walls")),
+        _ => (None, None),
+    };
+    // Where its base stands above the floor: the height of its underside over the faces of the walls, which is
+    // the eaves carried back up the slope, the overhang falling below it on the way out. To the millimetre, which
+    // is what a project is built to, the pitch being read to a hundredth of a degree.
+    let base = match (eaves, tan) {
+        (Some(eaves), Some(tan)) => Some((eaves + overhang * tan).round()),
+        _ => None,
+    };
+    // Two of them meeting at an apex over the facade: what a gable end looks like, and what a hipped end looks
+    // like too, which is why it is said and not acted on. How high they meet is what tells those apart, and that
+    // is settled below against the roof itself.
+    let apex = taken.iter().any(|a| {
+        taken.iter().any(|b| a.east && !b.east && (a.head.0 - b.head.0).abs() <= ROOF_AGREE && (a.head.1 - b.head.1).abs() <= ROOF_AGREE)
+    });
+    // The level the roof stands on, which is the one above the walls it covers, and where its base sits on it.
+    let on = s.model.level_above(level);
+    let offset = match (base, on) {
+        (Some(base), Some(on)) => Some(base - (s.model.elevation(on) - floor_z)),
+        _ => None,
+    };
+    let found = on.map(|on| roof_footprint(&s.model, on, overhang));
+    let footprint = found.clone().and_then(Result::ok);
+    // The roof the reading makes, with the edges `gables` numbers left upright.
+    let shaped_as = |gables: &[usize]| -> Option<Roof> {
+        let (boundary, courtyards) = footprint.clone()?;
+        Some(Roof {
+            params: Default::default(),
+            type_name: type_name.clone(),
+            level: on?,
+            boundary,
+            courtyards,
+            slope: pitch?,
+            overhang,
+            gable: false,
+            gables: gables.to_vec(),
+            offset: offset?,
+            openings: Vec::new(),
+            join: None,
+            extrusion: None,
+        })
+    };
+    // How high its ridge comes out: the highest its underside reaches, above the floor the eaves was read from.
+    let ridge_of = |gables: &[usize]| -> Option<f64> {
+        let roof = shaped_as(gables)?;
+        s.model
+            .roof_faces(&roof)
+            .ok()?
+            .iter()
+            .flat_map(|(loops, plane)| loops.iter().flatten().map(|q| plane.at(*q)))
+            .fold(None, most)
+            .map(|z| by_tens(z - floor_z))
+    };
+    // Which edges stand upright: what was told, or else the shape whose own ridge comes out where the drawing
+    // draws it. A gable end and a hipped end are drawn alike, two slopes meeting over the facade, and what tells
+    // them apart is how high they meet: a gable carries the ridge the whole way across the building the other
+    // way, where hips all round bring it down to the middle of the narrowest span. So each way the footprint
+    // runs is tried as the one left upright, hips as well, and the drawing settles it.
+    let shapes: Vec<(Vec<usize>, Option<f64>)> = std::iter::once(Vec::new())
+        .chain(footprint.iter().flat_map(|(boundary, _)| ways(boundary)))
+        .map(|gables| {
+            let top = ridge_of(&gables);
+            (gables, top)
+        })
+        .collect();
+    let (gables, gables_from) = match (&gables_told, ridge) {
+        (Some(told), _) => (told.clone(), "told"),
+        (None, Some(ridge)) => {
+            let off = |top: &Option<f64>| top.map_or(f64::MAX, |top| (top - ridge).abs());
+            let best = shapes.iter().min_by(|a, b| off(&a.1).total_cmp(&off(&b.1)));
+            (best.map(|(gables, _)| gables.clone()).unwrap_or_default(), "ridge")
+        }
+        (None, None) => (Vec::new(), "hips"),
+    };
+    let made_ridge = ridge_of(&gables);
+    let mut out = json!({
+        "id": id,
+        "part": part.name,
+        "level": on.and_then(|on| s.model.level(on)).map(|l| l.name.clone()),
+        "datum": read.datum.map(hundredth),
+        "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+        "floor": floor.map(hundredth),
+        "slopes": listed_slants(&drawn, &taken, floor),
+        "slope": pitch,
+        "eaves": eaves.map(hundredth),
+        "eaves_from": eaves_from,
+        "base": base.map(hundredth),
+        "ridge": ridge,
+        "beyond": beyond,
+        "overhang": hundredth(overhang),
+        "overhang_from": overhang_from,
+        "apex": apex,
+        "gables": gables,
+        "gables_from": gables_from,
+        "shapes": shapes
+            .iter()
+            .map(|(one, top)| json!({"gables": one, "ridge": top, "picked": *one == gables}))
+            .collect::<Vec<Value>>(),
+        "made_ridge": made_ridge,
+        "offset": offset.map(hundredth),
+    });
+    if let (Some(made), Some(ridge)) = (made_ridge, ridge) {
+        out["ridge_agrees"] = json!((made - ridge).abs() <= ROOF_AGREE);
+    }
+    if !apply {
+        return Ok(out);
+    }
+    if pitch.is_none() {
+        return Err(bad(
+            c,
+            format!(
+                "`{name}` draws nothing above the floor at a pitch a roof is built at, so nothing on it says how steeply this \
+                 roof rises: `slope` is how to say it in degrees, and a roof is read off the elevation that draws its gable or \
+                 its hip, where the rakes of it are drawn at the angle they rise at"
+            ),
+        ));
+    }
+    let Some(on) = on else {
+        return Err(bad(c, format!("{} has no level above it for a roof to stand on; add one with `level`", level_name(&s.model, level))));
+    };
+    if eaves.is_none() {
+        return Err(bad(c, "nothing says how high the eaves of it stands: `eaves` is how to say it, in mm above the floor"));
+    }
+    if let Some(Err(e)) = found {
+        return Err(bad(c, e));
+    }
+    let Some(roof) = shaped_as(&gables) else {
+        return Err(bad(c, format!("no roof can be built over the walls of {}", level_name(&s.model, level))));
+    };
+    // The roof this reading already built is left as it is: read and given again, there is nothing left to build.
+    let same = s.model.elements.iter().find(|(_, e)| {
+        matches!(e, Element::Roof(r) if r.level == roof.level && r.gables == roof.gables
+            && [(r.slope, roof.slope), (r.offset, roof.offset), (r.overhang, roof.overhang)].iter().all(|(a, b)| (a - b).abs() < 0.001))
+    });
+    let built = match same {
+        Some((id, _)) => *id,
+        None => s.model_mut().insert(Element::Roof(roof)),
+    };
+    out["roof"] = json!(built);
+    out["on"] = json!(s.model.shown(on));
+    Ok(out)
+}
+
+/// The edges of a footprint grouped by the way they run, each group in the order the edges are numbered: one
+/// group for each way, the edges within [`SAME_WAY`] degrees of the first of them, whichever way round each is
+/// drawn. Which of these groups is left upright is the shape of a pitched roof over it.
+fn ways(boundary: &[P2]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(f64, Vec<usize>)> = Vec::new();
+    for (i, a) in boundary.iter().enumerate() {
+        let b = boundary[(i + 1) % boundary.len()];
+        if b.dist(*a) <= TOL {
+            continue;
+        }
+        let d = b - *a;
+        let way = d.1.atan2(d.0).to_degrees().rem_euclid(180.0);
+        let near = groups.iter_mut().find(|(held, _)| {
+            let off = (held - way).abs();
+            off.min(180.0 - off) <= SAME_WAY
+        });
+        match near {
+            Some((_, held)) => held.push(i),
+            None => groups.push((way, vec![i])),
+        }
+    }
+    groups.into_iter().map(|(_, group)| group).collect()
+}
+
+/// The slopes a drawing draws, as a reading reports them: at most [`MOST_COURSES`] of them, the most drawn kept
+/// and the lowest first, each with which of the roof's it is taken for.
+fn listed_slants(drawn: &[crate::underlay::Slant], taken: &[crate::underlay::Slant], floor: Option<f64>) -> Vec<Value> {
+    let mut kept: Vec<&crate::underlay::Slant> = drawn.iter().collect();
+    kept.sort_by(|a, b| b.run.total_cmp(&a.run));
+    kept.truncate(MOST_COURSES);
+    kept.sort_by(|a, b| a.foot.1.total_cmp(&b.foot.1).then(a.foot.0.total_cmp(&b.foot.0)));
+    let over = |height: Option<f64>| match (height, floor) {
+        (Some(height), Some(floor)) => Some(hundredth(height - floor)),
+        _ => None,
+    };
+    kept.into_iter()
+        .map(|slant| {
+            json!({
+                "rise": hundredth(slant.rise),
+                "run": hundredth(slant.run),
+                "east": slant.east,
+                "foot": [hundredth(slant.foot.0), hundredth(slant.foot.1)],
+                "head": [hundredth(slant.head.0), hundredth(slant.head.1)],
+                "above": over(slant.low),
+                "up": over(slant.high),
+                "taken": taken.iter().any(|one| one == slant),
+            })
+        })
+        .collect()
 }
 
 /// The parts of the drawing `id` is, as the project holds them.
@@ -5988,7 +6353,7 @@ fn roof(s: &mut Session, p: &Value) -> R {
     let type_name = type_param(c, p, m, "roof")?;
     let extrusion: Option<Extrusion> = shaped(c, p, "extrusion", "{line: [[x,y],[x,y]], profile: [[along, up],…], from?, to}")?;
     let given = !absent(p.get("boundary"));
-    let overhang = num(c, p, "overhang")?.unwrap_or(if given || extrusion.is_some() { 0.0 } else { 500.0 });
+    let overhang = num(c, p, "overhang")?.unwrap_or(if given || extrusion.is_some() { 0.0 } else { ROOF_OVER });
     let (boundary, found) = match (given, &extrusion) {
         (true, _) => (points(c, p, "boundary")?, Vec::new()),
         (false, Some(_)) => (Vec::new(), Vec::new()),

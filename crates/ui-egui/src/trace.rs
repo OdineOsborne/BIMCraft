@@ -83,6 +83,10 @@ pub(crate) struct TraceDialog {
     /// the reading found, which is what the command picks for itself).
     pub(crate) storey: Option<Value>,
     pub(crate) top: Option<f64>,
+    /// And the last reading of the roof over them, with the shape picked out of what it found (none: the one
+    /// whose ridge the drawing agrees with, which is what the command picks for itself).
+    pub(crate) roof: Option<Value>,
+    pub(crate) gables: Option<Vec<usize>>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
@@ -381,7 +385,14 @@ fn part_json(m: &Model, part: &Part) -> Value {
 /// The Openings tab: the sill and the head of every opening, read off an elevation that stands against its plan
 /// (`cad_openings`). Reading builds nothing and changes nothing: what it says is what the drawing draws. Apply then
 /// gives that to the openings the Walls tab built, which until then stand at the size a starter type is.
-fn heights_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Value>, storey: &mut Option<Value>) {
+fn heights_tab(
+    ui: &mut Ui,
+    d: &mut TraceDialog,
+    m: &Model,
+    read: &mut Option<Value>,
+    storey: &mut Option<Value>,
+    roof: &mut Option<Value>,
+) {
     let said = t(
         "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
     );
@@ -424,7 +435,7 @@ fn heights_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Va
     let said = t("A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.");
     ui.label(RichText::new(said).color(pal().muted));
     if changed {
-        (d.openings, d.storey, d.top) = (None, None, None);
+        (d.openings, d.storey, d.top, d.roof, d.gables) = (None, None, None, None, None);
     }
     let (underlay, floor) = (d.underlay, d.floor);
     let params = |apply: bool, top: Option<f64>| {
@@ -476,6 +487,65 @@ fn heights_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Va
     }
     if let Some(report) = &d.storey {
         storey_shown(ui, report);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    // The roof: the one thing of a building whose pitch no plan draws, and which the elevation that draws its
+    // gable or its hip draws at the angle it really rises at.
+    ui.label(RichText::new(t("The roof over them, as the elevation draws its pitch:")).color(pal().muted));
+    // Which shape it is built in: the one whose ridge comes out where the drawing draws it, until another is
+    // picked. Each is said by the ridge it would reach and how many edges of the roof stand upright in it.
+    let shapes: Vec<(Vec<usize>, String)> = d
+        .roof
+        .iter()
+        .flat_map(|report| report["shapes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|shape| {
+            let gables: Vec<usize> = shape["gables"].as_array()?.iter().filter_map(|i| i.as_u64()).map(|i| i as usize).collect();
+            let ridge = shape["ridge"].as_f64()?;
+            Some((gables.clone(), format!("{:.2} m ({})", ridge / 1000.0, gables.len())))
+        })
+        .collect();
+    let picked = d.gables.clone().or_else(|| {
+        d.roof
+            .iter()
+            .flat_map(|report| report["shapes"].as_array().cloned().unwrap_or_default())
+            .find(|shape| shape["picked"].as_bool() == Some(true))
+            .and_then(|shape| Some(shape["gables"].as_array()?.iter().filter_map(|i| i.as_u64()).map(|i| i as usize).collect()))
+    });
+    let roof_params = |apply: bool| {
+        let mut p = params(apply, None);
+        if let Some(gables) = &picked {
+            p["gables"] = json!(gables);
+        }
+        p
+    };
+    let read_roof = d.roof.is_some();
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Roof")).clicked() {
+            *roof = Some(params(false, None));
+        }
+        if !shapes.is_empty() {
+            let now = picked
+                .as_ref()
+                .and_then(|gables| shapes.iter().find(|(one, _)| one == gables))
+                .map(|(_, said)| said.clone())
+                .unwrap_or_default();
+            let options: Vec<String> = shapes.iter().map(|(_, said)| said.clone()).collect();
+            let label = ui.label(t("Its shape"));
+            if let Some(got) = combo(ui, (d.underlay, "roof-shape"), label.id, &now, &options) {
+                d.gables = shapes.iter().find(|(_, said)| *said == got).map(|(gables, _)| gables.clone());
+            }
+        }
+    });
+    if !shapes.is_empty() {
+        let said = t("The ridge each shape would reach, and how many edges of the roof stand upright in it.");
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if ui.add_enabled(read_roof && floor > 0.0, Button::new(t("Build This Roof"))).clicked() {
+        *roof = Some(roof_params(true));
+    }
+    if let Some(report) = &d.roof {
+        roof_shown(ui, report);
     }
     ui.add_space(8.0);
     ui.separator();
@@ -546,6 +616,53 @@ fn storey_shown(ui: &mut Ui, report: &Value) {
     {
         let said = tf("{} stands {} mm above this floor, and is left where the project put it.", &[name, &format!("{up:.0}")]);
         ui.label(RichText::new(said).color(pal().muted));
+    }
+}
+
+/// What the last reading of the roof said: the pitch the elevation draws it at, where its eaves and its ridge
+/// stand, and whether the ridge of the shape that was built comes out where the drawing draws it. A gable end and
+/// a hipped end are drawn alike, so that last one is the whole check on which was taken.
+fn roof_shown(ui: &mut Ui, report: &Value) {
+    match (report["slope"].as_f64(), report["eaves"].as_f64()) {
+        (Some(slope), Some(eaves)) => {
+            let (slope, eaves) = (format!("{slope:.2}"), format!("{eaves:.0}"));
+            ui.label(RichText::new(tf("This roof rises {} degrees, its eaves {} mm above the floor.", &[&slope, &eaves])).strong());
+        }
+        _ => {
+            let said = t(
+                "This elevation draws nothing above the floor at a pitch a roof is built at, so nothing on it says how steeply this roof rises.",
+            );
+            ui.label(RichText::new(said).color(pal().error));
+        }
+    }
+    // Which shape was built is what the ridge the drawing draws settled, so the two are said together.
+    if let Some(ridge) = report["ridge"].as_f64() {
+        let ridge = format!("{ridge:.0}");
+        let said = match report["gables"].as_array().is_some_and(|gables| !gables.is_empty()) {
+            true => tf("Its ridge is drawn {} mm above the floor, and the roof is built with gable ends.", &[&ridge]),
+            false => tf("Its ridge is drawn {} mm above the floor, and the roof is built hipped all round.", &[&ridge]),
+        };
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if report["ridge_agrees"].as_bool() == Some(false)
+        && let Some(made) = report["made_ridge"].as_f64()
+    {
+        let said = tf(
+            "The roof this builds puts its ridge {} mm above the floor, which is not where the drawing draws it.",
+            &[&format!("{made:.0}")],
+        );
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    if report["overhang_from"].as_str() == Some("slopes")
+        && let Some(over) = report["overhang"].as_f64()
+    {
+        let said =
+            tf("It reaches {} mm past its walls, which is how far outside this facade its slopes are drawn.", &[&format!("{over:.0}")]);
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if let (Some(roof), Some(level)) = (report["roof"].as_u64(), report["level"].as_str()) {
+        let said = tf("Roof {} was built, standing on {}.", &[&roof.to_string(), level]);
+        ui.label(RichText::new(said).strong());
     }
 }
 
@@ -852,6 +969,8 @@ impl BimApp {
             floor: 0.0,
             openings: None,
             storey: None,
+            roof: None,
+            gables: None,
             top: None,
             found,
             holes,
@@ -879,7 +998,8 @@ impl BimApp {
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
-        let (mut parts, mut read, mut storey) = (None::<Value>, None::<Value>, None::<Value>);
+        let (mut parts, mut read) = (None::<Value>, None::<Value>);
+        let (mut storey, mut roofing) = (None::<Value>, None::<Value>);
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -909,7 +1029,7 @@ impl BimApp {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build),
-                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey),
+                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing),
                 }
                 if !d.error.is_empty() {
                     ui.add_space(6.0);
@@ -918,14 +1038,15 @@ impl BimApp {
                 ui.add_space(8.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
-        let (reading, storeying) = (read.is_some(), storey.is_some());
-        let asked = match (layers, parts, read, storey, find || build) {
-            (Some(p), _, _, _, _) => Some(("cad_layers", p)),
-            (_, Some(p), _, _, _) => Some(("cad_parts", p)),
-            (_, _, Some(p), _, _) => Some(("cad_openings", p)),
-            (_, _, _, Some(p), _) => Some(("cad_storey", p)),
-            (None, None, None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, None, None, false) => None,
+        let (reading, storeying, roofed) = (read.is_some(), storey.is_some(), roofing.is_some());
+        let asked = match (layers, parts, read, storey, roofing, find || build) {
+            (Some(p), ..) => Some(("cad_layers", p)),
+            (_, Some(p), ..) => Some(("cad_parts", p)),
+            (_, _, Some(p), ..) => Some(("cad_openings", p)),
+            (_, _, _, Some(p), ..) => Some(("cad_storey", p)),
+            (_, _, _, _, Some(p), _) => Some(("cad_roof", p)),
+            (None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -940,6 +1061,8 @@ impl BimApp {
                 Some(reply) if reading => d.openings = Some(reply),
                 // And what it says of how high the storey stands, which is the walls' own height.
                 Some(reply) if storeying => d.storey = Some(reply),
+                // And what it says of the roof over them: the pitch no plan draws.
+                Some(reply) if roofed => d.roof = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();
@@ -955,7 +1078,7 @@ impl BimApp {
                 None => {
                     d.error = std::mem::take(&mut self.status.text);
                     self.status = crate::Status::default();
-                    (d.openings, d.storey) = (None, None);
+                    (d.openings, d.storey, d.roof) = (None, None, None);
                     d.stale();
                 }
             }
