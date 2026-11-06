@@ -693,6 +693,35 @@ above the floor and the ridge **4670**; of the shapes over that footprint, the o
 ridge at **4690**, twenty millimetres out. `apply` builds it: one roof on the level above, and built again from the
 same reading it builds no second one.
 
+## The slab under the floor of a storey
+
+A plan draws the outline of a slab and nothing of how thick it is. An elevation draws the floor of the storey as a
+line and, under it, the line of the slab's own underside, and what lies between those two is the slab:
+`cad_floor {"part": …, "plan": …, "floor": …}` reads it there, off the same lines of the whole facade that
+`cad_storey` reads the top of the walls off (`courses`, a line running at least six tenths of the width of the
+facade).
+
+The underside is the highest of those lines standing between 100 and 1000 mm under the floor, said as the drawing
+says it — a height above the floor, so a negative one. What the drawing draws nearer than that is the same floor
+drawn twice or the line of a finish; what it draws further off is the storey underneath. `thickness` is what is
+left between the two, to the nearest 10 mm, and `under` and `thickness` each say it outright, either giving the
+other.
+
+The top of a slab is the floor of its storey, so it is built at no offset, and where the project puts that level
+somewhere other than the drawing draws it, `cad_storey` is what says so. What the slab spans is the walls out to
+their faces (`walls_footprint`, which the roof's own footprint grows from): the storey's own walls, which stand on
+it, or, where none are traced on that level yet, the walls of the storey below, which bear it — `spans_from` says
+which. So the slab of the storey over a traced plan is read by naming its `level` and the height its own floor is
+drawn at, and the one under the traced plan by naming nothing at all. A slab rests on the walls under it, so where
+there is a storey below, `below` holds how far the top of its walls stands from this underside and whether the two
+agree; a slab's type is the project's own of that thickness or a new one named as the starter types are, and it is
+built structural, as a slab is what carries the storey standing on it.
+
+Measured on the permesso di costruire: under the floor at 69.80 the PROSPETTO SUD-EST draws one line the width of
+the facade, at 69.5365 — **263 mm** under it — and the slab comes out **260 mm** thick, spanning **84.31 m²** out
+to the faces of the walls that stand on it. The other line it draws below the floor, 1583 mm down and wider than
+the facade, is the fall of the ground, and no slab is read from it.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -773,8 +802,8 @@ changing any of them drops it and it has to be found again: the drawing on scree
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
 
 **Heights** is everything an elevation says of the storey it draws: the elevation to read it off, the plan whose
-walls and openings they are, the height the storey's floor stands at (0 is not said), and then three groups, the
-walls, the roof over them and the openings in them.
+walls and openings they are, the height the storey's floor stands at (0 is not said), and then four groups, the
+walls, the slab under their floor, the roof over them and the openings in them.
 
 The walls: **Read the Storey's Top** runs `cad_storey` and says how high the storey stands and how many walls are on
 it, with **Its top** beside it, a combo of every line the elevation draws the width of its facade within a storey of
@@ -783,6 +812,12 @@ another is picked. **Give the Walls This Height** gives it to them, and says how
 have an opening that would stand through it, and how many are attached to a roof or a floor. Where the level above
 does not stand at that height it is said in the same breath and left alone: moving it would move whatever else
 stands on it, and that is no business of this drawing's.
+
+The slab: **Read the Slab** runs `cad_floor` and says how thick the slab under this floor is and what it would
+span, with **Its underside** beside it, a combo of every line the elevation draws the width of its facade that a
+slab could be thick enough to reach down to, each as the height it is drawn at and the thickness it would make —
+the highest of them until another is picked. **Build This Slab** builds it, the floor of this storey. Where the
+walls of the storey below stop somewhere other than where that underside comes out, that is said too.
 
 The roof: **Read the Roof** runs `cad_roof` and says the pitch the elevation draws it at and how high its eaves
 stands, how far it reaches past its walls where the slopes say, and where the ridge is drawn — with, in the same

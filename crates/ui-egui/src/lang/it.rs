@@ -1987,6 +1987,31 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Read the Storey's Top", "Leggi l'altezza del piano"],
     ["Its top", "La sommità"],
     ["Give the Walls This Height", "Dai questa altezza ai muri"],
+    [
+        "The slab under this floor, as thick as the elevation draws it:",
+        "Il solaio sotto questo piano, dello spessore che il prospetto gli disegna:",
+    ],
+    ["Read the Slab", "Leggi il solaio"],
+    ["Its underside", "Il suo intradosso"],
+    [
+        "The height each line it could be is drawn at, and how thick that would make the slab.",
+        "L'altezza a cui è disegnata ogni linea che potrebbe essere, e lo spessore che darebbe al solaio.",
+    ],
+    ["Build This Slab", "Costruisci questo solaio"],
+    [
+        "This slab is {} mm thick, its top the floor of this storey.",
+        "Questo solaio è spesso {} mm, con l'estradosso al piano di questo livello.",
+    ],
+    [
+        "No line of this elevation stands under that floor by as much as a slab is thick, so nothing on it says how thick this slab is.",
+        "Nessuna linea di questo prospetto sta sotto quel piano quanto è spesso un solaio, quindi niente dice lo spessore di questo solaio.",
+    ],
+    [
+        "The walls of {} stop {} mm from where that underside comes out.",
+        "I muri di {} si fermano a {} mm da dove viene a stare quell'intradosso.",
+    ],
+    ["A slab of {} was built, the floor of {}.", "È stato costruito un solaio di {}, il piano di {}."],
+    ["It would span {}, out to the faces of the walls that bear it.", "Coprirebbe {}, fino alle facce dei muri che lo portano."],
     ["The roof over them, as the elevation draws its pitch:", "Il tetto sopra, come il prospetto ne disegna la pendenza:"],
     ["Read the Roof", "Leggi il tetto"],
     ["Its shape", "La sua forma"],

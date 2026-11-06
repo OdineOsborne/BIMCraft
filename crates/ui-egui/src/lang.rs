@@ -2790,6 +2790,44 @@ const WORDS: &[[&str; 3]] = &[
     ["Its top", "O seu topo", "Su remate"],
     ["Give the Walls This Height", "Dar esta altura às paredes", "Dar esta altura a los muros"],
     [
+        "The slab under this floor, as thick as the elevation draws it:",
+        "A laje sob este piso, com a espessura que o alçado lhe desenha:",
+        "El forjado bajo este suelo, con el grosor que el alzado le dibuja:",
+    ],
+    ["Read the Slab", "Ler a laje", "Leer el forjado"],
+    ["Its underside", "O seu intradorso", "Su intradós"],
+    [
+        "The height each line it could be is drawn at, and how thick that would make the slab.",
+        "A altura a que está desenhada cada linha que pode ser, e a espessura que daria à laje.",
+        "La altura a la que está dibujada cada línea que podría ser, y el grosor que daría al forjado.",
+    ],
+    ["Build This Slab", "Construir esta laje", "Construir este forjado"],
+    [
+        "This slab is {} mm thick, its top the floor of this storey.",
+        "Esta laje tem {} mm de espessura, com o extradorso no piso deste andar.",
+        "Este forjado tiene {} mm de grosor, con el extradós en el suelo de esta planta.",
+    ],
+    [
+        "No line of this elevation stands under that floor by as much as a slab is thick, so nothing on it says how thick this slab is.",
+        "Nenhuma linha deste alçado fica sob esse piso tanto quanto uma laje é espessa, por isso nada nele diz a espessura desta laje.",
+        "Ninguna línea de este alzado queda bajo ese suelo tanto como es grueso un forjado, así que nada en él dice el grosor de este forjado.",
+    ],
+    [
+        "The walls of {} stop {} mm from where that underside comes out.",
+        "As paredes de {} param a {} mm de onde esse intradorso fica.",
+        "Los muros de {} se detienen a {} mm de donde queda ese intradós.",
+    ],
+    [
+        "A slab of {} was built, the floor of {}.",
+        "Foi construída uma laje de {}, o piso de {}.",
+        "Se construyó un forjado de {}, el suelo de {}.",
+    ],
+    [
+        "It would span {}, out to the faces of the walls that bear it.",
+        "Cobriria {}, até às faces das paredes que a suportam.",
+        "Cubriría {}, hasta las caras de los muros que lo soportan.",
+    ],
+    [
         "The roof over them, as the elevation draws its pitch:",
         "O telhado sobre elas, como o alçado desenha a sua inclinação:",
         "La cubierta sobre ellos, como el alzado dibuja su pendiente:",

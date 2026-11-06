@@ -298,6 +298,42 @@ fn the_heights_tab_builds_the_roof_the_elevation_draws_over_those_walls() {
     assert_eq!(roofs_of(&h), vec![(26.57, 50.0)], "at the pitch it draws, its base over the walls' faces");
 }
 
+#[test]
+fn the_heights_tab_builds_the_slab_the_elevation_draws_under_this_storeys_floor() {
+    let mut h = a_storey_with_an_elevation();
+    h.state_mut().session.execute("trace_walls", &json!({"part": "PIANTA", "openings": true})).expect("it builds");
+    h.run();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Heights");
+    if let Some(d) = h.state_mut().trace_dialog.as_mut() {
+        d.floor = 69_800.0;
+    }
+    h.run();
+    press(&mut h, "Read the Storey's Top");
+    press(&mut h, "Give the Walls This Height");
+    press(&mut h, "Read the Slab");
+    // The one thing of a slab no plan draws: what lies between the floor of this storey and the line the
+    // elevation draws under it.
+    assert!(says(&h, "This slab is 260 mm thick, its top the floor of this storey."), "what it read");
+    assert!(says(&h, "It would span 60.00 m², out to the faces of the walls that bear it."));
+    assert!(slabs_of(&h).is_empty(), "a reading builds nothing");
+    press(&mut h, "Build This Slab");
+    assert_eq!(slabs_of(&h), vec![(260.0, 0.0)], "as thick as it is drawn, its top the floor it is of");
+    assert!(says(&h, "A slab of 60.00 m² was built, the floor of Level 1."));
+}
+
+/// Every slab of the project: how thick the type it is of is, and how far its top stands above its level.
+fn slabs_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
+    let m = &h.state().session.model;
+    m.elements
+        .values()
+        .filter_map(|e| match e {
+            bimcraft_core::model::Element::Floor(f) => Some((m.types.floor.get(&f.type_name)?.thickness, f.offset)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every roof of the project: the pitch it is built at and how far its base stands above its level.
 fn roofs_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
     h.state()
@@ -346,7 +382,8 @@ fn windows_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
 
 /// A survey of one storey, linked and in its parts, with the elevation stood against the plan: the plan of a room
 /// with two windows in its south wall, and 20 m east of it the elevation of that side, which draws the ground, the
-/// eaves, a rectangle around each window, and the two heights it is drawn to.
+/// line the walls stop at, the underside of the slab this floor is, the two rakes of the roof, a rectangle around
+/// each window, and the two heights it is drawn to.
 fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     let mut lines = room("MURI", [0.0, 0.0, 10_000.0, 6000.0], 300.0);
     for [x0, x1] in [[3000.0, 4500.0], [6000.0, 7200.0]] {
@@ -356,6 +393,8 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     }
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));
+    // And the underside of the slab this floor is, 260 mm under it: the slab between the two lines.
+    lines.push(("PROSPETTO".to_string(), [20_000.0, -260.0, 30_000.0, -260.0]));
     // And the two rakes of the roof over them, from 500 mm outside each end of the eaves to the apex over the
     // middle: one in two, which over the 11 m the roof spans with its overhang is that apex exactly.
     lines.push(("PROSPETTO".to_string(), [19_500.0, 2800.0, 25_000.0, 5550.0]));

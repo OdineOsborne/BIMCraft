@@ -687,6 +687,136 @@ fn an_elevation_that_draws_no_slope_above_its_walls_builds_no_roof_and_says_so()
     assert!(e.contains("`floor`"), "{e}");
 }
 
+/// The same survey, with the elevation drawing the two storeys of a facade: the ground at 0, a string course 1200
+/// up, the top of the ground floor's walls at 2800, the floor of the storey over them at 3080, and the eaves of
+/// that storey at 5800. The 280 mm between the third line and the fourth is the slab of the upper storey, and no
+/// plan draws any of it.
+fn a_slab() -> Session {
+    let (s, _) = a_survey();
+    let path = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.path.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    let more = "0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n1200\n11\n30000\n21\n1200\n\
+                0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n2800\n11\n30000\n21\n2800\n\
+                0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n3080\n11\n30000\n21\n3080\n\
+                0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n5800\n11\n30000\n21\n5800\n";
+    // Its own line at 3000 goes, so that what stands over the top of the walls is the floor of the storey above.
+    let eaves = "0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n3000\n11\n30000\n21\n3000\n";
+    let text = std::fs::read_to_string(&path)
+        .expect("the file")
+        .replace(eaves, "")
+        .replace("0\nENDSEC\n0\nEOF\n", &format!("{more}0\nENDSEC\n0\nEOF\n"));
+    std::fs::write(&path, text).expect("it is written");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
+    run(&mut s, "cad_anchor", told).expect("it stands");
+    run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    // The walls as high as that elevation draws them, which is what the slab over them then rests on.
+    let storey = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "apply": true});
+    run(&mut s, "cad_storey", storey).expect("it gives them the storey");
+    s
+}
+
+/// Every slab of the project: the level it is the floor of, how thick its type is, and the square metres it
+/// covers.
+fn slabs_of(s: &Session) -> Vec<(String, f64, f64)> {
+    s.model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Floor(f) => Some((
+                s.model.level(f.level).map(|l| l.name.clone()).unwrap_or_default(),
+                s.model.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness),
+                crate::commands::m2(crate::geom::area(&f.boundary)),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_slab_an_elevation_draws_is_as_thick_as_the_two_lines_it_stands_between() {
+    let mut s = a_slab();
+    // The slab of the storey over the one traced: its own floor is drawn at 72.88, and what the elevation draws
+    // 280 mm under that is the line the walls of the storey below stop at.
+    let ask = json!({"part": "PROSPETTO SUD", "level": "Level 2", "floor": 72_880});
+    let out = run(&mut s, "cad_floor", ask.clone()).expect("it reads");
+    // The lines it draws the width of the facade, said as they stand against that floor: the one under it that a
+    // slab could be thick enough to reach, and the rest of the facade, which no slab of this floor is.
+    let drawn: Vec<(Value, Value)> =
+        out["courses"].as_array().expect("the courses").iter().map(|c| (c["above"].clone(), c["could"].clone())).collect();
+    let said = vec![
+        (json!(-3080.0), json!(false)),
+        (json!(-1880.0), json!(false)),
+        (json!(-280.0), json!(true)),
+        (json!(0.0), json!(false)),
+        (json!(2720.0), json!(false)),
+    ];
+    assert_eq!(drawn, said, "{out}");
+    assert_eq!((out["under"].clone(), out["under_from"].clone()), (json!(-280.0), json!("courses")), "{out}");
+    assert_eq!((out["thickness"].clone(), out["thickness_from"].clone()), (json!(280.0), json!("courses")), "{out}");
+    // Nothing is traced on that level yet, so it spans the walls under it, which are what bear it: the 10 by 6 m
+    // the plan draws, out to their faces, in a type of its own thickness.
+    assert_eq!((out["spans_from"].clone(), out["area_m2"].clone()), (json!("storey below"), json!(60.0)), "{out}");
+    assert_eq!((out["type"].clone(), out["made"].clone()), (json!("Generic - 280mm"), json!(true)), "{out}");
+    // Those walls stop 80 mm above where this underside comes out, because the project puts Level 2 lower than
+    // the drawing draws its floor: said, and not quietly taken for agreement.
+    assert_eq!(out["below"], json!({"name": "Level 1", "gap": 80.0, "agrees": false}), "{out}");
+    assert!(slabs_of(&s).is_empty(), "it read and changed nothing: {out}");
+    // Asked for, one slab is the floor of that level, as thick as the drawing draws it.
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_floor", told.clone()).expect("it builds");
+    assert!(out["slab"].as_u64().is_some(), "{out}");
+    assert_eq!(slabs_of(&s), vec![("Level 2".to_string(), 280.0, 60.0)], "{out}");
+    // One undo step takes it back, and given again from the same reading it builds no second slab.
+    run(&mut s, "undo", json!({})).expect("it goes back");
+    assert!(slabs_of(&s).is_empty());
+    run(&mut s, "cad_floor", told.clone()).expect("again");
+    run(&mut s, "cad_floor", told).expect("and again");
+    assert_eq!(slabs_of(&s).len(), 1, "the second giving built no slab of its own");
+}
+
+#[test]
+fn an_elevation_that_draws_no_line_under_the_floor_builds_no_slab_and_says_so() {
+    // The ground floor of the same survey: its elevation draws the floor itself and then the ground, 1583 mm
+    // under it, which is the fall of the terrain and no slab's underside.
+    let mut s = a_slab();
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "apply": true});
+    let e = run(&mut s, "cad_floor", ask).expect_err("nothing under the floor");
+    assert!(e.contains("`thickness`"), "{e}");
+    // Told how thick it is, its underside stands that far under the floor and the slab is built: this storey's
+    // own walls stand on it, so they are what it spans.
+    let told = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "thickness": 300, "apply": true});
+    let out = run(&mut s, "cad_floor", told).expect("it builds");
+    assert_eq!((out["under"].clone(), out["under_from"].clone()), (json!(-300.0), json!("told")), "{out}");
+    assert_eq!((out["spans_from"].clone(), out["below"].clone()), (json!("storey"), json!(null)), "{out}");
+    assert_eq!(slabs_of(&s), vec![("Level 1".to_string(), 300.0, 60.0)], "{out}");
+    // An underside said above the floor is no underside, a plan draws no thickness, and apply still needs the
+    // floor the slab hangs under.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "under": 300});
+    let e = run(&mut s, "cad_floor", ask).expect_err("above the floor");
+    assert!(e.contains("negative number"), "{e}");
+    let ask = json!({"part": "PIANTA PIANO TERRA", "plan": "PIANTA PIANO TERRA"});
+    let e = run(&mut s, "cad_floor", ask).expect_err("a plan");
+    assert!(e.contains("is a plan"), "{e}");
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "thickness": 300, "apply": true});
+    let e = run(&mut s, "cad_floor", ask).expect_err("it needs the floor");
+    assert!(e.contains("`floor`"), "{e}");
+}
+
 #[test]
 fn a_door_is_made_as_high_as_its_head_stands_above_the_floor_it_opens_onto() {
     // A plan with a doorway 1 m wide in its south wall, drawn as a gap in both faces of it, and 20 m east the

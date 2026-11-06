@@ -341,6 +341,39 @@ pub static ALL: &[Command] = &[
         cad_roof,
     ),
     edit(
+        "cad_floor",
+        "CAD Floor",
+        &[],
+        "{underlay?, part, plan?, level?, floor?, under?, thickness?, type?, apply?} the slab under the floor of the \
+         storey an elevation draws, read and reported without changing the project unless `apply` asks for it. A plan \
+         draws the outline of a slab and nothing of how thick it is; an elevation draws the floor of a storey as a \
+         line and, under it, the line of the slab's own underside, and what lies between those two is the slab. \
+         `courses` is every line `part` draws the width of its facade, as `cad_storey` reports them, each with the \
+         `height` it is drawn at, how far `above` the floor that is, its `span`, and whether it `could` be the \
+         underside of this slab; `across` and `across_from` are how wide that facade is taken to be and which of the \
+         two it is. `under` is the highest line standing between 100 and 1000 mm below `floor`, the height the \
+         storey's floor stands at as the drawing writes heights, and it is said as the drawing says it: a height \
+         above the floor, so a negative one. What the drawing draws nearer than that is the same floor drawn twice \
+         or the line of a finish, and what it draws further off is the storey underneath. `thickness` is what is \
+         left between the two, to the nearest 10 mm; `under` and `thickness` each say it outright and either gives \
+         the other, and `under_from` and `thickness_from` say which settled it. The top of a slab is the floor of \
+         its storey, so it is built with no offset; where the project puts that level somewhere other than the \
+         drawing draws it, `cad_storey` is what says so. `below` is the storey under this one, where there is one: \
+         how far the top of that storey's walls stands from this underside (`gap`, positive where they rise past \
+         it) and whether the two `agree`, since a slab rests on the walls under it. `level` or `plan` says whose \
+         floor this slab is, and the slab of the storey over a traced plan is read by naming its `level` and the \
+         height its own floor is drawn at. `spans_from` is whose walls it spans, out to their faces: the storey's \
+         own, or, where none are traced on it yet, the storey below's, which is what bears it; `area_m2` is what \
+         that covers and `openings` how many courtyards are left open through it. `type` is the floor type it \
+         comes in, the project's own of that thickness or a name for a new one, and `made` whether it has to be \
+         made; `type` says it outright. `apply` builds it, structural, as `floor` builds one; it needs `floor`, \
+         and given again from the same reading it builds no second slab. Returns `id`, `part`, `level`, `datum`, \
+         `agree`, `across`, `across_from`, `floor`, `courses`, `under`, `under_from`, `thickness`, \
+         `thickness_from`, `spans_from`, `type`, `made`, `area_m2`, `openings` and `below`, and with `apply` also \
+         `slab`, which it built",
+        cad_floor,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -3292,6 +3325,248 @@ fn cad_roof(s: &mut Session, p: &Value) -> R {
     out["roof"] = json!(built);
     out["on"] = json!(s.model.shown(on));
     Ok(out)
+}
+
+/// How near and how far under the floor of a storey the underside of its slab may stand, in millimetres: what the
+/// drawing draws nearer than this is the same floor drawn twice or the line of a finish, and what it draws
+/// further off is the storey underneath and no slab.
+const SLAB_THIN: f64 = 100.0;
+const SLAB_THICK: f64 = 1000.0;
+
+fn cad_floor(s: &mut Session, p: &Value) -> R {
+    let c = "cad_floor";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the slab off"))?;
+    let part = part_of(c, &u, &name)?;
+    if part.kind == crate::model::PartKind::Plan {
+        return Err(bad(
+            c,
+            format!(
+                "`{name}` is a plan: a plan draws the outline of a slab and nothing of how thick it is, which an elevation or a \
+                 section draws"
+            ),
+        ));
+    }
+    let (floor, told_under, told_thick) = (num(c, p, "floor")?, num(c, p, "under")?, num(c, p, "thickness")?);
+    for (key, said) in [("floor", floor), ("under", told_under), ("thickness", told_thick)] {
+        if said.is_some_and(|said| !said.is_finite()) {
+            return Err(bad(c, format!("`{key}` is a height or a thickness in mm as the drawing writes them, and that must be a number")));
+        }
+    }
+    if told_under.is_some_and(|under| under >= 0.0) {
+        return Err(bad(
+            c,
+            "`under` is where the underside of the slab stands as a height above the floor, which is below it: a negative number",
+        ));
+    }
+    if told_thick.is_some_and(|thick| thick <= 0.0) {
+        return Err(bad(c, "`thickness` is how thick the slab is, in millimetres, and never none"));
+    }
+    let apply = flag(c, p, "apply")?;
+    if apply && floor.is_none() {
+        return Err(bad(
+            c,
+            "`apply` needs `floor`: the underside of a slab is read as the height it stands under the floor of its storey, and \
+             `floor` is what says where that floor is",
+        ));
+    }
+    // The storey whose floor this slab is: the plan's own level, which is the one its walls were built on.
+    let level = match (p.get("level"), string(c, p, "plan")?) {
+        (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
+        (_, Some(name)) => {
+            let plan = part_of(c, &u, &name)?;
+            if plan.kind != crate::model::PartKind::Plan {
+                return Err(bad(c, format!("`{name}` is {} and no plan: the walls a slab spans are found in a plan", plan.kind.word())));
+            }
+            plan.level.unwrap_or(u.level)
+        }
+        _ => u.level,
+    };
+    let read = crate::underlay::heights(&s.model, &u, part.region);
+    let found = crate::underlay::courses(&s.model, &u, part.region, read.datum, MOST_COURSES);
+    // How wide the facade is, as `cad_storey` takes it: the two points this elevation stands against its plan by,
+    // and the widest line it draws where it stands against nothing yet.
+    let widest = found.iter().map(|course| course.span).fold(0.0, f64::max);
+    let (across, whence) = match part.anchor.map(|a| a.drawn[0].dist(a.drawn[1])).filter(|wide| *wide > 1.0) {
+        Some(wide) => (wide, "anchor"),
+        None => (widest, "widest line"),
+    };
+    let wide: Vec<&crate::underlay::Course> = found.iter().filter(|course| course.span >= across * ACROSS).collect();
+    let above = |course: &crate::underlay::Course| match (course.height, floor) {
+        (Some(height), Some(floor)) => Some(height - floor),
+        _ => None,
+    };
+    let by_tens = |mm: f64| (mm / 10.0).round() * 10.0;
+    let most = |held: Option<f64>, one: f64| Some(held.map_or(one, |held: f64| held.max(one)));
+    // Whether a line could be the underside: under the floor by as much as a slab is thick and no more.
+    let could = |up: f64| (-SLAB_THICK..=-SLAB_THIN).contains(&up);
+    // The underside: the highest of the lines it could be, which is the slab drawn at its own thickness and not
+    // the storey underneath.
+    let read_under = wide.iter().filter_map(|course| above(course)).filter(|up| could(*up)).fold(None, most).map(by_tens);
+    let (under, under_from) = match (told_under, told_thick, read_under) {
+        (Some(told), ..) => (Some(told), Some("told")),
+        (None, Some(thick), _) => (Some(-thick), Some("told")),
+        (None, None, Some(read)) => (Some(read), Some("courses")),
+        _ => (None, None),
+    };
+    let thickness = under.map(|under| by_tens(-under)).filter(|thick| *thick > 0.0);
+    let thickness_from = thickness.and(under_from);
+    let (type_name, made) = match (string(c, p, "type")?, thickness) {
+        (Some(told), _) => (Some(told), false),
+        (None, Some(thick)) => {
+            let (name, made) = floor_type_for(&s.model, thick);
+            (Some(name), made)
+        }
+        (None, None) => (s.model.default_type("floor").map(String::from), false),
+    };
+    // The storey under it: a slab rests on the walls of it, so where their top stands is where its underside
+    // should, and how far the two stand apart is worth saying.
+    let below = s.model.levels().into_iter().rev().find(|(_, l)| l.elevation < s.model.elevation(level) - TOL).map(|(id, _)| id);
+    let top_of = |of: Guid| {
+        s.model
+            .elements
+            .values()
+            .filter_map(|e| match e {
+                Element::Wall(w) if w.level == of => Some(s.model.own_top(w)),
+                _ => None,
+            })
+            .fold(None, most)
+    };
+    // What it spans: the walls that stand on it, out to their faces; where none are traced on this level yet,
+    // the walls under it, which are what bear it.
+    let own = s.model.elements.values().any(|e| matches!(e, Element::Wall(w) if w.level == level));
+    let (bears, spans_from) = match (own, below) {
+        (true, _) => (Some(level), "storey"),
+        (false, Some(below)) => (Some(s.model.guid(below)), "storey below"),
+        (false, None) => (None, "nothing"),
+    };
+    let got = bears.map(|of| walls_footprint(&s.model, of, 0.0));
+    let footprint = got.clone().and_then(Result::ok);
+    let courses: Vec<Value> = wide
+        .iter()
+        .map(|course| {
+            json!({
+                "height": course.height.map(hundredth),
+                "above": above(course).map(hundredth),
+                "span": hundredth(course.span),
+                "could": above(course).is_some_and(could),
+            })
+        })
+        .collect();
+    let mut out = json!({
+        "id": id,
+        "part": part.name,
+        "level": s.model.level(level).map(|l| l.name.clone()),
+        "datum": read.datum.map(hundredth),
+        "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+        "across": hundredth(across),
+        "across_from": whence,
+        "floor": floor.map(hundredth),
+        "courses": courses,
+        "under": under.map(hundredth),
+        "under_from": under_from,
+        "thickness": thickness,
+        "thickness_from": thickness_from,
+        "spans_from": spans_from,
+        "type": type_name.clone(),
+        "made": made,
+        "area_m2": footprint
+            .as_ref()
+            .map(|(boundary, holes)| m2(geom::area(boundary).abs() - holes.iter().map(|h| geom::area(h).abs()).sum::<f64>())),
+        "openings": footprint.as_ref().map(|(_, holes)| holes.len()),
+    });
+    // Where its underside comes out in the project, against the top of the walls it rests on.
+    if let (Some(below), Some(thickness)) = (below, thickness) {
+        let under_z = s.model.elevation(level) - thickness;
+        let gap = top_of(s.model.guid(below)).map(|top| top - under_z);
+        out["below"] = json!({
+            "name": s.model.level(below).map(|l| l.name.clone()),
+            "gap": gap.map(hundredth),
+            "agrees": gap.is_none_or(|gap| gap.abs() <= LEVEL_AGREE),
+        });
+    }
+    if !apply {
+        return Ok(out);
+    }
+    let Some(thickness) = thickness else {
+        return Err(bad(
+            c,
+            format!(
+                "`{name}` draws no line the width of its facade between {} and {} mm under that floor, so nothing on it says how \
+                 thick this slab is: `thickness` is how to say it in mm, `under` where its underside stands, and `cad_heights` \
+                 lists every line the drawing draws",
+                floor.unwrap_or_default() - SLAB_THICK,
+                floor.unwrap_or_default() - SLAB_THIN
+            ),
+        ));
+    };
+    if thickness > SLAB_THICK {
+        return Err(bad(
+            c,
+            format!("a slab {thickness} mm thick is none: its underside stands between {SLAB_THIN} and {SLAB_THICK} mm under its floor"),
+        ));
+    }
+    let Some(type_name) = type_name else {
+        return Err(bad(c, "the model has no floor types for this"));
+    };
+    if let Some(Err(e)) = got {
+        return Err(bad(c, e));
+    }
+    let Some((mut boundary, openings)) = footprint else {
+        return Err(bad(
+            c,
+            format!("no walls enclose an area on {} or under it for a slab to span; trace a plan first", level_name(&s.model, level)),
+        ));
+    };
+    if geom::area(&boundary) < 0.0 {
+        boundary.reverse();
+    }
+    // The slab this reading already built is left as it is: read and given again, there is nothing left to build.
+    let ring = boundary.clone();
+    let same = s
+        .model
+        .elements
+        .iter()
+        .find(|(_, e)| matches!(e, Element::Floor(f) if f.level == level && f.type_name == type_name && f.boundary == ring))
+        .map(|(id, _)| *id);
+    let built = match same {
+        Some(id) => id,
+        None => {
+            if made {
+                let t = FloorType { thickness, layers: Vec::new() };
+                s.model_mut().types.floor.insert(type_name.clone(), t);
+            }
+            // Structural, because a slab is what carries the storey standing on it, as Revit's Floor: Structural
+            // makes one; and at no offset, because the top of a slab is the floor of its storey.
+            s.model_mut().insert(Element::Floor(Floor {
+                params: Default::default(),
+                type_name,
+                level,
+                boundary,
+                openings,
+                offset: 0.0,
+                slope: 0.0,
+                arrow: None,
+                structural: true,
+            }))
+        }
+    };
+    out["slab"] = json!(built);
+    Ok(out)
+}
+
+/// The floor type a slab `wanted` mm thick comes in as, and whether it has to be made: the project's own of that
+/// thickness, or a name for a new one, named as the starter types are.
+fn floor_type_for(m: &Model, wanted: f64) -> (String, bool) {
+    if let Some((name, _)) = m.types.floor.iter().find(|(_, t)| (t.thickness - wanted).abs() <= 1.0) {
+        return (name.clone(), false);
+    }
+    let base = format!("Generic - {}mm", wanted as i64);
+    if !m.types.floor.contains_key(&base) {
+        return (base, true);
+    }
+    let free = (2..100).map(|n| format!("{base} ({n})")).find(|n| !m.types.floor.contains_key(n));
+    (free.unwrap_or(base), true)
 }
 
 /// The edges of a footprint grouped by the way they run, each group in the order the edges are numbered: one
@@ -6493,20 +6768,27 @@ fn shaped<T: serde::de::DeserializeOwned>(c: &str, p: &Value, key: &str, shape: 
 pub fn roof_footprint(m: &Model, level: impl Key, overhang: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
     let below = m.levels().into_iter().rev().find(|(_, l)| l.elevation < m.elevation(level) - TOL).map(|(id, _)| id);
     let below = below.ok_or_else(|| format!("{} has no level below to roof over; give `boundary`", level_name(m, level)))?;
+    walls_footprint(m, below, overhang)
+}
+
+/// What the walls of `level` enclose, out to their faces and `out` mm beyond them: the ring, counter-clockwise
+/// from its south-west corner, and the courtyards that stay open that far out. This is what a slab on those walls
+/// spans and what a roof over them covers.
+pub fn walls_footprint(m: &Model, level: impl Key, out: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
     let (outline, loops) =
-        floor_outline(m, below).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
+        floor_outline(m, level).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, level)))?;
     // ponytail: the thickest wall on the level sets where the faces are; per edge if outlines mix wall types.
     let face = m
         .elements
         .values()
         .filter_map(|e| match e {
-            Element::Wall(w) if m.cut_by(w, below) => Some(m.thickness(w) / 2.0),
+            Element::Wall(w) if m.cut_by(w, level) => Some(m.thickness(w) / 2.0),
             _ => None,
         })
         .fold(0.0, f64::max);
-    // How far the eaves are from the walls' centre lines: out from a ring running counter-clockwise,
+    // How far the faces are from the walls' centre lines: out from a ring running counter-clockwise,
     // in from one running clockwise.
-    let d = face + overhang;
+    let d = face + out;
     // The courtyards that stay open past the overhang: moved in, one too small for it turns inside
     // out, its edges running back.
     // ponytail: one pinched shut only in the middle keeps its edges' ways and crosses itself; check

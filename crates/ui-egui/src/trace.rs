@@ -87,6 +87,10 @@ pub(crate) struct TraceDialog {
     /// whose ridge the drawing agrees with, which is what the command picks for itself).
     pub(crate) roof: Option<Value>,
     pub(crate) gables: Option<Vec<usize>>,
+    /// And the last reading of the slab under this storey's floor, with the line picked for its underside out of
+    /// the ones it could be (none: the highest of them, which is what the command picks for itself).
+    pub(crate) slab: Option<Value>,
+    pub(crate) under: Option<f64>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
@@ -392,6 +396,7 @@ fn heights_tab(
     read: &mut Option<Value>,
     storey: &mut Option<Value>,
     roof: &mut Option<Value>,
+    slab: &mut Option<Value>,
 ) {
     let said = t(
         "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
@@ -435,7 +440,7 @@ fn heights_tab(
     let said = t("A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.");
     ui.label(RichText::new(said).color(pal().muted));
     if changed {
-        (d.openings, d.storey, d.top, d.roof, d.gables) = (None, None, None, None, None);
+        (d.openings, d.storey, d.top, d.roof, d.gables, d.slab, d.under) = (None, None, None, None, None, None, None);
     }
     let (underlay, floor) = (d.underlay, d.floor);
     let params = |apply: bool, top: Option<f64>| {
@@ -487,6 +492,54 @@ fn heights_tab(
     }
     if let Some(report) = &d.storey {
         storey_shown(ui, report);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    // The slab under this storey's floor: a plan draws its outline and nothing of how thick it is, and the
+    // elevation draws the floor itself and, under it, the line of the slab's own underside.
+    ui.label(RichText::new(t("The slab under this floor, as thick as the elevation draws it:")).color(pal().muted));
+    // Which line it draws is that underside: the highest of the ones a slab could be thick enough to reach,
+    // until another is picked. Each is said by the height it is drawn at and the thickness it would make.
+    let unders: Vec<(f64, String)> = d
+        .slab
+        .iter()
+        .flat_map(|report| report["courses"].as_array().cloned().unwrap_or_default())
+        .filter(|course| course["could"].as_bool() == Some(true))
+        .filter_map(|course| {
+            let (height, above) = (course["height"].as_f64()?, course["above"].as_f64()?);
+            Some((height, format!("{:.2} m ({:.0} mm)", height / 1000.0, -above)))
+        })
+        .collect();
+    let read_slab = d.slab.is_some();
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Slab")).clicked() {
+            *slab = Some(params(false, None));
+        }
+        if !unders.is_empty() {
+            let now = d.under.and_then(|under| unders.iter().find(|(height, _)| (height - under).abs() < 1.0)).or_else(|| unders.last());
+            let now = now.map(|(_, said)| said.clone()).unwrap_or_default();
+            let options: Vec<String> = unders.iter().map(|(_, said)| said.clone()).collect();
+            let label = ui.label(t("Its underside"));
+            if let Some(picked) = combo(ui, (d.underlay, "slab-under"), label.id, &now, &options) {
+                d.under = unders.iter().find(|(_, said)| *said == picked).map(|(height, _)| *height);
+            }
+        }
+    });
+    if !unders.is_empty() {
+        let said = t("The height each line it could be is drawn at, and how thick that would make the slab.");
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if ui.add_enabled(read_slab && floor > 0.0, Button::new(t("Build This Slab"))).clicked() {
+        let mut p = params(true, None);
+        // The underside it is built to is said as the height it stands above the floor, which the drawing draws
+        // below it; unsaid, the command picks the highest line the slab could reach down to.
+        if let Some(under) = d.under.filter(|_| floor > 0.0) {
+            p["under"] = json!(under - floor);
+        }
+        *slab = Some(p);
+    }
+    if let Some(report) = &d.slab {
+        slab_shown(ui, report, m.units);
     }
     ui.add_space(8.0);
     ui.separator();
@@ -568,6 +621,47 @@ fn heights_tab(
     ui.add_space(6.0);
     let Some(report) = &d.openings else { return };
     openings_shown(ui, report);
+}
+
+/// What the last reading of the slab said: how thick it is, what was built, and where the drawing and the walls
+/// that stand disagree. Where the project puts the level is the storey's business and not this one's.
+fn slab_shown(ui: &mut Ui, report: &Value, units: bimcraft_core::units::Units) {
+    match report["thickness"].as_f64() {
+        Some(thick) => {
+            let said = tf("This slab is {} mm thick, its top the floor of this storey.", &[&format!("{thick:.0}")]);
+            ui.label(RichText::new(said).strong());
+        }
+        None => {
+            let said = t(
+                "No line of this elevation stands under that floor by as much as a slab is thick, so nothing on it says how thick this slab is.",
+            );
+            ui.label(RichText::new(said).color(pal().error));
+        }
+    }
+    // What it covers, in the project's own units: the command says it in square metres, as every command does.
+    let spans = report["area_m2"].as_f64().map(|area| {
+        let (value, unit) = units.area(area * 1e6);
+        format!("{value:.2} {unit}")
+    });
+    match (report["slab"].as_u64().is_some(), spans, report["level"].as_str()) {
+        (true, Some(spans), Some(level)) => {
+            let said = tf("A slab of {} was built, the floor of {}.", &[&spans, level]);
+            ui.label(RichText::new(said).strong());
+        }
+        (false, Some(spans), _) => {
+            let said = tf("It would span {}, out to the faces of the walls that bear it.", &[&spans]);
+            ui.label(RichText::new(said).color(pal().muted));
+        }
+        _ => {}
+    }
+    // A slab rests on the walls under it, so a reading that puts its underside elsewhere than their top is worth
+    // saying: the storey below is where to put it right.
+    if report["below"]["agrees"].as_bool() == Some(false)
+        && let (Some(name), Some(gap)) = (report["below"]["name"].as_str(), report["below"]["gap"].as_f64())
+    {
+        let said = tf("The walls of {} stop {} mm from where that underside comes out.", &[name, &format!("{:.0}", gap.abs())]);
+        ui.label(RichText::new(said).color(pal().error));
+    }
 }
 
 /// What the last reading of the storey said: how high it stands, what was given to its walls, and what was left
@@ -971,6 +1065,8 @@ impl BimApp {
             storey: None,
             roof: None,
             gables: None,
+            slab: None,
+            under: None,
             top: None,
             found,
             holes,
@@ -999,7 +1095,7 @@ impl BimApp {
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
         let (mut parts, mut read) = (None::<Value>, None::<Value>);
-        let (mut storey, mut roofing) = (None::<Value>, None::<Value>);
+        let (mut storey, mut roofing, mut slabbing) = (None::<Value>, None::<Value>, None::<Value>);
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -1029,7 +1125,7 @@ impl BimApp {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build),
-                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing),
+                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
                 }
                 if !d.error.is_empty() {
                     ui.add_space(6.0);
@@ -1038,15 +1134,17 @@ impl BimApp {
                 ui.add_space(8.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
-        let (reading, storeying, roofed) = (read.is_some(), storey.is_some(), roofing.is_some());
-        let asked = match (layers, parts, read, storey, roofing, find || build) {
+        let (reading, storeying) = (read.is_some(), storey.is_some());
+        let (roofed, slabbed) = (roofing.is_some(), slabbing.is_some());
+        let asked = match (layers, parts, read, storey, roofing, slabbing, find || build) {
             (Some(p), ..) => Some(("cad_layers", p)),
             (_, Some(p), ..) => Some(("cad_parts", p)),
             (_, _, Some(p), ..) => Some(("cad_openings", p)),
             (_, _, _, Some(p), ..) => Some(("cad_storey", p)),
-            (_, _, _, _, Some(p), _) => Some(("cad_roof", p)),
-            (None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, None, None, None, false) => None,
+            (_, _, _, _, Some(p), ..) => Some(("cad_roof", p)),
+            (_, _, _, _, _, Some(p), _) => Some(("cad_floor", p)),
+            (None, None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -1063,6 +1161,8 @@ impl BimApp {
                 Some(reply) if storeying => d.storey = Some(reply),
                 // And what it says of the roof over them: the pitch no plan draws.
                 Some(reply) if roofed => d.roof = Some(reply),
+                // And of the slab over them: how thick it is, which no plan draws either.
+                Some(reply) if slabbed => d.slab = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();
@@ -1078,7 +1178,7 @@ impl BimApp {
                 None => {
                     d.error = std::mem::take(&mut self.status.text);
                     self.status = crate::Status::default();
-                    (d.openings, d.storey, d.roof) = (None, None, None);
+                    (d.openings, d.storey, d.roof, d.slab) = (None, None, None, None);
                     d.stale();
                 }
             }
