@@ -2,7 +2,10 @@
 //! anything is built. The Layers tab is every layer of the drawing — whether it is drawn, and what it is of the
 //! project's history as Link CAD read it from the layers' own names — put right a row at a time (`cad_layers`); the
 //! Walls tab is what to look for, Find (`trace_walls` with `preview`, which draws what it found over the plan) and
-//! Build (`trace_walls`). Nothing is built until Build is pressed, and a layer that is not drawn is not traced.
+//! Build (`trace_walls`). Nothing is built until Build is pressed, and a layer that is not drawn is not traced. The
+//! Heights tab is what an elevation that stands against its plan says of the storey: how high its walls stand
+//! (`cad_storey`) and the sill and the head of every opening in them (`cad_openings`), read first and given to what
+//! was built on a second press.
 //!
 //! It floats and is dragged by its title, and it does not take the keys, because what it shows is on the plan behind
 //! it: the walls it found are no use under a modal that stands in the middle of them and cannot be moved. So the plan
@@ -76,6 +79,10 @@ pub(crate) struct TraceDialog {
     pub(crate) plan: Option<String>,
     pub(crate) floor: f64,
     pub(crate) openings: Option<Value>,
+    /// The last reading of how high the storey stands, and the top picked out of what it draws (none: the highest
+    /// the reading found, which is what the command picks for itself).
+    pub(crate) storey: Option<Value>,
+    pub(crate) top: Option<f64>,
     pub(crate) found: Vec<Traced>,
     pub(crate) holes: Vec<Hole>,
     pub(crate) report: Option<Value>,
@@ -374,9 +381,9 @@ fn part_json(m: &Model, part: &Part) -> Value {
 /// The Openings tab: the sill and the head of every opening, read off an elevation that stands against its plan
 /// (`cad_openings`). Reading builds nothing and changes nothing: what it says is what the drawing draws. Apply then
 /// gives that to the openings the Walls tab built, which until then stand at the size a starter type is.
-fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Value>) {
+fn heights_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<Value>, storey: &mut Option<Value>) {
     let said = t(
-        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
+        "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
     );
     ui.label(RichText::new(said).color(pal().muted));
     ui.add_space(6.0);
@@ -417,14 +424,10 @@ fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<V
     let said = t("A door's sill is the floor itself, and no line is drawn across it, so the floor is what gives a door its height.");
     ui.label(RichText::new(said).color(pal().muted));
     if changed {
-        d.openings = None;
+        (d.openings, d.storey, d.top) = (None, None, None);
     }
-    ui.add_space(8.0);
-    // What was read, and then what was read given to the openings already built: a plan says nothing of a height,
-    // so each of them stands at the size the project's own starter type is until an elevation says otherwise. The
-    // floor has to be said for that, since a sill is made so far above the floor of its storey.
-    let (underlay, floor, had) = (d.underlay, d.floor, d.openings.is_some());
-    let params = |apply: bool| {
+    let (underlay, floor) = (d.underlay, d.floor);
+    let params = |apply: bool, top: Option<f64>| {
         let mut p = json!({"underlay": underlay, "part": elevation.clone(), "plan": plan.clone()});
         if floor > 0.0 {
             p["floor"] = json!(floor);
@@ -432,23 +435,118 @@ fn openings_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, read: &mut Option<V
         if apply {
             p["apply"] = json!(true);
         }
+        if let Some(top) = top {
+            p["top"] = json!(top);
+        }
         p
     };
+    ui.add_space(8.0);
+    ui.separator();
+    // The walls: a plan draws no height at all, so what was built goes up to the level above, wherever the
+    // project put it, until the elevation says how high the storey really stands.
+    ui.label(RichText::new(t("The walls of this storey, as high as the elevation draws them:")).color(pal().muted));
+    let tops: Vec<(f64, String)> = d
+        .storey
+        .iter()
+        .flat_map(|report| report["courses"].as_array().cloned().unwrap_or_default())
+        .filter(|course| course["within"].as_bool() == Some(true))
+        .filter_map(|course| {
+            let (height, above) = (course["height"].as_f64()?, course["above"].as_f64()?);
+            Some((height, format!("{:.2} m ({above:.0} mm)", height / 1000.0)))
+        })
+        .collect();
     ui.horizontal(|ui| {
-        if ui.button(t("Read the Sills and Heads")).clicked() {
-            *read = Some(params(false));
+        if ui.button(t("Read the Storey's Top")).clicked() {
+            *storey = Some(params(false, None));
         }
-        if ui.add_enabled(had && floor > 0.0, Button::new(t("Apply These Heights"))).clicked() {
-            *read = Some(params(true));
+        // Which of the lines it draws the width of the facade is the top of these walls: the highest of them
+        // within a storey of the floor, until another is picked.
+        if !tops.is_empty() {
+            let now = d.top.and_then(|top| tops.iter().find(|(height, _)| (height - top).abs() < 1.0)).or_else(|| tops.last());
+            let now = now.map(|(_, said)| said.clone()).unwrap_or_default();
+            let options: Vec<String> = tops.iter().map(|(_, said)| said.clone()).collect();
+            let label = ui.label(t("Its top"));
+            if let Some(picked) = combo(ui, (d.underlay, "storey-top"), label.id, &now, &options) {
+                d.top = tops.iter().find(|(_, said)| *said == picked).map(|(height, _)| *height);
+            }
         }
     });
-    if had && floor <= 0.0 {
-        let said = t("Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.");
+    if ui.add_enabled(d.storey.is_some() && floor > 0.0, Button::new(t("Give the Walls This Height"))).clicked() {
+        *storey = Some(params(true, d.top));
+    }
+    if let Some(report) = &d.storey {
+        storey_shown(ui, report);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    // The openings: what was read given to the ones already built, which stand at the size the project's own
+    // starter type is until an elevation says otherwise.
+    ui.label(RichText::new(t("The openings in them, as the elevation draws their sills and their heads:")).color(pal().muted));
+    let had = d.openings.is_some();
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Sills and Heads")).clicked() {
+            *read = Some(params(false, None));
+        }
+        if ui.add_enabled(had && floor > 0.0, Button::new(t("Apply These Heights"))).clicked() {
+            *read = Some(params(true, None));
+        }
+    });
+    if (had || d.storey.is_some()) && floor <= 0.0 {
+        let said = t("Giving these heights needs the storey's floor said, since a sill and a wall both stand so far above it.");
         ui.label(RichText::new(said).color(pal().muted));
     }
     ui.add_space(6.0);
     let Some(report) = &d.openings else { return };
     openings_shown(ui, report);
+}
+
+/// What the last reading of the storey said: how high it stands, what was given to its walls, and what was left
+/// as it was. The level above is said too and never moved: what else stands on it is no business of a drawing's.
+fn storey_shown(ui: &mut Ui, report: &Value) {
+    match (report["high"].as_f64(), report["top"].as_f64()) {
+        (Some(high), Some(top)) => {
+            let (high, top) = (format!("{high:.0}"), format!("{:.2}", top / 1000.0));
+            ui.label(RichText::new(tf("This storey stands {} mm high, its top drawn at {} m.", &[&high, &top])).strong());
+        }
+        _ => {
+            let said = t(
+                "No line of this elevation runs the width of its facade within a storey of that floor, so nothing says how high these walls stand.",
+            );
+            ui.label(RichText::new(said).color(pal().error));
+        }
+    }
+    let number = |key: &str| report[key].as_u64().unwrap_or(0);
+    match report["applied"].as_u64() {
+        Some(walls) => {
+            let said = tf("{} walls of this storey were made that high.", &[&walls.to_string()]);
+            ui.label(RichText::new(said).strong());
+        }
+        None => {
+            let said = tf("{} walls stand on this storey.", &[&number("walls").to_string()]);
+            ui.label(RichText::new(said).color(pal().muted));
+        }
+    }
+    if number("too_short") > 0 {
+        let said = tf(
+            "{} of them have an opening that would stand through that, and were left as high as they were.",
+            &[&number("too_short").to_string()],
+        );
+        ui.label(RichText::new(said).color(pal().error));
+    }
+    if number("attached") > 0 {
+        let said = tf(
+            "{} of them are attached to a roof or a floor, which is their top whatever height they are given.",
+            &[&number("attached").to_string()],
+        );
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    // The level above is where the project put it and not where this drawing says: it is said, and left alone.
+    if report["level_above"]["agrees"].as_bool() == Some(false)
+        && let (Some(name), Some(up)) = (report["level_above"]["name"].as_str(), report["level_above"]["high"].as_f64())
+    {
+        let said = tf("{} stands {} mm above this floor, and is left where the project put it.", &[name, &format!("{up:.0}")]);
+        ui.label(RichText::new(said).color(pal().muted));
+    }
 }
 
 /// What the last reading of the sills and the heads said: how many openings the elevation draws, each with where it
@@ -753,6 +851,8 @@ impl BimApp {
             plan: None,
             floor: 0.0,
             openings: None,
+            storey: None,
+            top: None,
             found,
             holes,
             report: None,
@@ -779,7 +879,7 @@ impl BimApp {
         // The drawing may have been taken out of the project while the window stood open.
         let Some(name) = underlay_of(&model, d.underlay).map(|u| u.name.clone()) else { return };
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
-        let (mut parts, mut read) = (None::<Value>, None::<Value>);
+        let (mut parts, mut read, mut storey) = (None::<Value>, None::<Value>, None::<Value>);
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -796,7 +896,7 @@ impl BimApp {
                 ui.set_min_height(360.0);
                 ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
                 ui.add_space(6.0);
-                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true), t("Openings").to_string()];
+                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true), t("Heights").to_string()];
                 ui.horizontal(|ui| {
                     for (i, label) in tabs.iter().enumerate() {
                         if ui.selectable_label(d.tab == i, label).clicked() {
@@ -809,7 +909,7 @@ impl BimApp {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build),
-                    _ => openings_tab(ui, &mut d, &model, &mut read),
+                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey),
                 }
                 if !d.error.is_empty() {
                     ui.add_space(6.0);
@@ -818,13 +918,14 @@ impl BimApp {
                 ui.add_space(8.0);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
             });
-        let reading = read.is_some();
-        let asked = match (layers, parts, read, find || build) {
-            (Some(p), _, _, _) => Some(("cad_layers", p)),
-            (_, Some(p), _, _) => Some(("cad_parts", p)),
-            (_, _, Some(p), _) => Some(("cad_openings", p)),
-            (None, None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, None, false) => None,
+        let (reading, storeying) = (read.is_some(), storey.is_some());
+        let asked = match (layers, parts, read, storey, find || build) {
+            (Some(p), _, _, _, _) => Some(("cad_layers", p)),
+            (_, Some(p), _, _, _) => Some(("cad_parts", p)),
+            (_, _, Some(p), _, _) => Some(("cad_openings", p)),
+            (_, _, _, Some(p), _) => Some(("cad_storey", p)),
+            (None, None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -837,6 +938,8 @@ impl BimApp {
                 }
                 // What the drawing says of the sills and the heads: read off the elevation, and nothing built.
                 Some(reply) if reading => d.openings = Some(reply),
+                // And what it says of how high the storey stands, which is the walls' own height.
+                Some(reply) if storeying => d.storey = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();
@@ -852,7 +955,7 @@ impl BimApp {
                 None => {
                     d.error = std::mem::take(&mut self.status.text);
                     self.status = crate::Status::default();
-                    d.openings = None;
+                    (d.openings, d.storey) = (None, None);
                     d.stale();
                 }
             }

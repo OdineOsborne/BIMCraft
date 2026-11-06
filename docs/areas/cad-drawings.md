@@ -622,6 +622,38 @@ types that had to be made, and `too_high` how many would not fit their wall. It 
 an opening that stands at what the drawing says already is not touched at all, so giving it a second time is no
 step to take back.
 
+## How high the storey stands
+
+A plan draws no height at all, so the walls `trace_walls` builds go up to the level above, which is where the
+project put it and not where the building is. The elevation is what says otherwise: it draws the floor, the eaves
+and every course between them, right across the facade (`cad_storey {"part": …, "plan": …, "floor": …}`).
+
+What makes a line of the facade and not of something in front of it is how far it runs: at least six tenths of the
+width of the face. That width is the two points the elevation stands against its plan by (`cad_anchor`), which are
+two points of the face itself, or the widest line the elevation draws where it stands against nothing yet;
+`across` and `across_from` say which it was. The top of the storey is then the highest of those lines standing
+between 100 mm and `storey` (3000 mm) above `floor` — the bound matters, because an elevation draws every storey at
+once and the ridge of the roof runs the width of the facade as readily as the eaves does. `top` says it outright
+where the highest is not the one, and `high` is what is left between the two, to the nearest 10 mm.
+
+Measured on the permesso di costruire's PROSPETTO SUD-EST: the facade is the 9287 mm the anchor spans, and of the
+16 heights the elevation draws lines at, six run the width of it. Two are under the floor (the terrain 1583 mm
+below it, and a plinth line 263 below), and four stand above: 2438, 2703, 2773 and **2831** mm. The highest within
+the storey is the one taken, so the storey comes out **2830 mm high** — and the other three are reported beside it,
+because the eaves of a house is drawn as a fascia and a soffit and a gutter, three lines within 130 mm of one
+another, and only the draughtsman knows which is the wall.
+
+`apply` gives that height to every wall of the storey — the plan's own level, or `level` — and unattaches them, since
+a wall that goes up to the level above is as high as that level and no higher. A wall an opening of would stand
+through is left as it was and counted in `too_short`: what the elevation said of that opening was measured on the
+opening itself and is worth more than a height read off another line. One whose top is attached to a roof or a
+floor is counted in `attached` and left too, its top being that and not any height. It is one undo step for the
+lot, and a wall that stands at that height already is not touched.
+
+The level above is reported and never moved. On the permesso di costruire it stands 3000 above the floor against
+the 2830 that was read, and `level_above.agrees` is false: moving it would move whatever else stands on it, which
+is no business of a drawing of one facade.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an
@@ -701,9 +733,19 @@ so it places nothing either. What was found was found with the measurements, the
 changing any of them drops it and it has to be found again: the drawing on screen is never a reading older than the
 window. A refusal is said inside the window, where it is read beside the button that was pressed.
 
-**Openings** is the two readings put together: the elevation to read the sills and the heads off, the plan the
-openings are found in, the height the storey's floor stands at (0 is not said), and **Read the Sills and Heads**,
-which runs `cad_openings`. It needs a plan and an elevation among the parts, and says so where there is not one of
+**Heights** is everything an elevation says of the storey it draws: the elevation to read it off, the plan whose
+walls and openings they are, the height the storey's floor stands at (0 is not said), and then two groups, the walls
+and the openings.
+
+The walls: **Read the Storey's Top** runs `cad_storey` and says how high the storey stands and how many walls are on
+it, with **Its top** beside it, a combo of every line the elevation draws the width of its facade within a storey of
+that floor, each as the height it is drawn at and how far above the floor that is — the highest of them until
+another is picked. **Give the Walls This Height** gives it to them, and says how many were made that high, how many
+have an opening that would stand through it, and how many are attached to a roof or a floor. Where the level above
+does not stand at that height it is said in the same breath and left alone: moving it would move whatever else
+stands on it, and that is no business of this drawing's.
+
+The openings: **Read the Sills and Heads**, which runs `cad_openings`. It needs a plan and an elevation among the parts, and says so where there is not one of
 each; the two combos hold the parts of each kind and fall back to the first of them, so a part done away with while
 the window stands open leaves nothing stale behind. What comes back is said in the window as it is: how many
 openings are on the face and how many have both a sill and a head, each of them a line of its own (*1500 mm Window:

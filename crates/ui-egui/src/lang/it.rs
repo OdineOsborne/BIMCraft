@@ -1978,9 +1978,37 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ],
     ["{} of them meet no wall of the building.", "{} di queste non incontrano nessun muro dell'edificio."],
     ["Openings", "Aperture"],
+    ["Heights", "Quote"],
     [
-        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
-        "Il davanzale e l'architrave di ogni apertura, dalle linee che un prospetto disegna attraverso di essa. Il prospetto deve prima stare contro la sua pianta.",
+        "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
+        "Quello che un prospetto dice del piano che disegna: quanto sono alti i suoi muri, e il davanzale e l'architrave di ogni apertura. Il prospetto deve prima stare contro la sua pianta.",
+    ],
+    ["The walls of this storey, as high as the elevation draws them:", "I muri di questo piano, alti come li disegna il prospetto:"],
+    ["Read the Storey's Top", "Leggi l'altezza del piano"],
+    ["Its top", "La sommità"],
+    ["Give the Walls This Height", "Dai questa altezza ai muri"],
+    [
+        "The openings in them, as the elevation draws their sills and their heads:",
+        "Le aperture, come il prospetto ne disegna davanzali e architravi:",
+    ],
+    ["This storey stands {} mm high, its top drawn at {} m.", "Questo piano è alto {} mm, con la sommità disegnata a {} m."],
+    [
+        "No line of this elevation runs the width of its facade within a storey of that floor, so nothing says how high these walls stand.",
+        "Nessuna linea di questo prospetto corre per tutta la facciata entro un piano da quella quota, quindi niente dice quanto sono alti questi muri.",
+    ],
+    ["{} walls of this storey were made that high.", "{} muri di questo piano sono stati fatti di quell'altezza."],
+    ["{} walls stand on this storey.", "{} muri stanno su questo piano."],
+    [
+        "{} of them have an opening that would stand through that, and were left as high as they were.",
+        "{} hanno un'apertura che ci passerebbe attraverso, e sono rimasti alti come erano.",
+    ],
+    [
+        "{} of them are attached to a roof or a floor, which is their top whatever height they are given.",
+        "{} sono attaccati a un tetto o a un solaio, che è la loro sommità qualunque altezza si dia.",
+    ],
+    [
+        "{} stands {} mm above this floor, and is left where the project put it.",
+        "{} sta {} mm sopra questo pavimento, e resta dove l'ha messo il progetto.",
     ],
     [
         "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
@@ -1996,8 +2024,8 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Read the Sills and Heads", "Leggi davanzali e architravi"],
     ["Apply These Heights", "Applica queste quote"],
     [
-        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
-        "Per dare queste quote alle aperture serve la quota del pavimento del piano, perché il davanzale si misura da lì.",
+        "Giving these heights needs the storey's floor said, since a sill and a wall both stand so far above it.",
+        "Per dare queste quote serve la quota del pavimento del piano, perché sia il davanzale sia il muro si misurano da lì.",
     ],
     ["{} openings were given the heights the elevation draws.", "{} aperture hanno preso le quote disegnate dal prospetto."],
     ["{} types were made for them: {}.", "Sono stati creati {} tipi per loro: {}."],

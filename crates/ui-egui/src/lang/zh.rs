@@ -1705,9 +1705,30 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["{} heights, {} mm apart", "{} 个标高，相差 {} 毫米"],
     ["Openings", "洞口"],
     [
-        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
-        "每个洞口的窗台和过梁，取自立面图在它上面画出的线。立面图必须先与它的平面图对位。",
+        "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
+        "立面图对它所画楼层的说明：墙有多高，以及其中每个洞口的窗台和过梁。立面图必须先与它的平面图对位。",
     ],
+    ["The walls of this storey, as high as the elevation draws them:", "本层的墙，按立面图所绘的高度："],
+    ["Read the Storey's Top", "读取本层顶高"],
+    ["Its top", "顶部"],
+    ["Give the Walls This Height", "按此高度设置墙"],
+    ["The openings in them, as the elevation draws their sills and their heads:", "其中的洞口，按立面图所绘的窗台和过梁："],
+    ["This storey stands {} mm high, its top drawn at {} m.", "本层高 {} mm，顶部绘于 {} m。"],
+    [
+        "No line of this elevation runs the width of its facade within a storey of that floor, so nothing says how high these walls stand.",
+        "该立面图没有一条线在该地面以上一个层高内贯通整个立面，因此无从得知这些墙有多高。",
+    ],
+    ["{} walls of this storey were made that high.", "本层有 {} 面墙已设为该高度。"],
+    ["{} walls stand on this storey.", "本层共有 {} 面墙。"],
+    [
+        "{} of them have an opening that would stand through that, and were left as high as they were.",
+        "其中 {} 面的洞口会高出该高度，保持原高。",
+    ],
+    [
+        "{} of them are attached to a roof or a floor, which is their top whatever height they are given.",
+        "其中 {} 面顶部附着于屋顶或楼板，无论给定什么高度都以此为准。",
+    ],
+    ["{} stands {} mm above this floor, and is left where the project put it.", "{} 位于该地面以上 {} mm，保持项目中的位置不变。"],
     [
         "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
         "它的分部分里需要一张平面图和一张立面图，而分部分选项卡就是说明它们的地方。",
@@ -1722,8 +1743,8 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Read the Sills and Heads", "读取窗台和过梁"],
     ["Apply These Heights", "应用这些高度"],
     [
-        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
-        "要把这些高度赋给洞口，需先说明本层地面标高，因为窗台高度是从地面算起的。",
+        "Giving these heights needs the storey's floor said, since a sill and a wall both stand so far above it.",
+        "要赋予这些高度，需先说明本层地面标高，因为窗台和墙都是从地面算起的。",
     ],
     ["{} openings were given the heights the elevation draws.", "{} 个洞口已采用立面所绘的高度。"],
     ["{} types were made for them: {}.", "已为它们新建 {} 个类型：{}。"],

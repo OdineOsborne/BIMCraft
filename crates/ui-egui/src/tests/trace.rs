@@ -209,10 +209,10 @@ fn the_openings_it_found_are_drawn_over_the_plan_and_come_in_as_doors_and_window
 }
 
 #[test]
-fn the_openings_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_nothing() {
+fn the_heights_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_nothing() {
     let mut h = a_storey_with_an_elevation();
     shortcut(&mut h, "TW");
-    press(&mut h, "Openings");
+    press(&mut h, "Heights");
     // The elevation and the plan it is a view of, each the first of its kind among the parts.
     assert_eq!((combo_value(&h, "The elevation"), combo_value(&h, "The plan")), ("PROSPETTO SUD".to_string(), "PIANTA".to_string()));
     press(&mut h, "Read the Sills and Heads");
@@ -225,7 +225,7 @@ fn the_openings_tab_reads_the_sills_and_the_heads_off_the_elevation_and_builds_n
 }
 
 #[test]
-fn the_openings_tab_gives_what_it_read_to_the_openings_the_walls_tab_built() {
+fn the_heights_tab_gives_what_it_read_to_the_openings_the_walls_tab_built() {
     let mut h = a_storey_with_an_elevation();
     // The walls and their openings built from the plan, as the Walls tab builds them: a plan says nothing of a
     // height, so each window comes in at the size the project's own starter type is.
@@ -233,11 +233,11 @@ fn the_openings_tab_gives_what_it_read_to_the_openings_the_walls_tab_built() {
     h.run();
     assert_eq!(windows_of(&h), vec![(1500.0, 900.0); 2], "the starter size, until an elevation says otherwise");
     shortcut(&mut h, "TW");
-    press(&mut h, "Openings");
+    press(&mut h, "Heights");
     press(&mut h, "Read the Sills and Heads");
     // Nothing is given until the floor of the storey is said, which is what a sill is made so far above: the
     // ground, written 69.80 on this elevation.
-    assert!(says(&h, "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it."));
+    assert!(says(&h, "Giving these heights needs the storey's floor said, since a sill and a wall both stand so far above it."));
     assert_eq!(windows_of(&h), vec![(1500.0, 900.0); 2], "and read again it is still a reading");
     if let Some(d) = h.state_mut().trace_dialog.as_mut() {
         d.floor = 69_800.0;
@@ -249,6 +249,46 @@ fn the_openings_tab_gives_what_it_read_to_the_openings_the_walls_tab_built() {
     assert!(says(&h, "2 openings were given the heights the elevation draws."), "what was given");
     assert!(says(&h, "2 types were made for them: Fixed 1500 x 1200, Fixed 1200 x 1200."), "at their own widths and the heights read");
     assert_eq!(windows_of(&h), vec![(1200.0, 900.0), (1200.0, 1000.0)], "each as the elevation draws it");
+}
+
+#[test]
+fn the_heights_tab_gives_the_walls_of_the_storey_the_height_the_elevation_draws() {
+    let mut h = a_storey_with_an_elevation();
+    h.state_mut().session.execute("trace_walls", &json!({"part": "PIANTA", "openings": true})).expect("it builds");
+    h.run();
+    assert_eq!(walls_of(&h), vec![(3000.0, true); 4], "up to the level above, because a plan draws no height at all");
+    shortcut(&mut h, "TW");
+    press(&mut h, "Heights");
+    if let Some(d) = h.state_mut().trace_dialog.as_mut() {
+        d.floor = 69_800.0;
+    }
+    h.run();
+    press(&mut h, "Read the Storey's Top");
+    // The eaves, which is the one line this elevation draws the width of its facade above the floor.
+    assert!(says(&h, "This storey stands 2800 mm high, its top drawn at 72.60 m."), "what it read");
+    assert!(says(&h, "4 walls stand on this storey."), "and whose walls it is of");
+    assert!(says(&h, "Level 2 stands 3000 mm above this floor, and is left where the project put it."), "said, and not moved");
+    assert_eq!(walls_of(&h), vec![(3000.0, true); 4], "a reading changes nothing");
+    press(&mut h, "Give the Walls This Height");
+    assert!(says(&h, "4 walls of this storey were made that high."), "what was given");
+    assert_eq!(walls_of(&h), vec![(2800.0, false); 4], "each unattached at the height the elevation draws");
+}
+
+/// Every wall of the project: how high it is made, and whether it still goes up to the level above.
+fn walls_of(h: &Harness<BimApp>) -> Vec<(f64, bool)> {
+    let mut all: Vec<(f64, bool)> = h
+        .state()
+        .session
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            bimcraft_core::model::Element::Wall(w) => Some((w.height, w.top_level.is_some())),
+            _ => None,
+        })
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    all
 }
 
 /// Every window of the project: how high the type it is of stands, and how high its own sill does.
@@ -277,7 +317,7 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
         lines.push(("MURI".to_string(), [x0, 150.0, x1, 150.0]));
     }
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
-    lines.push(("PROSPETTO".to_string(), [20_000.0, 3000.0, 30_000.0, 3000.0]));
+    lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));
     for [x0, x1, sill, head] in [[23_000.0, 24_500.0, 900.0, 2100.0], [26_000.0, 27_200.0, 1000.0, 2200.0]] {
         lines.push(("PROSPETTO".to_string(), [x0, sill, x1, sill]));
         lines.push(("PROSPETTO".to_string(), [x0, head, x1, head]));

@@ -273,6 +273,33 @@ pub static ALL: &[Command] = &[
         cad_openings,
     ),
     edit(
+        "cad_storey",
+        "CAD Storey",
+        &[],
+        "{underlay?, part, plan?, level?, floor?, top?, storey?, apply?} how high the storey an elevation draws \
+         stands, and with `apply` the walls of it made that high. A plan gives no height at all, so the walls \
+         `trace_walls` builds go up to the level above, which is where the project put it; an elevation draws the \
+         floor, the eaves and every course between them, and that is what says how high they really stand. `part` \
+         is an elevation or a section of the drawing. A line of it is a line of the whole facade where it runs at \
+         least six tenths of the width of it, which is the two points the elevation stands against its plan by \
+         (`cad_anchor`), or the widest line it draws where it stands against nothing; `across` and `across_from` \
+         are that width and which of the two it is. `courses` is every line that runs the facade, with the \
+         `height` it is drawn at, how far `above` the floor that is, and its `span`. The `top` of the storey is \
+         the highest of them standing between 100 mm and `storey` (3000 mm) above `floor`, the height the \
+         storey's floor stands at as the drawing writes heights; `top` says it outright where the highest is not \
+         it, and `high` is what is left between the two, to the nearest 10 mm. `level` or `plan` says whose walls \
+         these are, and `walls` is how many stand on that level. `level_above` is where the level above stands and \
+         whether it `agrees` with what was read: it is said and never moved, because what else stands on it is no \
+         business of this drawing's. `apply` gives every wall of that storey the height that was read, unattached, \
+         so it no longer follows the level above; `apply` needs `floor`. A wall an opening of would stand through \
+         is left as it was and counted in `too_short`, because what the elevation said of that opening is worth \
+         more than a height read off another line, and one whose top is attached to a roof or a floor is counted \
+         in `attached`, its top being that and not any height. Returns `id`, `part`, `level`, `datum`, `agree`, \
+         `across`, `across_from`, `floor`, `courses`, `top`, `high`, `walls` and `level_above`, and with `apply` \
+         also `applied`, `applied_ids`, `too_short` and `attached`",
+        cad_storey,
+    ),
+    edit(
         "trace_walls",
         "Trace Walls",
         // No shortcut: in this project the letters belong to the window, which gives them when it has something to
@@ -2767,6 +2794,187 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
         }
         if too_high > 0 {
             out["too_high"] = json!(too_high);
+        }
+    }
+    Ok(out)
+}
+
+/// How much of a facade a line must run across to be a line of the whole of it: a floor, an eaves and a string
+/// course run the width of a facade, while a sill, a lintel and the slope of a roof run a part of it.
+const ACROSS: f64 = 0.6;
+
+/// How far the level above may stand from the top the elevation draws and still be where the drawing puts it.
+const LEVEL_AGREE: f64 = 50.0;
+
+fn cad_storey(s: &mut Session, p: &Value) -> R {
+    let c = "cad_storey";
+    let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the storey off"))?;
+    let part = part_of(c, &u, &name)?;
+    if part.kind == crate::model::PartKind::Plan {
+        return Err(bad(c, format!("`{name}` is a plan: how high a storey stands is drawn by an elevation or a section, not by a plan")));
+    }
+    let floor = num(c, p, "floor")?;
+    let told = num(c, p, "top")?;
+    let storey = num(c, p, "storey")?.unwrap_or(ONE_STOREY);
+    for (key, said) in [("floor", floor), ("top", told)] {
+        if said.is_some_and(|said| !said.is_finite()) {
+            return Err(bad(c, format!("`{key}` is a height in mm as the drawing writes them, and that must be a number")));
+        }
+    }
+    if !storey.is_finite() || storey <= 0.0 {
+        return Err(bad(c, format!("`storey` is how tall a storey may be, in mm, and {storey} is none")));
+    }
+    if let (Some(floor), Some(told)) = (floor, told)
+        && told <= floor
+    {
+        return Err(bad(c, format!("`top` is the height the storey's walls stand to, and {told} is not above its floor at {floor}")));
+    }
+    let apply = flag(c, p, "apply")?;
+    if apply && floor.is_none() {
+        return Err(bad(
+            c,
+            "`apply` needs `floor`: a wall is made so high above the floor it stands on, and `floor` is what says where that floor is",
+        ));
+    }
+    // The storey this is of: the plan's own level, which is the one its walls were built on.
+    let level = match (p.get("level"), string(c, p, "plan")?) {
+        (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
+        (_, Some(name)) => {
+            let plan = part_of(c, &u, &name)?;
+            if plan.kind != crate::model::PartKind::Plan {
+                return Err(bad(c, format!("`{name}` is {} and no plan: the walls of a storey are found in a plan", plan.kind.word())));
+            }
+            plan.level.unwrap_or(u.level)
+        }
+        _ => u.level,
+    };
+    let read = crate::underlay::heights(&s.model, &u, part.region);
+    let found = crate::underlay::courses(&s.model, &u, part.region, read.datum, MOST_COURSES);
+    // How wide the facade is: the two points this elevation stands against its plan by, which are two points of
+    // the face itself, and the widest line it draws where it stands against nothing yet.
+    let widest = found.iter().map(|course| course.span).fold(0.0, f64::max);
+    let (across, whence) = match part.anchor.map(|a| a.drawn[0].dist(a.drawn[1])).filter(|wide| *wide > 1.0) {
+        Some(wide) => (wide, "anchor"),
+        None => (widest, "widest line"),
+    };
+    // The lines it draws the width of the facade: a floor, an eaves, a string course. One of them is the top of
+    // this storey's walls, and the rest are said so that another can be picked where the highest is not it.
+    let wide: Vec<&crate::underlay::Course> = found.iter().filter(|course| course.span >= across * ACROSS).collect();
+    let above = |course: &crate::underlay::Course| match (course.height, floor) {
+        (Some(height), Some(floor)) => Some(height - floor),
+        _ => None,
+    };
+    // Within a storey of the floor, because an elevation draws every storey of the facade at once and the eaves
+    // of a house is the top of its topmost walls, not of these.
+    let within: Vec<&crate::underlay::Course> =
+        wide.iter().copied().filter(|course| above(course).is_some_and(|up| up >= LEAST_HIGH && up <= storey)).collect();
+    let top = told.or_else(|| within.last().and_then(|course| course.height));
+    let high = match (top, floor) {
+        (Some(top), Some(floor)) => Some(((top - floor) / 10.0).round() * 10.0),
+        _ => None,
+    };
+    let courses: Vec<Value> = wide
+        .iter()
+        .map(|course| {
+            json!({
+                "height": course.height.map(hundredth),
+                "above": above(course).map(hundredth),
+                "span": hundredth(course.span),
+                // Whether it is one the top of this storey could be: what is left is of another storey, of the
+                // roof, or under the floor, and is said so that the picking is made on all of it.
+                "within": within.iter().any(|one| std::ptr::eq(*one, *course)),
+            })
+        })
+        .collect();
+    // The walls of that storey, which are what this height is for.
+    let of_storey: Vec<Id> = s
+        .model
+        .elements
+        .iter()
+        .filter_map(|(id, e)| match e {
+            Element::Wall(w) if w.level == level => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let (mut applied, mut too_short, mut attached) = (Vec::<Id>::new(), 0usize, 0usize);
+    if apply {
+        let Some(high) = high else {
+            return Err(bad(
+                c,
+                format!(
+                    "`{name}` draws no line the width of its facade between {} and {} mm, so nothing on it says how high these walls \
+                     stand: `top` is how to say it, and `cad_heights` lists every line it draws",
+                    floor.unwrap_or_default() + LEAST_HIGH,
+                    floor.unwrap_or_default() + storey
+                ),
+            ));
+        };
+        for wall in &of_storey {
+            let guid = s.model.guid(*wall);
+            // An opening of it would stand through the top it is being given: the wall is left as it was, because
+            // the drawing's own reading of the opening is worth more than a height read off another line.
+            let reaches = s
+                .model
+                .elements
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    Element::Door(o) | Element::Window(o) if o.host == guid => {
+                        Some(o.sill + s.model.opening_type(e).map_or(0.0, |t| t.height))
+                    }
+                    _ => None,
+                })
+                .fold(0.0, f64::max);
+            if reaches > high + 1.0 {
+                too_short += 1;
+                continue;
+            }
+            // One attached to a roof or a floor takes its top from that, whatever height it is given.
+            if matches!(s.model.elements.get(*wall), Some(Element::Wall(w)) if w.attach_top.is_some()) {
+                attached += 1;
+                continue;
+            }
+            let same =
+                matches!(s.model.elements.get(*wall), Some(Element::Wall(w)) if w.top_level.is_none() && (w.height - high).abs() < 0.001);
+            if !same && let Some(Element::Wall(w)) = s.model_mut().elements.get_mut(*wall) {
+                // Unattached at the height that was measured: a wall that goes up to the level above is as high as
+                // that level, and the level above is where the project put it, not where this drawing says.
+                w.top_level = None;
+                w.height = high;
+            }
+            applied.push(*wall);
+        }
+    }
+    // Where the level above stands, which is what these walls went up to until now: it is said and not moved, as
+    // what else stands on it is none of this drawing's business.
+    let next = s.model.level_above(level).map(|g| (s.model.level(g).map(|l| l.name.clone()).unwrap_or_default(), s.model.elevation(g)));
+    let mut out = json!({
+        "id": id,
+        "part": part.name,
+        "level": s.model.level(level).map(|l| l.name.clone()),
+        "datum": read.datum.map(hundredth),
+        "agree": read.worst <= crate::underlay::HEIGHTS_AGREE,
+        "across": hundredth(across),
+        "across_from": whence,
+        "floor": floor.map(hundredth),
+        "courses": courses,
+        "top": top.map(hundredth),
+        "high": high,
+        "walls": of_storey.len(),
+    });
+    if let Some((name, at)) = next {
+        let up = at - s.model.elevation(level);
+        out["level_above"] =
+            json!({"name": name, "high": hundredth(up), "agrees": high.is_none_or(|high| (up - high).abs() <= LEVEL_AGREE)});
+    }
+    if apply {
+        out["applied"] = json!(applied.len());
+        out["applied_ids"] = json!(applied);
+        if too_short > 0 {
+            out["too_short"] = json!(too_short);
+        }
+        if attached > 0 {
+            out["attached"] = json!(attached);
         }
     }
     Ok(out)

@@ -2777,9 +2777,53 @@ const WORDS: &[[&str; 3]] = &[
     ["{} heights, {} mm apart", "{} alturas, {} mm de diferença", "{} alturas, {} mm de diferencia"],
     ["Openings", "Vãos", "Huecos"],
     [
-        "The sill and the head of every opening, from the lines an elevation draws across it. The elevation has to stand against its plan first.",
-        "A soleira e o lintel de cada vão, a partir das linhas que um alçado desenha através dele. O alçado tem de estar assentado sobre a sua planta primeiro.",
-        "El antepecho y el dintel de cada hueco, a partir de las líneas que un alzado dibuja a través de él. El alzado tiene que estar asentado sobre su planta primero.",
+        "What an elevation says of the storey it draws: how high its walls stand, and the sill and the head of every opening in them. The elevation has to stand against its plan first.",
+        "O que um alçado diz do piso que desenha: a que altura ficam as suas paredes, e a soleira e o lintel de cada vão nelas. O alçado tem de estar assentado sobre a sua planta primeiro.",
+        "Lo que un alzado dice de la planta que dibuja: a qué altura quedan sus muros, y el antepecho y el dintel de cada hueco en ellos. El alzado tiene que estar asentado sobre su planta primero.",
+    ],
+    [
+        "The walls of this storey, as high as the elevation draws them:",
+        "As paredes deste piso, tão altas como o alçado as desenha:",
+        "Los muros de esta planta, tan altos como el alzado los dibuja:",
+    ],
+    ["Read the Storey's Top", "Ler o topo do piso", "Leer el remate de la planta"],
+    ["Its top", "O seu topo", "Su remate"],
+    ["Give the Walls This Height", "Dar esta altura às paredes", "Dar esta altura a los muros"],
+    [
+        "The openings in them, as the elevation draws their sills and their heads:",
+        "Os vãos nelas, como o alçado desenha as suas soleiras e os seus lintéis:",
+        "Los huecos en ellos, como el alzado dibuja sus antepechos y sus dinteles:",
+    ],
+    [
+        "This storey stands {} mm high, its top drawn at {} m.",
+        "Este piso tem {} mm de altura, com o topo desenhado a {} m.",
+        "Esta planta tiene {} mm de altura, con el remate dibujado a {} m.",
+    ],
+    [
+        "No line of this elevation runs the width of its facade within a storey of that floor, so nothing says how high these walls stand.",
+        "Nenhuma linha deste alçado corre a largura da sua fachada até um pé-direito acima desse piso, por isso nada diz a que altura ficam estas paredes.",
+        "Ninguna línea de este alzado recorre el ancho de su fachada hasta una altura de planta sobre ese suelo, así que nada dice a qué altura quedan estos muros.",
+    ],
+    [
+        "{} walls of this storey were made that high.",
+        "{} paredes deste piso ficaram com essa altura.",
+        "{} muros de esta planta quedaron con esa altura.",
+    ],
+    ["{} walls stand on this storey.", "{} paredes estão neste piso.", "{} muros están en esta planta."],
+    [
+        "{} of them have an opening that would stand through that, and were left as high as they were.",
+        "{} delas têm um vão que ficaria acima disso, e ficaram como estavam.",
+        "{} de ellos tienen un hueco que quedaría por encima de eso, y quedaron como estaban.",
+    ],
+    [
+        "{} of them are attached to a roof or a floor, which is their top whatever height they are given.",
+        "{} delas estão presas a uma cobertura ou a um piso, que é o seu topo qualquer que seja a altura dada.",
+        "{} de ellos están unidos a una cubierta o a un suelo, que es su remate sea cual sea la altura dada.",
+    ],
+    [
+        "{} stands {} mm above this floor, and is left where the project put it.",
+        "{} está {} mm acima deste piso, e fica onde o projeto o pôs.",
+        "{} está {} mm sobre este suelo, y queda donde el proyecto lo puso.",
     ],
     [
         "It needs a plan and an elevation among its parts, and the Parts tab is where they are said.",
@@ -2797,9 +2841,9 @@ const WORDS: &[[&str; 3]] = &[
     ["Read the Sills and Heads", "Ler as soleiras e os lintéis", "Leer los antepechos y los dinteles"],
     ["Apply These Heights", "Aplicar estas alturas", "Aplicar estas alturas"],
     [
-        "Giving the openings these heights needs the storey's floor said, since a sill is made so far above it.",
-        "Dar estas alturas aos vãos exige que se diga o piso do andar, pois a soleira é feita a essa altura acima dele.",
-        "Dar estas alturas a los huecos exige decir el suelo de la planta, pues el antepecho se hace a esa altura sobre él.",
+        "Giving these heights needs the storey's floor said, since a sill and a wall both stand so far above it.",
+        "Dar estas alturas exige que se diga o piso do andar, pois tanto uma soleira como uma parede ficam a essa altura acima dele.",
+        "Dar estas alturas exige decir el suelo de la planta, pues tanto un antepecho como un muro quedan a esa altura sobre él.",
     ],
     [
         "{} openings were given the heights the elevation draws.",

@@ -452,6 +452,114 @@ fn the_openings_a_plan_built_are_given_the_heights_the_elevation_draws() {
     assert!(e.contains("`floor`"), "{e}");
 }
 
+/// The same survey, with the elevation drawing what a facade draws across its whole width: the ground, a string
+/// course 1200 up, the eaves at 2800, the ridge at 4500, and the slope of the roof, which runs a part of it only.
+/// The windows of `a_survey` are drawn as they are there, so the walls built have openings in them.
+fn a_storey() -> Session {
+    let (s, _) = a_survey();
+    let path = s
+        .model
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.path.clone()),
+            _ => None,
+        })
+        .expect("the drawing");
+    // The elevation of a_survey draws the ground and a line at 3000; this one draws a facade's own courses.
+    let more = "0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n1200\n11\n30000\n21\n1200\n\
+                0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n2800\n11\n30000\n21\n2800\n\
+                0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n4500\n11\n30000\n21\n4500\n\
+                0\nLINE\n8\nPROSPETTO\n10\n21000\n20\n3500\n11\n24000\n21\n3500\n";
+    // Its own line at 3000 goes, so that what this elevation draws across the facade is the four lines above.
+    let eaves = "0\nLINE\n8\nPROSPETTO\n10\n20000\n20\n3000\n11\n30000\n21\n3000\n";
+    let text = std::fs::read_to_string(&path)
+        .expect("the file")
+        .replace(eaves, "")
+        .replace("0\nENDSEC\n0\nEOF\n", &format!("{more}0\nENDSEC\n0\nEOF\n"));
+    std::fs::write(&path, text).expect("it is written");
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path})).expect("it comes in");
+    let parts = json!([
+        {"name": "PIANTA PIANO TERRA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},
+    ]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    let told = json!({"part": "PROSPETTO SUD", "plan": [[0, 0], [10_000, 0]], "drawn": [[20_000, 0], [30_000, 0]]});
+    run(&mut s, "cad_anchor", told).expect("it stands");
+    run(&mut s, "trace_walls", json!({"part": "PIANTA PIANO TERRA", "openings": true})).expect("it builds");
+    s
+}
+
+/// Every wall of the project: how high it is made and whether it still goes up to the level above.
+fn walls_of(s: &Session) -> Vec<(f64, bool)> {
+    let mut all: Vec<(f64, bool)> = s
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Wall(w) => Some((w.height, w.top_level.is_some())),
+            _ => None,
+        })
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    all
+}
+
+#[test]
+fn the_storey_an_elevation_draws_is_how_high_the_walls_of_it_are_made() {
+    let mut s = a_storey();
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800});
+    let out = run(&mut s, "cad_storey", ask.clone()).expect("it reads");
+    // The facade is the 10 m the elevation stands against its plan by, and the lines that run it are the ground,
+    // the course, the eaves and the ridge: the roof's slope runs 3 m of it and is none of them.
+    assert_eq!((out["across"].clone(), out["across_from"].clone()), (json!(10_000.0), json!("anchor")), "{out}");
+    let drawn: Vec<Value> = out["courses"].as_array().expect("the courses").iter().map(|c| c["above"].clone()).collect();
+    assert_eq!(drawn, vec![json!(0.0), json!(1200.0), json!(2800.0), json!(4500.0)], "{out}");
+    // The top is the highest of them within a storey of the floor: the ridge at 4500 is of the roof, not of this.
+    assert_eq!((out["top"].clone(), out["high"].clone()), (json!(72_600.0), json!(2800.0)), "{out}");
+    assert_eq!(out["walls"], json!(4), "{out}");
+    // It read and changed nothing; the walls still go up to the level above, where the project put it.
+    assert_eq!(walls_of(&s), vec![(3000.0, true); 4], "{out}");
+    assert_eq!(out["level_above"], json!({"name": "Level 2", "high": 3000.0, "agrees": false}), "{out}");
+    // Asked for, every wall of the storey is made that high and stands unattached at it.
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_storey", told.clone()).expect("it gives them");
+    assert_eq!(out["applied"], json!(4), "{out}");
+    assert_eq!(walls_of(&s), vec![(2800.0, false); 4], "{out}");
+    // One undo step takes the storey back, and giving it again changes nothing at all.
+    run(&mut s, "undo", json!({})).expect("it goes back");
+    assert_eq!(walls_of(&s), vec![(3000.0, true); 4]);
+    run(&mut s, "cad_storey", told.clone()).expect("again");
+    run(&mut s, "cad_storey", told).expect("and again");
+    run(&mut s, "undo", json!({})).expect("one step");
+    assert_eq!(walls_of(&s), vec![(3000.0, true); 4], "the second giving was no step of its own");
+}
+
+#[test]
+fn a_wall_an_opening_would_stand_through_is_left_as_high_as_it_was() {
+    let mut s = a_storey();
+    // The string course 1200 above the floor, said outright: the walls with the windows in them reach 2400, so
+    // they are left as high as they were and the two blind ones are made to it.
+    let told = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "top": 71_000, "apply": true});
+    let out = run(&mut s, "cad_storey", told).expect("it gives them");
+    assert_eq!((out["high"].clone(), out["applied"].clone(), out["too_short"].clone()), (json!(1200.0), json!(2), json!(2)), "{out}");
+    assert_eq!(walls_of(&s), vec![(1200.0, false), (1200.0, false), (3000.0, true), (3000.0, true)], "{out}");
+    // A top under the floor is no top at all, and an elevation that draws no course within the storey says so
+    // instead of making the walls up out of nothing.
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 69_800, "top": 69_000, "apply": true});
+    let e = run(&mut s, "cad_storey", ask).expect_err("under the floor");
+    assert!(e.contains("not above its floor"), "{e}");
+    let ask = json!({"part": "PROSPETTO SUD", "plan": "PIANTA PIANO TERRA", "floor": 60_000, "apply": true});
+    let e = run(&mut s, "cad_storey", ask).expect_err("nothing within a storey of that floor");
+    assert!(e.contains("cad_heights"), "{e}");
+    // And a plan draws no heights, whatever is asked of it.
+    let ask = json!({"part": "PIANTA PIANO TERRA", "plan": "PIANTA PIANO TERRA"});
+    let e = run(&mut s, "cad_storey", ask).expect_err("a plan");
+    assert!(e.contains("is a plan"), "{e}");
+}
+
 #[test]
 fn a_door_is_made_as_high_as_its_head_stands_above_the_floor_it_opens_onto() {
     // A plan with a doorway 1 m wide in its south wall, drawn as a gap in both faces of it, and 20 m east the
