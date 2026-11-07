@@ -377,7 +377,7 @@ pub static ALL: &[Command] = &[
         "cad_stair",
         "CAD Stair",
         &[],
-        "{underlay?, part?, plan?, level?, region?, flight?, height?, risers?, going?, width?, flip?, apply?} the \
+        "{underlay?, part?, plan?, level?, region?, flight?, height?, risers?, going?, width?, turns?, flip?, apply?} the \
          stair a plan draws, read and reported without changing the project unless `apply` asks for it. A plan \
          draws the steps of a stair one behind another, at the going they are built to, so the going and the width \
          are the two things of a stair a plan gives at their true size; how high one step rises it gives nothing of \
@@ -388,6 +388,14 @@ pub static ALL: &[Command] = &[
          way a flight is, so one of them could be a stair where its steps stand 200 to 400 mm apart and are drawn \
          600 to 2500 mm long; what is left is said and never built. `flight` takes one by its place in that list \
          where the longest is not the one wanted, and `going` and `width` say either outright. \
+         \
+         A stair that turns is drawn as a run for each flight of it, one joined on to the next where a landing \
+         stands between them, so the runs joined on to the one read are read with it: `run` says which of them \
+         each flight in the list is, counted from the foot, and `landings` is the turn between each two — `at` \
+         how many risers up it stands, `turn` the degrees it turns (0 straight on, 90 or -90 a quarter to the \
+         left or the right, 180 or -180 back beside the run), `which` that in a word, and `off` how far the \
+         landing that is built puts the next run's foot from where the plan draws it, a built landing being as \
+         deep as the stair is wide and a drawn one under no such rule. `turns: false` reads the one run alone. \
          \
          `height` is how far it climbs: where the level above stands, or what `height` says, and `height_from` \
          which it was. `risers` is how many it climbs in, which is how many steps the plan draws, since the lines \
@@ -402,8 +410,8 @@ pub static ALL: &[Command] = &[
          say where that puts it. `apply` builds it on the plan's own level (or `level`), climbing to the level \
          above, as `stair` builds one; given again from the same reading it builds no second stair. Returns `id`, \
          `part`, `level`, `flights`, `steps`, `going`, `width`, `length`, `start`, `angle`, `climbs`, `height`, \
-         `height_from`, `risers`, `riser`, `ratio` and `comfortable`, and with `apply` also `stair`, which it \
-         built",
+         `height_from`, `risers`, `riser`, `ratio`, `landings` and `comfortable`, and with `apply` also `stair`, \
+         which it built",
         cad_stair,
     ),
     edit(
@@ -3617,6 +3625,41 @@ const STAIR_WIDE: f64 = 2500.0;
 const BLONDEL_LEAST: f64 = 600.0;
 const BLONDEL_MOST: f64 = 660.0;
 
+/// How far from the head of one run the foot of the next may stand, as a share of how wide the stair is: a
+/// landing is built as deep as the stair is wide, and the turns a stair is built with put the next run's foot
+/// from seven tenths of that away to a whole one of it.
+const LANDING_REACH: f64 = 2.5;
+
+/// How far a drawn turn may be off the turns a stair is built with, in degrees.
+const TURN_SLACK: f64 = 10.0;
+
+/// How many runs of one stair are read at most.
+const MOST_RUNS: usize = 8;
+
+/// The turn a stair is built with that takes it from heading `a` to heading `b`, in degrees: straight on, a
+/// quarter to the left or to the right, or back beside itself, to the left of the run or to its right — which
+/// `aside`, how far the next run's foot lies to the left of the head of this one, is what says. None where the
+/// drawing turns by no amount a stair is built with.
+fn turn_of(a: P2, b: P2, aside: f64) -> Option<f64> {
+    let off = (b.1.atan2(b.0) - a.1.atan2(a.0)).to_degrees();
+    let off = (off + 180.0).rem_euclid(360.0) - 180.0;
+    if off.abs() >= 180.0 - TURN_SLACK {
+        return Some(if aside >= 0.0 { 180.0 } else { -180.0 });
+    }
+    [0.0, 90.0, -90.0].into_iter().find(|want| (off - want).abs() <= TURN_SLACK)
+}
+
+/// What a landing's turn is, in a word. The core's words stay English, because agents read them.
+fn turn_word(turn: f64) -> &'static str {
+    match turn {
+        t if t > 170.0 => "back left",
+        t if t < -170.0 => "back right",
+        t if t > 45.0 => "left",
+        t if t < -45.0 => "right",
+        _ => "straight on",
+    }
+}
+
 /// Which way a bearing points, as a plan is read. The core's words stay English, because agents read them.
 fn compass(angle: f64) -> &'static str {
     const POINTS: [&str; 8] = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
@@ -3672,6 +3715,13 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
     };
     let flip = flag(c, p, "flip")?;
     let apply = flag(c, p, "apply")?;
+    // Whether the runs the plan joins on to the one read are read with it, as the flights of one stair that
+    // turns, or that one run is the whole of it.
+    let turns = match p.get("turns") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => return Err(bad(c, format!("`turns` is true or false, not {v}"))),
+    };
     // The storey the stair stands on: the plan's own level, which is the one its walls were built on.
     let level = match (p.get("level"), &told) {
         (v, _) if !absent(v) => level_param(c, &s.model, p, "level")?,
@@ -3701,31 +3751,122 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         Some(at) => Some(at).filter(|at| found.get(*at).is_some_and(could)),
         None => found.iter().position(could),
     };
-    let flight = at.and_then(|at| found.get(at));
-    // Which way it climbs: the way the run was read, or the other way. A plan draws the steps and not the arrow
-    // on them, so neither is read off the lines and `flip` is what says it.
-    let way = |f: &crate::trace::Flight| match flip {
-        true => degrees(f.angle + 180.0),
-        false => degrees(f.angle),
+    // The runs of one stair: the flight read from, and whatever the plan draws joined on to it head to foot, as
+    // a landing joins two runs of one stair. Which end of a run is its foot a plan draws nothing of, but a run
+    // joined on to another has only the one end that can be its foot, so a chain of them is read in one piece and
+    // turned round in one piece.
+    let mid = |e: Option<&[P2; 2]>| e.map_or(P2(0.0, 0.0), |[a, b]| (*a + *b) * 0.5);
+    // A run as it climbs: where its foot stands and where its head does, `back` taking it the other way about.
+    let ends = |f: &crate::trace::Flight, back: bool| match back {
+        true => (mid(f.steps.last()), mid(f.steps.first())),
+        false => (mid(f.steps.first()), mid(f.steps.last())),
     };
-    // Where it starts: the middle of its first riser, which is the line at the foot of the run.
-    let foot = |f: &crate::trace::Flight| {
-        let end = if flip { f.steps.last() } else { f.steps.first() };
-        end.map(|[a, b]| (*a + *b) * 0.5)
+    let bearing = |foot: P2, head: P2| degrees((head - foot).1.atan2((head - foot).0).to_degrees());
+    // The runs joined on above the one at `from`, each at the end of it that can be its foot and the nearest
+    // first: a landing stands where one run ends and the next begins, no nearer than a step and a half, so a
+    // line drawn across a flight is no landing, and no further off than a landing reaches.
+    let onward = |from: usize, back: bool| {
+        let mut chain = vec![(from, back)];
+        while chain.len() < MOST_RUNS {
+            let Some((a, back)) = chain.last().and_then(|(j, b)| found.get(*j).map(|f| (f, *b))) else { break };
+            let (foot, head) = ends(a, back);
+            let u = (head - foot).unit();
+            let mut best: Option<(f64, usize, bool)> = None;
+            for (j, b) in found.iter().enumerate() {
+                if !could(b) || chain.iter().any(|(had, _)| *had == j) {
+                    continue;
+                }
+                for back in [false, true] {
+                    let (its_foot, its_head) = ends(b, back);
+                    let over = its_foot - head;
+                    let gap = over.length();
+                    if !(a.going * 1.5..=a.width * LANDING_REACH).contains(&gap) || u.dot(over) < -a.width / 2.0 {
+                        continue;
+                    }
+                    if turn_of(u, (its_head - its_foot).unit(), u.perp().dot(over)).is_none() {
+                        continue;
+                    }
+                    if best.is_none_or(|(had, ..)| gap < had) {
+                        best = Some((gap, j, back));
+                    }
+                }
+            }
+            let Some((_, j, back)) = best else { break };
+            chain.push((j, back));
+        }
+        chain
     };
+    let chain: Vec<(usize, bool)> = match at.filter(|_| turns) {
+        // Out from the run read both ways: what the plan joins on below it, turned round, and then what above.
+        Some(at) => {
+            let mut all: Vec<(usize, bool)> = onward(at, true).into_iter().skip(1).rev().map(|(j, b)| (j, !b)).collect();
+            all.extend(onward(at, false));
+            all
+        }
+        None => at.map(|at| vec![(at, false)]).unwrap_or_default(),
+    };
+    // Which end of the whole of it is its foot: the one furthest south, or furthest west where it runs east and
+    // west, which is how one run on its own is read, and `flip` turns the whole of it round.
+    let outer =
+        chain.first().zip(chain.last()).and_then(|((i, ib), (j, jb))| Some((ends(found.get(*i)?, *ib).0, ends(found.get(*j)?, *jb).1)));
+    let round = outer.is_some_and(|(foot, head)| head.1 < foot.1 - TOL || ((head.1 - foot.1).abs() <= TOL && head.0 < foot.0));
+    let chain: Vec<(usize, bool)> = match round != flip {
+        true => chain.into_iter().rev().map(|(j, b)| (j, !b)).collect(),
+        false => chain,
+    };
+    // Each run as it climbs, in order: which flight it is, where its foot and its head stand, and which way it
+    // goes. A turn no stair is built with ends the stair there, so what is read is what can be built.
+    let mut runs: Vec<(usize, P2, P2, f64)> = Vec::new();
+    for (j, back) in &chain {
+        let Some(f) = found.get(*j) else { break };
+        let (foot, head) = ends(f, *back);
+        if let Some((_, _, before, way)) = runs.last().copied()
+            && turn_of(heading(way), heading(bearing(foot, head)), heading(way).perp().dot(foot - before)).is_none()
+        {
+            break;
+        }
+        runs.push((*j, foot, head, bearing(foot, head)));
+    }
+    let turning: Vec<f64> = runs
+        .windows(2)
+        .filter_map(|w| match w {
+            [(_, _, head, way), (_, foot, _, next)] => turn_of(heading(*way), heading(*next), heading(*way).perp().dot(*foot - *head)),
+            _ => None,
+        })
+        .collect();
+    // How many steps each run draws, and the risers each landing stands above: as many as the runs below it draw
+    // lines, because the lines of a flight are its risers.
+    let drawn: Vec<usize> = runs.iter().filter_map(|(j, ..)| found.get(*j).map(|f| f.steps.len())).collect();
+    let breaks: Vec<f64> = drawn
+        .iter()
+        .take(drawn.len().saturating_sub(1))
+        .scan(0.0, |up, n| {
+            *up += *n as f64;
+            Some(*up)
+        })
+        .collect();
     let listed: Vec<Value> = found
         .iter()
         .enumerate()
         .map(|(n, f)| {
+            let held = runs.iter().position(|(j, ..)| *j == n);
+            let (foot, way) = match held.and_then(|r| runs.get(r)) {
+                Some((_, foot, _, way)) => (*foot, *way),
+                None => {
+                    let (foot, head) = ends(f, flip);
+                    (foot, bearing(foot, head))
+                }
+            };
             json!({
                 "steps": f.steps.len(),
                 "going": hundredth(f.going),
                 "width": hundredth(f.width),
                 "length": hundredth(f.going * (f.steps.len().saturating_sub(1)) as f64),
-                "starts": foot(f).map(|at| [hundredth(at.0), hundredth(at.1)]),
-                "climbs": compass(way(f)),
+                "starts": [hundredth(foot.0), hundredth(foot.1)],
+                "climbs": compass(way),
                 "could": could(f),
-                "taken": at == Some(n),
+                "run": held,
+                "taken": held.is_some(),
             })
         })
         .collect();
@@ -3735,11 +3876,12 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         (None, Some(on)) => (Some(s.model.elevation(on) - s.model.elevation(level)), "levels"),
         (None, None) => (None, "nothing"),
     };
-    let going = told_going.or_else(|| flight.map(|f| (f.going * 100.0).round() / 100.0));
-    let width = told_width.or_else(|| flight.map(|f| (f.width * 100.0).round() / 100.0));
-    // How many risers it climbs in: as many as the plan draws lines, because the lines of a flight are its risers
-    // and the stair starts at the first of them. A plan cut partway up draws only those under the cut.
-    let risers = told_risers.or_else(|| flight.map(|f| f.steps.len()));
+    let foot_run = runs.first().and_then(|(j, ..)| found.get(*j));
+    let going = told_going.or_else(|| foot_run.map(|f| (f.going * 100.0).round() / 100.0));
+    let width = told_width.or_else(|| foot_run.map(|f| (f.width * 100.0).round() / 100.0));
+    // How many risers it climbs in: as many as its runs draw lines together, because the lines of a flight are
+    // its risers and the stair starts at the first of them. A plan cut partway up draws only those under the cut.
+    let risers = told_risers.or_else(|| (!runs.is_empty()).then(|| drawn.iter().sum()));
     let riser = match (height, risers) {
         (Some(height), Some(risers)) if risers > 0 => Some(height / risers as f64),
         _ => None,
@@ -3748,21 +3890,69 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         (Some(riser), Some(going)) => Some(riser * 2.0 + going),
         _ => None,
     };
+    // Told fewer risers than the plan draws steps below the landing at the top, there is nothing left of the
+    // stair for the run above it, and a run of fewer than two risers is no run.
+    if let (Some(last), Some(risers)) = (breaks.last(), risers)
+        && *last as usize + 2 > risers
+    {
+        return Err(bad(
+            c,
+            format!(
+                "`risers` is {risers} and the plan draws {last} steps below the landing at the top of its runs: the run above a \
+                 landing needs 2 risers or more. `turns: false` reads the one run the stair is read from and nothing joined on to it"
+            ),
+        ));
+    }
+    let landings: Vec<Landing> = breaks.iter().copied().zip(turning.iter().copied()).map(|(at, turn)| Landing { at, turn }).collect();
+    let st = match (runs.first(), going, width, height, riser) {
+        (Some((_, start, _, way)), Some(going), Some(width), Some(height), Some(riser)) if riser > 0.0 => Some(Stair {
+            params: Default::default(),
+            level,
+            // Up to the level above where that is what gives the height, so the stair follows it as a wall does.
+            top_level: told_height.is_none().then_some(on).flatten(),
+            height,
+            start: *start,
+            angle: *way,
+            width,
+            // The riser is a stair's greatest, and `Model::flight` takes as many as keep each under it: one of
+            // this height is that many exactly.
+            riser,
+            tread: going,
+            landings: landings.clone(),
+        }),
+        _ => None,
+    };
+    // How far the landing a stair is built with puts the next run's foot from where the plan draws it: a built
+    // landing is as deep as the stair is wide, and a drawn one is under no such rule.
+    let laid = st.as_ref().map(|st| crate::stairs::stair(&s.model, st));
+    let said: Vec<Value> = landings
+        .iter()
+        .enumerate()
+        .map(|(n, l)| {
+            let off = laid
+                .as_ref()
+                .and_then(|laid| laid.runs.get(n + 1))
+                .zip(runs.get(n + 1))
+                .map(|(built, (_, foot, ..))| hundredth(built.start.dist(*foot)));
+            json!({"at": l.at, "turn": l.turn, "which": turn_word(l.turn), "off": off})
+        })
+        .collect();
     let mut out = json!({
         "id": id,
         "part": told.as_ref().map(|part| part.name.clone()),
         "level": s.model.level(level).map(|l| l.name.clone()),
         "flights": listed,
-        "steps": flight.map(|f| f.steps.len()),
+        "steps": (!runs.is_empty()).then(|| drawn.iter().sum::<usize>()),
         "going": going.map(hundredth),
         "width": width.map(hundredth),
         "length": match (going, risers) {
-            (Some(going), Some(risers)) => Some(hundredth(going * (risers.saturating_sub(1)) as f64)),
+            (Some(going), Some(risers)) => Some(hundredth(going * (risers.saturating_sub(runs.len().max(1))) as f64)),
             _ => None,
         },
-        "start": flight.and_then(foot).map(|at| [hundredth(at.0), hundredth(at.1)]),
-        "angle": flight.map(|f| hundredth(way(f))),
-        "climbs": flight.map(|f| compass(way(f))),
+        "start": runs.first().map(|(_, foot, ..)| [hundredth(foot.0), hundredth(foot.1)]),
+        "angle": runs.first().map(|(_, _, _, way)| hundredth(*way)),
+        "climbs": runs.first().map(|(_, _, _, way)| compass(*way)),
+        "landings": said,
         "height": height.map(hundredth),
         "height_from": height_from,
         "risers": risers,
@@ -3773,18 +3963,18 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
     if !apply {
         return Ok(out);
     }
-    let (Some(flight), Some(going), Some(width)) = (flight, going, width) else {
-        return Err(bad(
-            c,
-            format!(
-                "no run of lines in this plan measures like a stair: a stair's steps are drawn {GOING_LEAST} to {GOING_MOST} mm \
-                 apart and {STAIR_NARROW} to {STAIR_WIDE} mm long, and {} runs of lines were found drawn alike and evenly apart. \
-                 `going` and `width` say either outright, and `flight` takes one of them by its place in the list",
-                found.len()
-            ),
-        ));
-    };
-    let (Some(height), Some(riser)) = (height, riser) else {
+    let Some(st) = st else {
+        if runs.is_empty() || going.is_none() || width.is_none() {
+            return Err(bad(
+                c,
+                format!(
+                    "no run of lines in this plan measures like a stair: a stair's steps are drawn {GOING_LEAST} to {GOING_MOST} mm \
+                     apart and {STAIR_NARROW} to {STAIR_WIDE} mm long, and {} runs of lines were found drawn alike and evenly apart. \
+                     `going` and `width` say either outright, and `flight` takes one of them by its place in the list",
+                    found.len()
+                ),
+            ));
+        }
         return Err(bad(
             c,
             format!(
@@ -3792,24 +3982,6 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
                 level_name(&s.model, level)
             ),
         ));
-    };
-    let Some(start) = foot(flight) else {
-        return Err(bad(c, "the flight found has no first step for the stair to start at"));
-    };
-    let st = Stair {
-        params: Default::default(),
-        level,
-        // Up to the level above where that is what gives the height, so the stair follows it as a wall does.
-        top_level: told_height.is_none().then_some(on).flatten(),
-        height,
-        start,
-        angle: degrees(way(flight)),
-        width,
-        // The riser is a stair's greatest, and `Model::flight` takes as many as keep each under it: one of this
-        // height is that many exactly.
-        riser,
-        tread: going,
-        landings: Vec::new(),
     };
     // The stair this reading already built is left as it is: read and given again, there is nothing left to build.
     let same = s.model.elements.iter().find(|(_, e)| matches!(e, Element::Stair(had) if *had == st)).map(|(id, _)| id);

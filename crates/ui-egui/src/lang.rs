@@ -2733,6 +2733,18 @@ const WORDS: &[[&str; 3]] = &[
     ["south-west", "sudoeste", "suroeste"],
     ["south", "sul", "sur"],
     ["south-east", "sudeste", "sureste"],
+    ["One run only", "Apenas um lanço", "Solo un tramo"],
+    ["After {} risers it turns {}.", "Depois de {} espelhos vira {}.", "Tras {} contrahuellas gira {}."],
+    [
+        "The landing it is built with puts the next run {} mm from where the plan draws it.",
+        "O patamar com que é construída põe o lanço seguinte a {} mm de onde a planta o desenha.",
+        "La meseta con que se construye sitúa el tramo siguiente a {} mm de donde lo dibuja la planta.",
+    ],
+    ["left", "à esquerda", "a la izquierda"],
+    ["right", "à direita", "a la derecha"],
+    ["back left", "para trás pela esquerda", "atrás por la izquierda"],
+    ["back right", "para trás pela direita", "atrás por la derecha"],
+    ["straight on", "a direito", "recto"],
     [
         "{} walls, {} m, of {} lines long enough to be a wall's face.",
         "{} paredes, {} m, de {} linhas longas o bastante para ser a face de uma parede.",

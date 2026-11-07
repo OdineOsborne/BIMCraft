@@ -821,6 +821,35 @@ fn an_elevation_that_draws_no_line_under_the_floor_builds_no_slab_and_says_so() 
 /// the north wall, and, in the middle of the room, a hatch of eight lines 50 apart drawn the same length — which
 /// is drawn exactly as a flight is and is no stair. The walls are traced from it, so the stair has a storey.
 fn a_stair() -> Session {
+    let mut more = String::new();
+    for n in 0..9 {
+        let y = 3300.0 + 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n{y}\n11\n8000\n21\n{y}\n"));
+    }
+    for n in 0..8 {
+        let y = 1000.0 + 50.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nRETINI\n10\n2000\n20\n{y}\n11\n3000\n21\n{y}\n"));
+    }
+    a_plan_drawn_with(&more)
+}
+
+/// The same survey with a stair that turns drawn in its plan: five steps 280 apart and 1000 wide climbing north,
+/// a quarter turn to the left, and five more climbing west, each run drawn as a plan draws one — the steps one
+/// behind another, and nothing of the landing between them but the gap the two runs leave for it.
+fn a_turning_stair() -> Session {
+    let mut more = String::new();
+    for n in 0..5 {
+        let y = 3300.0 + 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n{y}\n11\n8000\n21\n{y}\n"));
+        let x = 7000.0 - 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n{x}\n20\n4420\n11\n{x}\n21\n5420\n"));
+    }
+    a_plan_drawn_with(&more)
+}
+
+/// The survey with `more` lines drawn in its plan, its two parts said and its walls traced from it, so what is
+/// drawn there has a storey to stand on.
+fn a_plan_drawn_with(more: &str) -> Session {
     let (s, _) = a_survey();
     let path = s
         .model
@@ -831,15 +860,6 @@ fn a_stair() -> Session {
             _ => None,
         })
         .expect("the drawing");
-    let mut more = String::new();
-    for n in 0..9 {
-        let y = 3300.0 + 280.0 * f64::from(n);
-        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n{y}\n11\n8000\n21\n{y}\n"));
-    }
-    for n in 0..8 {
-        let y = 1000.0 + 50.0 * f64::from(n);
-        more.push_str(&format!("0\nLINE\n8\nRETINI\n10\n2000\n20\n{y}\n11\n3000\n21\n{y}\n"));
-    }
     let text = std::fs::read_to_string(&path).expect("the file").replace("0\nENDSEC\n0\nEOF\n", &format!("{more}0\nENDSEC\n0\nEOF\n"));
     std::fs::write(&path, text).expect("it is written");
     let mut s = Session::new();
@@ -867,6 +887,55 @@ fn stairs_of(s: &Session) -> Vec<(f64, f64, u32, f64)> {
             _ => None,
         })
         .collect()
+}
+
+/// Every stair's landings: after how many risers each goes, and how far the next run turns.
+fn landings_of(s: &Session) -> Vec<Vec<(f64, f64)>> {
+    s.model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Stair(st) => Some(st.landings.iter().map(|l| (l.at, l.turn)).collect()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_runs_a_plan_draws_end_to_end_are_one_stair_that_turns_at_the_landing_between_them() {
+    let mut s = a_turning_stair();
+    let ask = json!({"part": "PIANTA PIANO TERRA"});
+    let out = run(&mut s, "cad_stair", ask.clone()).expect("it reads");
+    // Two runs of lines, each drawn alike and evenly apart, and both of them this one stair's: the second is
+    // joined on where the first ends, a quarter turn round, which is the one place a landing can stand.
+    let said: Vec<(Value, Value, Value)> = out["flights"]
+        .as_array()
+        .expect("the flights")
+        .iter()
+        .map(|f| (f["steps"].clone(), f["run"].clone(), f["taken"].clone()))
+        .collect();
+    assert_eq!(said, vec![(json!(5), json!(0), json!(true)), (json!(5), json!(1), json!(true))], "{out}");
+    // It climbs in as many risers as the two runs draw lines, and turns after the five the first of them draws.
+    assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(10), json!(10)), "{out}");
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "off": 0.0}]), "{out}");
+    // Which end of the whole stair is its foot is read as one run's is: from the south end of it, and `flip`
+    // turns the whole of it round, runs and landings and all.
+    assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("north"), json!([7500.0, 3300.0])), "{out}");
+    // Each run is a tread shorter than its risers, so the two of them together measure two treads short.
+    assert_eq!((out["length"].clone(), out["going"].clone()), (json!(2240.0), json!(280.0)), "{out}");
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_stair", told).expect("it builds");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 10, 300.0)], "{out}");
+    assert_eq!(landings_of(&s), vec![vec![(5.0, 90.0)]], "{out}");
+    // Turned round, the run that stood at the top is the one at the foot, and the turn with it: what was a
+    // quarter to the left climbed the other way is a quarter to the right.
+    let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "flip": true})).expect("the other way");
+    assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("east"), json!([5880.0, 4920.0])), "{out}");
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": -90.0, "which": "right", "off": 0.0}]), "{out}");
+    // And told it does not turn, the stair is the one run the reading was taken from and nothing is joined on.
+    let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "turns": false})).expect("one run");
+    assert_eq!((out["steps"].clone(), out["landings"].clone()), (json!(5), json!([])), "{out}");
 }
 
 #[test]

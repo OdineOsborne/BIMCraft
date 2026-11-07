@@ -1965,6 +1965,17 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["south-west", "sud-ovest"],
     ["south", "sud"],
     ["south-east", "sud-est"],
+    ["One run only", "Una rampa sola"],
+    ["After {} risers it turns {}.", "Dopo {} alzate gira {}."],
+    [
+        "The landing it is built with puts the next run {} mm from where the plan draws it.",
+        "Il pianerottolo con cui viene costruita mette la rampa successiva a {} mm da dove la disegna la pianta.",
+    ],
+    ["left", "a sinistra"],
+    ["right", "a destra"],
+    ["back left", "indietro a sinistra"],
+    ["back right", "indietro a destra"],
+    ["straight on", "sempre dritto"],
     [
         "{} walls, {} m, of {} lines long enough to be a wall's face.",
         "{} muri, {} m, su {} linee abbastanza lunghe da essere la faccia di un muro.",

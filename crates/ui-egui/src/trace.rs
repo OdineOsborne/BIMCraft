@@ -91,6 +91,9 @@ pub(crate) struct TraceDialog {
     /// the ones it could be (none: the highest of them, which is what the command picks for itself).
     pub(crate) slab: Option<Value>,
     pub(crate) under: Option<f64>,
+    /// Whether the stair is held to the one run the reading was taken from, where the plan joins runs that are no
+    /// flight of it.
+    pub(crate) alone: bool,
     /// The Walls tab's reading of the stair the plan draws, with the flight picked out of the runs of lines it
     /// found (none: the longest that could be a stair, which is what the command picks for itself) and whether it
     /// was turned round, since which end of a run is its foot is the one thing a plan draws nothing of.
@@ -153,6 +156,9 @@ impl TraceDialog {
         }
         if self.turned {
             p["flip"] = json!(true);
+        }
+        if self.alone {
+            p["turns"] = json!(false);
         }
         if apply {
             p["apply"] = json!(true);
@@ -1001,6 +1007,11 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     if read_stair && ui.checkbox(&mut d.turned, t("It climbs the other way")).changed() {
         *stair = Some(d.stair_params(false));
     }
+    // A stair that turns is drawn as a run for each flight of it, and the runs joined on to the one read are read
+    // with it; where what the plan joins on is no flight of this stair, this holds it to the one run.
+    if read_stair && ui.checkbox(&mut d.alone, t("One run only")).changed() {
+        *stair = Some(d.stair_params(false));
+    }
     if ui.add_enabled(read_stair, Button::new(t("Build This Stair"))).clicked() {
         *stair = Some(d.stair_params(true));
     }
@@ -1009,8 +1020,9 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     }
 }
 
-/// What the last reading of the stair said: how it climbs, how wide and which way; and where two risers and a
-/// going come to no stair anyone climbs, which is what says a count read off a cut plan is short.
+/// What the last reading of the stair said: how it climbs, how wide and which way, the landings between its runs,
+/// and where two risers and a going come to no stair anyone climbs, which is what says a count read off a cut plan
+/// is short.
 fn stair_shown(ui: &mut Ui, report: &Value) {
     let said = |key: &str| report[key].as_f64().map(|v| format!("{v:.0}"));
     match (said("height"), report["risers"].as_u64(), said("riser"), said("going")) {
@@ -1027,6 +1039,17 @@ fn stair_shown(ui: &mut Ui, report: &Value) {
     }
     if let (Some(width), Some(climbs)) = (said("width"), report["climbs"].as_str()) {
         ui.label(RichText::new(tf("It is {} mm wide and climbs {}.", &[&width, t(climbs)])).color(pal().muted));
+    }
+    // The landings between its runs: each turn in a word, and, where a built landing puts the next run somewhere
+    // else than the plan draws it, how far off — a built landing is as deep as the stair is wide, and a drawn one
+    // is under no such rule.
+    for l in report["landings"].as_array().into_iter().flatten() {
+        let (Some(at), Some(which)) = (l["at"].as_f64(), l["which"].as_str()) else { continue };
+        ui.label(RichText::new(tf("After {} risers it turns {}.", &[&format!("{at:.0}"), t(which)])).color(pal().muted));
+        if let Some(off) = l["off"].as_f64().filter(|off| *off > 1.0) {
+            let said = tf("The landing it is built with puts the next run {} mm from where the plan draws it.", &[&format!("{off:.0}")]);
+            ui.label(RichText::new(said).color(pal().muted));
+        }
     }
     if report["comfortable"].as_bool() == Some(false)
         && let Some(ratio) = said("ratio")
@@ -1176,6 +1199,7 @@ impl BimApp {
             gables: None,
             slab: None,
             under: None,
+            alone: false,
             stair: None,
             flight: None,
             turned: false,

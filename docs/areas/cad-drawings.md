@@ -719,10 +719,29 @@ one thing neither says on its own, `riser`, and that is held against the rule th
 code written since: two risers and a going come to about 630 mm on a stair anyone climbs (`ratio`,
 `comfortable`), which is what says a count read off a cut plan is short.
 
-Which end of a run is its foot is the one thing a plan draws nothing of. The run is read from its south end, or
-from its west where it runs east and west, `flip` turns it round, and `start` and `climbs` say where that puts it.
+A stair that turns is drawn as a run for each flight of it, one joined on to the next where a landing stands
+between them, so the runs joined on to the one read are read with it. Two runs are joined where the foot of one
+stands off the head of the other — no nearer than a step and a half, so a line drawn across a flight is no
+landing, and no further than two and a half times the width, which is as far as a landing reaches — and where the
+turn between them is one a stair is built with: straight on, a quarter to the left or the right, or back beside
+itself. The nearest is taken, out from the run read in both directions, up to eight runs in all. `run` says which
+run of the stair each flight in the list is, counted from the foot, and `landings` is the turn between each two:
+`at` how many risers up it stands, which is as many as the runs below it draw lines, `turn` the degrees and
+`which` that in a word. `turns: false` holds the reading to the one run.
 
-Measured on the permesso di costruire: the plan of the ground floor holds one flight and it measures like a stair
+A built landing is as deep as the stair is wide, and a drawn one is under no such rule, so `off` says how far the
+landing that is built puts the next run's foot from where the plan draws it: the stair is laid out as it would be
+built (`stairs::stair`) and measured against the drawing, rather than the drawing being trusted or the difference
+passed over.
+
+Which end of a run is its foot is the one thing a plan draws nothing of — but a run joined on to another has only
+the one end that can be its foot, so the runs are read in one piece and which end of the whole of it is the foot
+is read as one run's is: from its south end, or from its west where it runs east and west. `flip` turns the whole
+of it round, runs and landings and all, so what was a quarter to the left climbed the other way is a quarter to
+the right, and `start` and `climbs` say where that puts it.
+
+Measured on the permesso di costruire: the plan of the ground floor holds one flight and no second run joined on
+to it, and it measures like a stair
 — **12 steps 280 mm apart and 1000 mm wide**, climbing **north** up the east side of the north wing, where the
 survey draws it. Over the 3 m to the level above that is a riser of 250 and a ratio of **780**, which is no stair
 anyone climbs: either the flight turns, or the plan draws only the steps under its cut. Told `risers` 17 the ratio
@@ -839,10 +858,12 @@ window. A refusal is said inside the window, where it is read beside the button 
 
 The stair, at the foot of the same tab: **Read the Stair** runs `cad_stair` over the same sheet the walls are
 read from and says how far it climbs, in how many risers of what height, how deep each step is, how wide it is
-and which way it climbs. **Which flight** beside it holds every run of lines found, each by how many steps it has
-and how far apart, the one that measures like a stair being taken until another is picked; **It climbs the other
-way** turns it round, since a plan draws the steps and not which end is the foot. **Build This Stair** builds it,
-and where two risers and a going come to no stair anyone climbs, that is said in red rather than passed over.
+and which way it climbs, and after how many risers it turns which way where the plan joins a second run on to the
+first. **Which flight** beside it holds every run of lines found, each by how many steps it has and how far
+apart, the one that measures like a stair being taken until another is picked; **It climbs the other way** turns
+it round, since a plan draws the steps and not which end is the foot, and **One run only** holds the stair to the
+one run read where what the plan joins on is no flight of it. **Build This Stair** builds it, and where two risers
+and a going come to no stair anyone climbs, that is said in red rather than passed over.
 
 **Heights** is everything an elevation says of the storey it draws: the elevation to read it off, the plan whose
 walls and openings they are, the height the storey's floor stands at (0 is not said), and then four groups, the
