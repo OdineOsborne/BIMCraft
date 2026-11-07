@@ -734,6 +734,25 @@ landing that is built puts the next run's foot from where the plan draws it: the
 built (`stairs::stair`) and measured against the drawing, rather than the drawing being trusted or the difference
 passed over.
 
+A quarter turn is often carried not on a flat landing but on fanned treads, which fill the same square and climb
+while they turn. A plan draws their risers radiating from the corner on the inside of the turn, where parallel
+steps would stand, so `trace::flights` passes them over entirely — and that corner is exactly where the reading
+knows to look: it is the end of the run's top riser the turn goes toward. `trace::rays` gathers the lines a plan
+draws out from a point, and `winders` counts the ones that belong to the fan — inside the square the turn fills,
+out to its edge, and far enough round the turn to be neither of the two lines that bound it. Those two are the
+runs' own top and bottom risers, drawn already, so the treads are one more than the lines found between them.
+A door's swing and every corner of two walls are drawn out from a point too, which is why none of that measure
+lives in `trace`: where nothing stands at that corner, or where more lines do than a stair is ever built with,
+the turn is read as a flat landing, because no count is better than a wrong one.
+
+A fan climbs `winders - 1` risers a flat landing does not — its first tread stands where the landing would and
+the run above it leaves where it would, so what the fan adds is the treads between those two. That is why `risers`
+can be more than `steps`, and why `length`, which is what the runs are walked along, leaves those risers out.
+A stair is built with them the same way: `Landing { winders }` cuts the landing's square into that many wedges
+from the corner (`stairs::fan`), each a riser above the last, with the walk line through the middle of each, half
+the width out from the corner. `Model::check` holds it to a quarter turn, to 2 to `MOST_WINDERS` treads, and to a
+stair rather than a ramp, and `Model::flight` leaves the risers it turns on out of every run's length.
+
 Which end of a run is its foot is the one thing a plan draws nothing of — but a run joined on to another has only
 the one end that can be its foot, so the runs are read in one piece and which end of the whole of it is the foot
 is read as one run's is: from its south end, or from its west where it runs east and west. `flip` turns the whole
@@ -747,6 +766,10 @@ survey draws it. Over the 3 m to the level above that is a riser of 250 and a ra
 anyone climbs: either the flight turns, or the plan draws only the steps under its cut. Told `risers` 17 the ratio
 comes to 633 and the rule of thumb is satisfied, and the run then reaches past the wing — the reading says both
 and settles neither, because the drawing does not.
+
+Nor is there a fan there: `landings` comes back empty, so there is no turn, and a fan is what carries a turn.
+That is also the limit of the reading, said plainly — it looks for a fan only at a turn between two runs, so a
+fan drawn with nothing joined on above it is not read. On this plan there is nothing for one to turn into.
 
 ## The slab under the floor of a storey
 

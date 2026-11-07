@@ -330,18 +330,19 @@ fn the_walls_tab_builds_the_stair_the_plan_draws_at_the_going_it_draws_it() {
     press(&mut h, "Read the Stair");
     // The going and the width are what a plan draws at the size they are built to; how high one step rises is
     // the storey's, which is where the level above stands. Both runs the plan draws are this one stair's.
-    assert!(says(&h, "This stair climbs 3000 mm in 10 risers of 300 mm, each step 280 mm deep."), "what it read");
+    // The two runs draw ten steps between them and the fan turns on two risers more, so it climbs in twelve.
+    assert!(says(&h, "This stair climbs 3000 mm in 12 risers of 250 mm, each step 280 mm deep."), "what it read");
     assert!(says(&h, "It is 1000 mm wide and climbs north."));
-    assert!(says(&h, "After 5 risers it turns left."), "the landing between its two runs");
-    // Ten risers up three metres is still a ladder, and the rule of thumb says so rather than letting it pass.
-    assert!(says(&h, "Two risers and a going come to 880 mm"));
+    assert!(says(&h, "After 5 risers it turns left on 3 fanned treads."), "the fan between its two runs");
+    // Twelve risers up three metres is still steep, and the rule of thumb says so rather than letting it pass.
+    assert!(says(&h, "Two risers and a going come to 780 mm"));
     assert!(stairs_of(&h).is_empty(), "a reading builds nothing");
     press(&mut h, "Build This Stair");
-    assert_eq!(stairs_of(&h), vec![(1000.0, 280.0, 10)], "as deep and as wide as the plan draws it");
-    // Held to the one run the reading was taken from, the stair is that run and the landing is gone.
+    assert_eq!(stairs_of(&h), vec![(1000.0, 280.0, 12)], "as deep and as wide as the plan draws it");
+    // Held to the one run the reading was taken from, the stair is that run and the fan with it is gone.
     pick(&mut h, Role::CheckBox, "One run only");
     assert!(says(&h, "This stair climbs 3000 mm in 5 risers of 600 mm, each step 280 mm deep."), "one run");
-    assert!(!says(&h, "After 5 risers it turns left."), "nothing joined on");
+    assert!(!says(&h, "After 5 risers it turns left on 3 fanned treads."), "nothing joined on");
 }
 
 /// Every stair of the project: how wide it is, the going of one step, and how many risers it climbs in.
@@ -427,13 +428,17 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
         lines.push(("MURI".to_string(), [x0, 150.0, x1, 150.0]));
     }
     // A stair that turns, standing in the plan against its north wall: five steps 280 apart and 1000 wide
-    // climbing north, a quarter turn to the left, and five more climbing west.
+    // climbing north, a quarter turn to the left on three fanned treads, and five more climbing west. The two
+    // risers between those treads are drawn out from the corner on the inside of the turn, a third of it apart.
     for n in 0..5 {
         let y = 3300.0 + 280.0 * f64::from(n);
         lines.push(("SCALA".to_string(), [7000.0, y, 8000.0, y]));
         let x = 7000.0 - 280.0 * f64::from(n);
         lines.push(("SCALA".to_string(), [x, 4420.0, x, 5420.0]));
     }
+    let third = 1000.0 / 3.0_f64.sqrt();
+    lines.push(("SCALA".to_string(), [7000.0, 4420.0, 8000.0, 4420.0 + third]));
+    lines.push(("SCALA".to_string(), [7000.0, 4420.0, 7000.0 + third, 5420.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));
     // And the underside of the slab this floor is, 260 mm under it: the slab between the two lines.

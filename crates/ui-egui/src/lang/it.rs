@@ -1967,6 +1967,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["south-east", "sud-est"],
     ["One run only", "Una rampa sola"],
     ["After {} risers it turns {}.", "Dopo {} alzate gira {}."],
+    ["After {} risers it turns {} on {} fanned treads.", "Dopo {} alzate gira {} su {} gradini a ventaglio."],
     [
         "The landing it is built with puts the next run {} mm from where the plan draws it.",
         "Il pianerottolo con cui viene costruita mette la rampa successiva a {} mm da dove la disegna la pianta.",

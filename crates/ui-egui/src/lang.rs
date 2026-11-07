@@ -2736,6 +2736,11 @@ const WORDS: &[[&str; 3]] = &[
     ["One run only", "Apenas um lanço", "Solo un tramo"],
     ["After {} risers it turns {}.", "Depois de {} espelhos vira {}.", "Tras {} contrahuellas gira {}."],
     [
+        "After {} risers it turns {} on {} fanned treads.",
+        "Depois de {} espelhos vira {} em {} degraus em leque.",
+        "Tras {} contrahuellas gira {} en {} peldaños en abanico.",
+    ],
+    [
         "The landing it is built with puts the next run {} mm from where the plan draws it.",
         "O patamar com que é construída põe o lanço seguinte a {} mm de onde a planta o desenha.",
         "La meseta con que se construye sitúa el tramo siguiente a {} mm de donde lo dibuja la planta.",

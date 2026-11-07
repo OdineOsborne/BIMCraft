@@ -1679,6 +1679,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["south-east", "东南"],
     ["One run only", "仅此一段"],
     ["After {} risers it turns {}.", "在 {} 级踏步之后转向{}。"],
+    ["After {} risers it turns {} on {} fanned treads.", "在 {} 级踏步之后转向{}，共 {} 级扇形踏步。"],
     ["The landing it is built with puts the next run {} mm from where the plan draws it.", "所建平台使下一段距平面图所绘位置 {} 毫米。"],
     ["left", "左"],
     ["right", "右"],

@@ -1045,7 +1045,12 @@ fn stair_shown(ui: &mut Ui, report: &Value) {
     // is under no such rule.
     for l in report["landings"].as_array().into_iter().flatten() {
         let (Some(at), Some(which)) = (l["at"].as_f64(), l["which"].as_str()) else { continue };
-        ui.label(RichText::new(tf("After {} risers it turns {}.", &[&format!("{at:.0}"), t(which)])).color(pal().muted));
+        let risers = format!("{at:.0}");
+        let said = match l["winders"].as_u64().unwrap_or(0) {
+            0 => tf("After {} risers it turns {}.", &[&risers, t(which)]),
+            on => tf("After {} risers it turns {} on {} fanned treads.", &[&risers, t(which), &on.to_string()]),
+        };
+        ui.label(RichText::new(said).color(pal().muted));
         if let Some(off) = l["off"].as_f64().filter(|off| *off > 1.0) {
             let said = tf("The landing it is built with puts the next run {} mm from where the plan draws it.", &[&format!("{off:.0}")]);
             ui.label(RichText::new(said).color(pal().muted));

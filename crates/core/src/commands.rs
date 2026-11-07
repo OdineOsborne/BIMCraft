@@ -393,9 +393,20 @@ pub static ALL: &[Command] = &[
          stands between them, so the runs joined on to the one read are read with it: `run` says which of them \
          each flight in the list is, counted from the foot, and `landings` is the turn between each two — `at` \
          how many risers up it stands, `turn` the degrees it turns (0 straight on, 90 or -90 a quarter to the \
-         left or the right, 180 or -180 back beside the run), `which` that in a word, and `off` how far the \
+         left or the right, 180 or -180 back beside the run), `which` that in a word, `winders` how many fanned \
+         treads it turns on (0 where the landing is flat), and `off` how far the \
          landing that is built puts the next run's foot from where the plan draws it, a built landing being as \
          deep as the stair is wide and a drawn one under no such rule. `turns: false` reads the one run alone. \
+         \
+         A quarter turn carried on fanned treads instead of a flat landing is drawn with the risers of them \
+         radiating from the corner on the inside of the turn, where parallel steps would stand, so `flights` \
+         passes them over and `winders` counts them: the two lines that bound a fan are the runs' own top and \
+         bottom risers, drawn already, so the treads are one more than the lines drawn out from that corner \
+         between them — inside the square the turn fills, out to its edge, and far enough round it to be \
+         neither of those two. A fan climbs `winders - 1` risers more than a flat landing would, which is why \
+         `risers` can be more than `steps`, and `length`, which is what the runs are walked along, leaves them \
+         out. Where nothing stands at that corner, or where more lines do than a stair is ever built with (a \
+         symbol, a hatch), the turn is read as a flat landing: no count is better than a wrong one. \
          \
          `height` is how far it climbs: where the level above stands, or what `height` says, and `height_from` \
          which it was. `risers` is how many it climbs in, which is how many steps the plan draws, since the lines \
@@ -749,11 +760,15 @@ pub static ALL: &[Command] = &[
         "stair",
         "Stair",
         &[],
-        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, riser?, tread?, landings?: [{at, turn?}, …], \
-         railings?} a stair from the middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to the next level: \
+        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, riser?, tread?, landings?: [{at, turn?, \
+         winders?}, …], railings?} a stair from the middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to \
+         the next level: \
          as many risers as keep each at most `riser` mm (180), treads `tread` deep (280), `width` wide (1000). One straight \
          run, as long as that makes it; or with landings (each as deep as the stair is wide) after `at` risers, the next run \
          going on as `turn` says: 0 straight on, 90 or -90 turned left or right, 180 or -180 back beside it, to its left or right. \
+         `winders` carries a quarter turn on that many fanned treads instead of a flat landing (2 to 12): the same square, cut \
+         into wedges from the corner on the inside of the turn, each a riser above the last, so the turn climbs `winders - 1` \
+         risers a flat landing does not and the run above it is that much shorter. \
          With `railings`, a railing down each side too",
         stair,
     ),
@@ -3635,6 +3650,12 @@ const TURN_SLACK: f64 = 10.0;
 
 /// How many runs of one stair are read at most.
 const MOST_RUNS: usize = 8;
+/// How near the corner of a turn a line must end to be drawn out from it, as a share of how wide the stair is.
+const FAN_NEAR: f64 = 0.2;
+/// How far outside the square of a turn a fanned tread's riser may be drawn, as a share of how wide it is.
+const FAN_SLACK: f64 = 0.1;
+/// How far round the turn a line must stand to be a riser inside the fan and not one of the runs' own, in degrees.
+const FAN_APART: f64 = 5.0;
 
 /// The turn a stair is built with that takes it from heading `a` to heading `b`, in degrees: straight on, a
 /// quarter to the left or to the right, or back beside itself, to the left of the run or to its right — which
@@ -3834,14 +3855,70 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
             _ => None,
         })
         .collect();
-    // How many steps each run draws, and the risers each landing stands above: as many as the runs below it draw
-    // lines, because the lines of a flight are its risers.
+    // How many steps each run draws: the lines of a flight are its risers.
     let drawn: Vec<usize> = runs.iter().filter_map(|(j, ..)| found.get(*j).map(|f| f.steps.len())).collect();
+    // The corner a quarter turn stands on, and how wide the run below it is drawn: a quarter turn fills a square
+    // at the head of that run, and the corner is the end of its top riser the turn goes toward, which is the
+    // corner on the inside of it. A fan's risers are the lines drawn out from there, and nothing else is.
+    let corner = |n: usize| {
+        let (&(j, _, head, way), &turn) = (runs.get(n)?, turning.get(n)?);
+        let (f, side) = (found.get(j)?, heading(way).perp() * turn.signum());
+        let top = f.steps.iter().copied().min_by(|a, b| mid(Some(a)).dist(head).total_cmp(&mid(Some(b)).dist(head)))?;
+        let at = match side.dot(top[0] - head) > 0.0 {
+            true => top[0],
+            false => top[1],
+        };
+        (turn.abs() == 90.0).then_some((at, f.width, heading(way).perp() * -turn.signum(), heading(way)))
+    };
+    let corners: Vec<Option<(P2, f64, P2, P2)>> = (0..turning.len()).map(corner).collect();
+    let asked: Vec<P2> = corners.iter().flatten().map(|(at, ..)| *at).collect();
+    let near = corners.iter().flatten().map(|(_, w, ..)| w * FAN_NEAR).fold(0.0, f64::max);
+    // The lines the plan draws out from each of those corners, which is how it draws the risers of fanned treads.
+    let drawn_out = match asked.is_empty() {
+        true => Vec::new(),
+        false => crate::trace::rays(&s.model, &u, &how, &asked, near).map_err(|e| bad(c, e))?,
+    };
+    // How many treads each turn is carried on: the two lines that bound a fan are the runs' own risers, drawn
+    // already, so the treads are one more than the lines drawn between them — inside the square, out to its
+    // edge, and far enough round the turn to be neither of those two. None where nothing stands there, and none
+    // where more lines do than a stair is ever built with: that is a symbol or a hatch, and no count at all is
+    // better than a wrong one.
+    let mut took = 0;
+    let fans: Vec<u32> = corners
+        .iter()
+        .map(|held| {
+            let Some((at, w, a, b)) = held else { return 0 };
+            let rays = drawn_out.get(took).map(Vec::as_slice).unwrap_or_default();
+            took += 1;
+            let inside = rays
+                .iter()
+                .filter(|[_, far]| {
+                    let (s, t) = (a.dot(*far - *at), b.dot(*far - *at));
+                    let slack = w * FAN_SLACK;
+                    (-slack..=w + slack).contains(&s)
+                        && (-slack..=w + slack).contains(&t)
+                        && s.max(t) >= w - slack
+                        && (FAN_APART..=90.0 - FAN_APART).contains(&t.atan2(s).to_degrees())
+                })
+                .count();
+            match inside {
+                0 => 0,
+                n if n + 1 > crate::model::MOST_WINDERS as usize => 0,
+                n => n as u32 + 1,
+            }
+        })
+        .collect();
+    // The risers a fan climbs that a flat landing does not: its first tread stands where the landing would and
+    // the run above it leaves where it would, so what the fan adds is the treads between those two.
+    let over: Vec<f64> = fans.iter().map(|w| f64::from(w.saturating_sub(1))).collect();
+    let fanned: f64 = over.iter().sum();
+    // The risers each landing stands above: as many as the runs below it draw lines, the fans below it counted in.
     let breaks: Vec<f64> = drawn
         .iter()
         .take(drawn.len().saturating_sub(1))
-        .scan(0.0, |up, n| {
-            *up += *n as f64;
+        .zip(std::iter::once(0.0).chain(over.iter().copied()))
+        .scan(0.0, |up, (n, below)| {
+            *up += *n as f64 + below;
             Some(*up)
         })
         .collect();
@@ -3880,8 +3957,9 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
     let going = told_going.or_else(|| foot_run.map(|f| (f.going * 100.0).round() / 100.0));
     let width = told_width.or_else(|| foot_run.map(|f| (f.width * 100.0).round() / 100.0));
     // How many risers it climbs in: as many as its runs draw lines together, because the lines of a flight are
-    // its risers and the stair starts at the first of them. A plan cut partway up draws only those under the cut.
-    let risers = told_risers.or_else(|| (!runs.is_empty()).then(|| drawn.iter().sum()));
+    // its risers and the stair starts at the first of them, and one more for each riser its fans turn on beyond
+    // their first tread. A plan cut partway up draws only those under the cut.
+    let risers = told_risers.or_else(|| (!runs.is_empty()).then(|| drawn.iter().sum::<usize>() + fanned as usize));
     let riser = match (height, risers) {
         (Some(height), Some(risers)) if risers > 0 => Some(height / risers as f64),
         _ => None,
@@ -3892,8 +3970,9 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
     };
     // Told fewer risers than the plan draws steps below the landing at the top, there is nothing left of the
     // stair for the run above it, and a run of fewer than two risers is no run.
-    if let (Some(last), Some(risers)) = (breaks.last(), risers)
-        && *last as usize + 2 > risers
+    let top = breaks.last().map(|last| last + over.last().copied().unwrap_or(0.0));
+    if let (Some(last), Some(risers)) = (top, risers)
+        && last as usize + 2 > risers
     {
         return Err(bad(
             c,
@@ -3903,7 +3982,13 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
             ),
         ));
     }
-    let landings: Vec<Landing> = breaks.iter().copied().zip(turning.iter().copied()).map(|(at, turn)| Landing { at, turn }).collect();
+    let landings: Vec<Landing> = breaks
+        .iter()
+        .copied()
+        .zip(turning.iter().copied())
+        .zip(fans.iter().copied())
+        .map(|((at, turn), winders)| Landing { at, turn, winders })
+        .collect();
     let st = match (runs.first(), going, width, height, riser) {
         (Some((_, start, _, way)), Some(going), Some(width), Some(height), Some(riser)) if riser > 0.0 => Some(Stair {
             params: Default::default(),
@@ -3934,7 +4019,7 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
                 .and_then(|laid| laid.runs.get(n + 1))
                 .zip(runs.get(n + 1))
                 .map(|(built, (_, foot, ..))| hundredth(built.start.dist(*foot)));
-            json!({"at": l.at, "turn": l.turn, "which": turn_word(l.turn), "off": off})
+            json!({"at": l.at, "turn": l.turn, "which": turn_word(l.turn), "winders": l.winders, "off": off})
         })
         .collect();
     let mut out = json!({
@@ -3946,7 +4031,9 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         "going": going.map(hundredth),
         "width": width.map(hundredth),
         "length": match (going, risers) {
-            (Some(going), Some(risers)) => Some(hundredth(going * (risers.saturating_sub(runs.len().max(1))) as f64)),
+            (Some(going), Some(risers)) => {
+                Some(hundredth(going * (risers.saturating_sub(runs.len().max(1)).saturating_sub(fanned as usize)) as f64))
+            }
             _ => None,
         },
         "start": runs.first().map(|(_, foot, ..)| [hundredth(foot.0), hundredth(foot.1)]),

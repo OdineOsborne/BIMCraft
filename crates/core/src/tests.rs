@@ -3003,6 +3003,55 @@ fn stairs_turn_at_landings_into_several_runs() {
 }
 
 #[test]
+fn a_stair_turns_on_fanned_treads_where_its_landing_has_winders() {
+    let mut s = Session::new();
+    house(&mut s);
+    // 17 risers of 176.47 mm up to Level 2: 8 north, a quarter turn to the right on three fanned treads in the
+    // metre square at the head of that run, then the rest east. The fan takes the landing's place, so it stands
+    // where the landing would and the run above it starts where it would, two risers higher for the two risers
+    // the fan climbs that a flat landing does not.
+    let st = run(&mut s, "stair", json!({"start": [1000, 1000], "angle": 90, "landings": [{"at": 8, "turn": -90, "winders": 3}]}))["id"]
+        .as_u64()
+        .unwrap();
+    let e = element(&mut s, st);
+    assert_eq!(e["risers"], 17);
+    assert_eq!(e["landings"], json!([{"at": 8.0, "turn": -90.0, "winders": 3}]), "{e}");
+    // The run above it is two risers shorter than it would be over a flat landing, and starts where that would
+    // have put it: a fan is as deep as the stair is wide, the same square.
+    assert_eq!(e["runs"], json!([[[1000.0, 1000.0], [1000.0, 2960.0]], [[1500.0, 3460.0], [3180.0, 3460.0]]]), "{e}");
+    assert_eq!(e["length"], json!(3640.0), "13 treads walked, where a flat landing leaves 15");
+    // Three treads in the square instead of one landing, each a riser above the last.
+    let each = 3000.0 / 17.0;
+    let tops = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&st).copied();
+    for (x, y, risers, which) in
+        [(760.0, 3060.0, 8.0, "the first"), (1000.0, 3460.0, 9.0, "the second"), (1400.0, 3700.0, 10.0, "the third")]
+    {
+        let at = tops(&s, x, y);
+        assert!(at.is_some_and(|z| (z - risers * each).abs() < 1e-6), "{which} fanned tread, {risers} risers up: {at:?}");
+    }
+    // What a fan is not: a turn it cannot be built on, one tread, more than a stair is built with, and a run
+    // above it left with fewer than two risers.
+    for (landings, why) in [
+        (json!([{"at": 8, "turn": 0, "winders": 3}]), "quarter"),
+        (json!([{"at": 8, "turn": 180, "winders": 3}]), "quarter"),
+        (json!([{"at": 8, "turn": -90, "winders": 1}]), "fanned"),
+        (json!([{"at": 8, "turn": -90, "winders": 99}]), "fanned"),
+        (json!([{"at": 14, "turn": -90, "winders": 3}]), "risers"),
+    ] {
+        let e = s.execute("modify", &json!({"id": st, "landings": landings})).unwrap_err();
+        assert!(e.contains(why), "{landings}: {e}");
+    }
+    // Mirrored, the fan turns the other way and keeps its treads.
+    run(&mut s, "mirror", json!({"ids": [st], "axis": [[4000, 0], [4000, 1000]]}));
+    assert_eq!(element(&mut s, st)["landings"], json!([{"at": 8.0, "turn": 90.0, "winders": 3}]));
+    // A ramp has no fanned treads: its landings are flat.
+    let e = s
+        .execute("ramp", &json!({"start": [-4000, -6000], "angle": 0, "height": 600, "landings": [{"at": 300, "turn": 90, "winders": 3}]}))
+        .unwrap_err();
+    assert!(e.contains("ramp"), "{e}");
+}
+
+#[test]
 fn ramps_climb_at_their_slope_with_landings_between_runs() {
     let mut s = Session::new();
     house(&mut s);

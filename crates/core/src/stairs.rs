@@ -46,21 +46,35 @@ pub struct Layout {
     pub width: f64,
 }
 
+/// What a stair or a ramp does between two of its runs: how far round it turns, on how many fanned
+/// treads it turns there (none for a flat landing), and how far it climbs while it turns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Turn {
+    pub turn: f64,
+    pub winders: u32,
+    pub rise: f64,
+}
+
 /// Runs of `(length, heights, risers)` from `start` toward `angle` degrees, `width` wide, and a
 /// landing after each but the last, as deep as they're wide, the next run going on as `turns` say:
 /// straight on (0), left or right (90, -90), or back beside it, to its left or right (180, -180).
-fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, turns: &[f64]) -> Layout {
+/// A quarter turn on fanned treads has that square cut into wedges instead, each a riser higher.
+fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, turns: &[Turn]) -> Layout {
     let (mut at, mut u) = (start, heading(angle));
     let mut out = Layout { runs: Vec::new(), pads: Vec::new(), walk: Vec::new(), width };
     for (i, (length, z, risers)) in runs.into_iter().enumerate() {
         let run = Run { start: at, u, length, z, risers };
         out.walk.extend([(run.start, z.0), (run.end(), z.1)]);
         out.runs.push(run);
-        let Some(&turn) = turns.get(i) else { break };
+        let Some(&Turn { turn, winders, rise }) = turns.get(i) else { break };
         let (e, n, w) = (run.end(), u.perp(), width);
         // Across the landing from the run's right edge to its left, and how far it reaches past the
         // run: to the next run's far edge, beside it when it turns back.
         let side = n * if turn > 0.0 { 1.0 } else { -1.0 };
+        if winders >= 2 && turn.abs() == 90.0 {
+            (at, u) = (fan(&mut out, e, u, side, w, winders, rise, z.1), side);
+            continue;
+        }
         let (ring, via, next, dir) = if turn == 0.0 {
             (vec![e - n * (w / 2.0), e - n * (w / 2.0) + u * w, e + n * (w / 2.0) + u * w, e + n * (w / 2.0)], vec![], e + u * w, u)
         } else if turn.abs() == 90.0 {
@@ -77,29 +91,75 @@ fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, t
     out
 }
 
+/// The fanned treads of a quarter turn, added to `out`: the square the landing would stand in, from
+/// the run's end `e` along `u` and over to `side`, cut into `winders` wedges by rays out from the
+/// corner on the inside of the turn, each wedge a share of `rise` above the run's top `z`, and the
+/// walk line through the middle of each. Where the run above it leaves, which is where a flat
+/// landing would have left it.
+#[allow(clippy::too_many_arguments)]
+fn fan(out: &mut Layout, e: P2, u: P2, side: P2, w: f64, winders: u32, rise: f64, z: f64) -> P2 {
+    // Held to what a stair is built with whoever asks: a count out of a file or a command is checked after the
+    // model is changed and not before it is drawn, and a wedge for each of four billion treads is no drawing.
+    let winders = winders.clamp(2, crate::model::MOST_WINDERS);
+    let (pivot, a, b) = (e + side * (w / 2.0), side * -1.0, u);
+    let (k, far) = (f64::from(winders), pivot + a * w + b * w);
+    // Where a ray out from the corner, `t` of the way round the turn, meets the edge of the square,
+    // and where the walk line crosses it, half the width out.
+    let ray = |t: f64| {
+        let (c, s) = ((t * std::f64::consts::FRAC_PI_2).cos(), (t * std::f64::consts::FRAC_PI_2).sin());
+        (a * c + b * s, if s <= c { a * w + b * (w * s / c) } else { a * (w * c / s) + b * w })
+    };
+    for j in 0..winders {
+        let (t0, t1) = (f64::from(j) / k, f64::from(j + 1) / k);
+        let (first, last) = (ray(t0), ray(t1));
+        let mut ring = vec![pivot, pivot + first.1];
+        // Past the far corner of the square the wedge has four sides and not three.
+        if t0 < 0.5 && t1 > 0.5 {
+            ring.push(far);
+        }
+        ring.push(pivot + last.1);
+        let up = z + rise * f64::from(j) / (k - 1.0);
+        out.pads.push(Pad { ring: ccw(ring), z: up });
+        out.walk.push((pivot + (first.0 + last.0).unit() * (w / 2.0), up));
+    }
+    pivot + b * (w / 2.0)
+}
+
 fn ccw(ring: Vec<P2>) -> Vec<P2> {
     if geom::area(&ring) < 0.0 { ring.into_iter().rev().collect() } else { ring }
 }
 
-/// A stair's runs: its risers split at its landings, each run a tread shorter than its risers.
+/// A stair's runs: its risers split at its landings, each run a tread shorter than its risers, and
+/// the risers a fan climbs turned on between two runs instead of walked along either.
 pub fn stair(m: &Model, st: &Stair) -> Layout {
     let (n, each, _) = m.flight(st);
     let base = m.elevation(st.level);
-    let mut breaks: Vec<u32> = vec![0];
-    breaks.extend(st.landings.iter().map(|l| (l.at.max(0.0).min(f64::from(n))) as u32));
-    breaks.push(n);
-    let runs = breaks
-        .windows(2)
-        .filter_map(|w| match *w {
-            [a, b] => Some((
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    let mut from = 0u32;
+    // A fan's own risers, held to what a stair is built with as [`fan`] holds them, so the runs it
+    // leaves between them are the runs it draws between them.
+    let fanned = |l: &crate::model::Landing| match l.winders {
+        0 | 1 => 0,
+        on => on.min(crate::model::MOST_WINDERS) - 1,
+    };
+    for l in &st.landings {
+        let at = (l.at.max(0.0).min(f64::from(n))) as u32;
+        spans.push((from.min(at), at));
+        from = at.saturating_add(fanned(l));
+    }
+    spans.push((from.min(n), n));
+    let runs = spans
+        .iter()
+        .map(|&(a, b)| {
+            (
                 f64::from(b.saturating_sub(a).saturating_sub(1)) * st.tread,
                 (base + f64::from(a) * each, base + f64::from(b) * each),
                 b.saturating_sub(a),
-            )),
-            _ => None,
+            )
         })
         .collect();
-    let turns: Vec<f64> = st.landings.iter().map(|l| l.turn).collect();
+    let turns: Vec<Turn> =
+        st.landings.iter().map(|l| Turn { turn: l.turn, winders: l.winders, rise: f64::from(fanned(l)) * each }).collect();
     chain(st.start, st.angle, st.width, runs, &turns)
 }
 
@@ -117,7 +177,7 @@ pub fn ramp(m: &Model, r: &Ramp) -> Layout {
             _ => None,
         })
         .collect();
-    let turns: Vec<f64> = r.landings.iter().map(|l| l.turn).collect();
+    let turns: Vec<Turn> = r.landings.iter().map(|l| Turn { turn: l.turn, winders: 0, rise: 0.0 }).collect();
     chain(r.start, r.angle, r.width, runs, &turns)
 }
 
@@ -217,15 +277,26 @@ mod tests {
     fn landings_turn_the_next_run_square_or_back() {
         let runs = vec![(1000.0, (0.0, 500.0), 0), (1000.0, (500.0, 1000.0), 0)];
         let near = |a: P2, b: P2| a.dist(b) < 1e-9;
-        let l = chain(P2(0.0, 0.0), 90.0, 1000.0, runs.clone(), &[-90.0]);
+        let l = chain(P2(0.0, 0.0), 90.0, 1000.0, runs.clone(), &[Turn { turn: -90.0, winders: 0, rise: 0.0 }]);
         // North, then a metre square landing, then east from its middle.
         assert!(near(l.runs[1].start, P2(500.0, 1500.0)) && near(l.runs[1].u, P2(1.0, 0.0)), "{:?}", l.runs[1]);
         assert!((geom::area(&l.pads[0].ring) - 1e6).abs() < 1e-6);
-        let back = chain(P2(0.0, 0.0), 90.0, 1000.0, runs.clone(), &[180.0]);
+        let back = chain(P2(0.0, 0.0), 90.0, 1000.0, runs.clone(), &[Turn { turn: 180.0, winders: 0, rise: 0.0 }]);
         assert!(near(back.runs[1].start, P2(-1000.0, 1000.0)) && near(back.runs[1].u, P2(0.0, -1.0)), "{:?}", back.runs[1]);
         assert!((geom::area(&back.pads[0].ring) - 2e6).abs() < 1e-6, "across both runs");
-        let on = chain(P2(0.0, 0.0), 90.0, 1000.0, runs, &[0.0]);
+        let on = chain(P2(0.0, 0.0), 90.0, 1000.0, runs.clone(), &[Turn { turn: 0.0, winders: 0, rise: 0.0 }]);
         assert!(near(on.runs[1].start, P2(0.0, 2000.0)));
         assert_eq!(on.walk.len(), 4);
+        // The same quarter turn carried on three fanned treads: the same square, cut into three from the corner
+        // on the inside of the turn, each a share of the rise above the run below it, and the run above leaving
+        // where the flat landing left it.
+        let fan = chain(P2(0.0, 0.0), 90.0, 1000.0, runs, &[Turn { turn: -90.0, winders: 3, rise: 200.0 }]);
+        assert!(near(fan.runs[1].start, P2(500.0, 1500.0)) && near(fan.runs[1].u, P2(1.0, 0.0)), "{:?}", fan.runs[1]);
+        assert_eq!(fan.pads.len(), 3);
+        assert!((fan.pads.iter().map(|p| geom::area(&p.ring)).sum::<f64>() - 1e6).abs() < 1e-6, "the whole square and no more");
+        assert_eq!(fan.pads.iter().map(|p| p.z).collect::<Vec<_>>(), vec![500.0, 600.0, 700.0]);
+        // The walk line goes through the middle of each of them, half the width out from the corner.
+        let turning: Vec<P2> = fan.walk.iter().skip(2).take(3).map(|(p, _)| *p).collect();
+        assert!(turning.iter().all(|p| (p.dist(P2(500.0, 1000.0)) - 500.0).abs() < 1e-6), "{turning:?}");
     }
 }

@@ -847,6 +847,27 @@ fn a_turning_stair() -> Session {
     a_plan_drawn_with(&more)
 }
 
+/// The same turning stair, with the fan its plan draws in the square between the two runs: the risers of three
+/// treads that carry the quarter turn, radiating from the inside corner of it instead of standing parallel. The
+/// first of them is the top riser of the run below and the last the bottom riser of the run above, both already
+/// drawn, so what the fan adds is the two between them.
+fn a_winder_stair() -> Session {
+    let mut more = String::new();
+    for n in 0..5 {
+        let y = 3300.0 + 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n{y}\n11\n8000\n21\n{y}\n"));
+        let x = 7000.0 - 280.0 * f64::from(n);
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n{x}\n20\n4420\n11\n{x}\n21\n5420\n"));
+    }
+    // A quarter turn on three treads: the two risers between them, a third of the turn apart, drawn from the
+    // corner they meet at out to the edge of the square.
+    let third = 1000.0 / 3.0_f64.sqrt();
+    for (x, y) in [(8000.0, 4420.0 + third), (7000.0 + third, 5420.0)] {
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n7000\n20\n4420\n11\n{x}\n21\n{y}\n"));
+    }
+    a_plan_drawn_with(&more)
+}
+
 /// The survey with `more` lines drawn in its plan, its two parts said and its walls traced from it, so what is
 /// drawn there has a storey to stand on.
 fn a_plan_drawn_with(more: &str) -> Session {
@@ -889,13 +910,14 @@ fn stairs_of(s: &Session) -> Vec<(f64, f64, u32, f64)> {
         .collect()
 }
 
-/// Every stair's landings: after how many risers each goes, and how far the next run turns.
-fn landings_of(s: &Session) -> Vec<Vec<(f64, f64)>> {
+/// Every stair's landings: after how many risers each goes, how far the next run turns, and on how many fanned
+/// treads it turns there (none where the landing is flat).
+fn landings_of(s: &Session) -> Vec<Vec<(f64, f64, u32)>> {
     s.model
         .elements
         .values()
         .filter_map(|e| match e {
-            Element::Stair(st) => Some(st.landings.iter().map(|l| (l.at, l.turn)).collect()),
+            Element::Stair(st) => Some(st.landings.iter().map(|l| (l.at, l.turn, l.winders)).collect()),
             _ => None,
         })
         .collect()
@@ -917,7 +939,7 @@ fn the_runs_a_plan_draws_end_to_end_are_one_stair_that_turns_at_the_landing_betw
     assert_eq!(said, vec![(json!(5), json!(0), json!(true)), (json!(5), json!(1), json!(true))], "{out}");
     // It climbs in as many risers as the two runs draw lines, and turns after the five the first of them draws.
     assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(10), json!(10)), "{out}");
-    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "off": 0.0}]), "{out}");
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "winders": 0, "off": 0.0}]), "{out}");
     // Which end of the whole stair is its foot is read as one run's is: from the south end of it, and `flip`
     // turns the whole of it round, runs and landings and all.
     assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("north"), json!([7500.0, 3300.0])), "{out}");
@@ -927,15 +949,38 @@ fn the_runs_a_plan_draws_end_to_end_are_one_stair_that_turns_at_the_landing_betw
     told["apply"] = json!(true);
     let out = run(&mut s, "cad_stair", told).expect("it builds");
     assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 10, 300.0)], "{out}");
-    assert_eq!(landings_of(&s), vec![vec![(5.0, 90.0)]], "{out}");
+    assert_eq!(landings_of(&s), vec![vec![(5.0, 90.0, 0)]], "{out}");
     // Turned round, the run that stood at the top is the one at the foot, and the turn with it: what was a
     // quarter to the left climbed the other way is a quarter to the right.
     let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "flip": true})).expect("the other way");
     assert_eq!((out["climbs"].clone(), out["start"].clone()), (json!("east"), json!([5880.0, 4920.0])), "{out}");
-    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": -90.0, "which": "right", "off": 0.0}]), "{out}");
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": -90.0, "which": "right", "winders": 0, "off": 0.0}]), "{out}");
     // And told it does not turn, the stair is the one run the reading was taken from and nothing is joined on.
     let out = run(&mut s, "cad_stair", json!({"part": "PIANTA PIANO TERRA", "turns": false})).expect("one run");
     assert_eq!((out["steps"].clone(), out["landings"].clone()), (json!(5), json!([])), "{out}");
+}
+
+#[test]
+fn the_fan_a_plan_draws_in_the_square_between_two_runs_is_the_treads_the_stair_turns_on() {
+    let mut s = a_winder_stair();
+    let ask = json!({"part": "PIANTA PIANO TERRA"});
+    let out = run(&mut s, "cad_stair", ask.clone()).expect("it reads");
+    // The two runs are read as before: the fan's risers are not parallel to them, so they are no part of either
+    // flight, and the square they stand in is where a landing would be.
+    let said: Vec<(Value, Value)> =
+        out["flights"].as_array().expect("the flights").iter().map(|f| (f["steps"].clone(), f["taken"].clone())).collect();
+    assert_eq!(said, vec![(json!(5), json!(true)), (json!(5), json!(true))], "{out}");
+    // Three treads carry the turn, read from the two risers drawn between the runs' own: the fan climbs two
+    // risers a flat landing would not, so the stair climbs twelve where the plan draws ten parallel steps.
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "winders": 3, "off": 0.0}]), "{out}");
+    assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(10), json!(12)), "{out}");
+    // What is walked is what the runs draw: the fan turns in the square and adds no tread to their length.
+    assert_eq!((out["length"].clone(), out["going"].clone()), (json!(2240.0), json!(280.0)), "{out}");
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_stair", told).expect("it builds");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 12, 250.0)], "{out}");
+    assert_eq!(landings_of(&s), vec![vec![(5.0, 90.0, 3)]], "{out}");
 }
 
 #[test]

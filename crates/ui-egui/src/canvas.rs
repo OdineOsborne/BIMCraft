@@ -1589,7 +1589,7 @@ impl BimApp {
             let (top_level, height) = (top["top_level"].as_u64().map(|t| m.guid(t)), top["height"].as_f64().unwrap_or(0.0));
             let (bottom, top) = m.span(level, 0.0, top_level, height);
             let up = (run * slope / 100.0 * 1000.0).round() / 1000.0;
-            let landings = if top - bottom - up > 1.0 { vec![Landing { at: up, turn }] } else { Vec::new() };
+            let landings = if top - bottom - up > 1.0 { vec![Landing { at: up, turn, winders: 0 }] } else { Vec::new() };
             let done = done(&landings);
             Ok((
                 Element::Ramp(Ramp {
@@ -1623,7 +1623,7 @@ impl BimApp {
             // As many risers as the run clicked holds, a tread between each two.
             let first = ((run / TREAD).round() + 1.0).max(2.0);
             if f64::from(n) - first >= 2.0 {
-                st.landings.push(Landing { at: first, turn });
+                st.landings.push(Landing { at: first, turn, winders: 0 });
             }
             let done = done(&st.landings);
             Ok((Element::Stair(st), done))

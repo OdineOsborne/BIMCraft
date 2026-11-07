@@ -2135,7 +2135,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             .filter_map(|w| match w {
                 [a, b] => {
                     below += a.3;
-                    Some(Landing { at: f64::from(below), turn: turn_between((a.0, a.1, a.5), (b.0, b.1)) })
+                    Some(Landing { at: f64::from(below), turn: turn_between((a.0, a.1, a.5), (b.0, b.1)), winders: 0 })
                 }
                 _ => None,
             })
@@ -2194,7 +2194,9 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let landings = fl
             .windows(2)
             .filter_map(|w| match w {
-                [a, b] => Some(Landing { at: (up(a) * 1000.0).round() / 1000.0, turn: turn_between((a.0, a.1, a.3), (b.0, b.1)) }),
+                [a, b] => {
+                    Some(Landing { at: (up(a) * 1000.0).round() / 1000.0, turn: turn_between((a.0, a.1, a.3), (b.0, b.1)), winders: 0 })
+                }
                 _ => None,
             })
             .collect();

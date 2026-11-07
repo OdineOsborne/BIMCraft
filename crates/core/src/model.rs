@@ -63,7 +63,7 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -168,6 +168,10 @@ pub struct Wall {
 
 fn is_zero(x: &f64) -> bool {
     *x == 0.0
+}
+
+fn is_no_fan(x: &u32) -> bool {
+    *x == 0
 }
 
 fn is_centre(l: &Location) -> bool {
@@ -973,13 +977,24 @@ pub struct Stair {
 /// A landing between two runs of a stair or a ramp: after `at` risers of a stair, or `at` mm up a
 /// ramp; then the next run goes on straight (`turn` 0), turned left (90) or right (-90), or back
 /// beside the last, to its left (180) or its right (-180). It's as deep as the runs are wide.
+///
+/// `winders` carries a quarter turn on fanned treads instead of a flat landing: that many treads in
+/// the square the landing stands in, radiating from the inside corner of the turn, each a riser
+/// above the last. The first of them stands where the flat landing would and the run above it
+/// leaves where it would, so the fan climbs `winders - 1` risers the landing does not. None (0) is
+/// the flat landing; a fan takes 2 to [`MOST_WINDERS`] treads and only a quarter turn.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Landing {
     pub at: f64,
     #[serde(default)]
     pub turn: f64,
+    #[serde(default, skip_serializing_if = "is_no_fan")]
+    pub winders: u32,
 }
+
+/// How many fanned treads at most carry one turn of a stair: past this each is too narrow to stand on.
+pub const MOST_WINDERS: u32 = 12;
 
 /// A ramp from `level` up to `top_level` (or `height` mm), from the middle of its foot at `start`
 /// toward `angle` degrees: rising at its slope, `slope` percent (rise over run), in one run or in
@@ -2889,7 +2904,9 @@ impl Model {
         let n = (rise / st.riser - 1e-9).ceil().clamp(0.0, 1e6) as u32;
         let each = if n > 0 { rise / f64::from(n) } else { 0.0 };
         let runs = u32::try_from(st.landings.len()).unwrap_or(u32::MAX).saturating_add(1);
-        (n, each, f64::from(n.saturating_sub(runs)) * st.tread)
+        // The risers its fans climb are turned on and not walked along, so they are no part of any run's length.
+        let fanned = st.landings.iter().fold(0u32, |all, l| all.saturating_add(l.winders.min(MOST_WINDERS).saturating_sub(1)));
+        (n, each, f64::from(n.saturating_sub(runs).saturating_sub(fanned)) * st.tread)
     }
 
     /// A roof's outline in plan: its footprint, or the rectangle its extrusion sweeps, counter-clockwise.
@@ -4470,7 +4487,7 @@ fn crop(who: &str, a: P2, b: P2) -> Result<(), String> {
 
 /// Landings between runs, going up: each a run of two risers or more from the last and to the
 /// next (on a stair of `risers`), after a whole number of them; or on a ramp, up from its foot;
-/// each turning square or back.
+/// each turning square or back, on a flat landing or on fanned treads where it turns a quarter.
 fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), String> {
     if landings.len() > 100 {
         return Err(format!("{who}: more than 100 landings"));
@@ -4478,6 +4495,21 @@ fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), 
     let mut last = 0.0;
     for l in landings {
         coord(&format!("{who} landing"), l.at)?;
+        if l.winders == 1 || l.winders > MOST_WINDERS {
+            return Err(format!(
+                "{who}: a turn is carried on 2 to {MOST_WINDERS} fanned treads, not {}; `winders` is left out for a landing that is flat",
+                l.winders
+            ));
+        }
+        if l.winders > 0 && risers.is_none() {
+            return Err(format!("{who}: a ramp's landings are flat, so `winders` is a stair's and not a ramp's"));
+        }
+        if l.winders > 0 && l.turn.abs() != 90.0 {
+            return Err(format!(
+                "{who}: fanned treads carry a quarter turn, so a landing on {} of them turns 90 or -90, not {}",
+                l.winders, l.turn
+            ));
+        }
         if !matches!(l.turn, 0.0 | 90.0 | -90.0 | 180.0 | -180.0) {
             return Err(format!(
                 "{who}: a landing turns 0 (straight on), 90 or -90 (left or right), or 180 or -180 (back beside the run, to its left or \
@@ -4485,9 +4517,11 @@ fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), 
                 l.turn
             ));
         }
+        // The run above a fan starts where the fan leaves off, which is as many risers above it as the fan climbs.
+        let fan = f64::from(l.winders.saturating_sub(1));
         match risers {
             Some(_) if l.at.fract() != 0.0 => return Err(format!("{who}: a landing goes after a whole number of risers, not {}", l.at)),
-            Some(n) if l.at < last + 2.0 || l.at > n - 2.0 => {
+            Some(n) if l.at < last + 2.0 || l.at + fan > n - 2.0 => {
                 return Err(format!(
                     "{who}: a landing after {} risers leaves a run of fewer than 2 risers; each run needs 2 or more",
                     l.at
@@ -4498,7 +4532,7 @@ fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), 
             }
             _ => {}
         }
-        last = l.at;
+        last = l.at + fan;
     }
     Ok(())
 }

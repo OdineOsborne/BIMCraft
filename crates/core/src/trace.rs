@@ -388,6 +388,34 @@ pub fn flights(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Flight>, String
     Ok(out)
 }
 
+/// The lines the drawing `u` draws out from each of the points `at`, the end that stands there given first: every
+/// line with one end of it no further from the point than `near` and the other end further off.
+///
+/// A stair that turns on fanned treads draws the risers of them that way — out from the corner on the inside of
+/// the turn instead of parallel across the run — which is why [`flights`] passes them over. A door's swing is
+/// drawn that way too, and so is every corner of two walls, so what tells a fan from those is where it stands
+/// and what it measures against the runs it turns between, which is `cad_stair`'s business and not this one's.
+pub fn rays(m: &Model, u: &Underlay, how: &How, at: &[P2], near: f64) -> Result<Vec<Vec<[P2; 2]>>, String> {
+    let how = how.checked()?;
+    if !(near.is_finite() && near > 0.0) {
+        return Err(format!("how near a line stands to count as drawn out from a point is a length, and {near} is none"));
+    }
+    let (faces, ..) = faces_of(m, u, &how)?;
+    let mut out: Vec<Vec<[P2; 2]>> = vec![Vec::new(); at.len()];
+    for f in &faces {
+        let (a, b) = (f.at, f.end());
+        for (p, found) in at.iter().zip(out.iter_mut()) {
+            // A line with both ends at the point is shorter than the slack and says nothing about which way it goes.
+            match (a.dist(*p) <= near, b.dist(*p) <= near) {
+                (true, false) => found.push([a, b]),
+                (false, true) => found.push([b, a]),
+                _ => {}
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The longest stretch of lines standing evenly apart in `group`, as a flight: in order across the run, with the
 /// going they keep, how wide they are drawn and which way the run goes. None where too few of them stand evenly
 /// to be a flight at all.
