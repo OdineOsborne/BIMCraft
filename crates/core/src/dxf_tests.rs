@@ -91,11 +91,59 @@ fn what_it_does_not_read_is_counted_by_its_own_name_the_most_first() {
 }
 
 #[test]
-fn a_polylines_bulge_is_read_as_the_line_between_its_points_and_said() {
+fn a_polylines_bulge_is_the_arc_it_draws_and_splits_the_polyline_into_its_pieces() {
+    // Three points, the first bending to the second: a bulge of 0.5 is a quarter of the angle's tangent, so the
+    // arc takes up 4 x atan(0.5), and over a chord of 1000 that puts its centre 375 off the middle of the chord
+    // and its radius at 625 — the 3, 4, 5 of it.
     let entities = "0\nLWPOLYLINE\n8\nMURI\n90\n3\n10\n0\n20\n0\n42\n0.5\n10\n1000\n20\n0\n10\n1000\n20\n1000\n";
     let d = read_ok(&dxf("", entities));
-    assert_eq!(d.shapes(), 1);
-    assert_eq!(d.left_out, ["1 polyline arcs, read as the straight line between their points"]);
+    assert_eq!(d.shapes(), 2, "the arc it bends in, and the straight run after it");
+    let Shape::Arc { at, radius, from, to } = d.layers[0].shapes[0] else { panic!("{:?}", d.layers[0].shapes[0]) };
+    assert!(at.dist(P2(500.0, 375.0)) < 1e-9 && (radius - 625.0).abs() < 1e-9, "{at:?} {radius}");
+    // Read as an arc is read counter-clockwise from the first of its angles, so the points along it run from the
+    // point it bends from to the point it bends to.
+    let along = crate::geom::along_arc(at, radius, from, to);
+    assert!(along.first().is_some_and(|p| p.dist(P2(0.0, 0.0)) < 1e-9), "{along:?}");
+    assert!(along.last().is_some_and(|p| p.dist(P2(1000.0, 0.0)) < 1e-9), "{along:?}");
+    // A bulge is counter-clockwise where it is positive, and the counter-clockwise way round from the first point
+    // to the second is the one that bows to the right of the way the polyline runs: here, under the chord, as
+    // deep under it as the bulge is of half the chord — 250 of 500.
+    assert!(along.iter().all(|p| p.1 < 1e-9), "{along:?}");
+    assert!(along.iter().any(|p| (p.1 + 250.0).abs() < 1e-9), "{along:?}");
+    match &d.layers[0].shapes[1] {
+        Shape::Path { points, closed } => {
+            assert_eq!((points.as_slice(), *closed), ([P2(1000.0, 0.0), P2(1000.0, 1000.0)].as_slice(), false))
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(d.left_out.is_empty(), "a bend that is an arc is read and not left out: {:?}", d.left_out);
+    // Bent the other way it is the same arc on the other side of the chord, read from the second point round to
+    // the first, because an arc is held counter-clockwise whichever way the bulge goes.
+    let back = read_ok(&dxf("", &entities.replace("42\n0.5", "42\n-0.5")));
+    let Shape::Arc { at, radius, from, to } = back.layers[0].shapes[0] else { panic!("{:?}", back.layers[0].shapes[0]) };
+    assert!(at.dist(P2(500.0, -375.0)) < 1e-9 && (radius - 625.0).abs() < 1e-9, "{at:?} {radius}");
+    let along = crate::geom::along_arc(at, radius, from, to);
+    assert!(along.first().is_some_and(|p| p.dist(P2(1000.0, 0.0)) < 1e-9), "{along:?}");
+    assert!(along.iter().all(|p| p.1 > -1e-9), "over the chord: {along:?}");
+}
+
+#[test]
+fn a_closed_polyline_that_bends_keeps_the_run_back_to_its_first_point() {
+    // A closed polyline of three points with the last of them bending back to the first: what is left of it is
+    // the two straight sides, as one run through the corner, and the arc that closes it.
+    let entities = "0\nLWPOLYLINE\n8\nMURI\n90\n3\n70\n1\n10\n0\n20\n0\n10\n1000\n20\n0\n10\n1000\n20\n1000\n42\n1\n";
+    let d = read_ok(&dxf("", entities));
+    assert_eq!(d.shapes(), 2);
+    match &d.layers[0].shapes[0] {
+        Shape::Path { points, .. } => {
+            assert_eq!(points.as_slice(), [P2(0.0, 0.0), P2(1000.0, 0.0), P2(1000.0, 1000.0)].as_slice())
+        }
+        other => panic!("{other:?}"),
+    }
+    // A bulge of 1 is a half turn, so the arc closing it is the half circle on the line between those two points.
+    let Shape::Arc { at, radius, .. } = d.layers[0].shapes[1] else { panic!("{:?}", d.layers[0].shapes[1]) };
+    assert!(at.dist(P2(500.0, 500.0)) < 1e-9 && (radius - 500.0 * 2.0_f64.sqrt()).abs() < 1e-9, "{at:?} {radius}");
+    assert!(d.left_out.is_empty(), "{:?}", d.left_out);
 }
 
 #[test]

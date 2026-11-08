@@ -874,6 +874,18 @@ fn a_winder_stair() -> Session {
 /// riser of the run above, both drawn already, so what the curve adds is the two between them — and the run
 /// above stands where the curve leaves off, which is a metre further round than a flat landing would leave it.
 fn a_curved_stair() -> Session {
+    a_curved_stair_drawn(false)
+}
+
+/// The same drawing with the two arcs of the curved run drawn as a CAD draws most of them: not as arcs of their
+/// own but as the bend of a polyline, which says how far round it goes as the tangent of a quarter of that and
+/// nothing of where its centre stands. A quarter turn is a bend of tan(22.5 degrees), positive because it runs
+/// counter-clockwise from the first of its points to the second.
+fn a_curved_stair_in_a_polyline() -> Session {
+    a_curved_stair_drawn(true)
+}
+
+fn a_curved_stair_drawn(bent: bool) -> Session {
     let mut more = String::new();
     for n in 0..5 {
         let y = 3300.0 + 280.0 * f64::from(n);
@@ -884,7 +896,18 @@ fn a_curved_stair() -> Session {
     // The two arcs the run is drawn between, and the risers of the two treads inside it, a third of the turn
     // apart, each drawn from the inner arc out to the outer.
     for radius in [500.0, 1500.0] {
-        more.push_str(&format!("0\nARC\n8\nSCALA\n10\n6500\n20\n4420\n40\n{radius}\n50\n0\n51\n90\n"));
+        let (from, to) = (P2(6500.0 + radius, 4420.0), P2(6500.0, 4420.0 + radius));
+        more.push_str(&match bent {
+            false => format!("0\nARC\n8\nSCALA\n10\n6500\n20\n4420\n40\n{radius}\n50\n0\n51\n90\n"),
+            true => format!(
+                "0\nLWPOLYLINE\n8\nSCALA\n90\n2\n10\n{}\n20\n{}\n42\n{}\n10\n{}\n20\n{}\n",
+                from.0,
+                from.1,
+                (22.5_f64).to_radians().tan(),
+                to.0,
+                to.1
+            ),
+        });
     }
     for deg in [30.0_f64, 60.0] {
         let (sin, cos) = deg.to_radians().sin_cos();
@@ -894,7 +917,7 @@ fn a_curved_stair() -> Session {
     // And, in the middle of the room, a circle with four lines drawn out along its radius: measured as the stair
     // is it is a curved run of three treads, and it stands nowhere near the head of a run, so it is no turn of
     // this stair or of any other. A bolt circle, a turning head and a rose are all drawn that way.
-    more.push_str(&format!("0\nCIRCLE\n8\nSCALA\n10\n2500\n20\n1500\n40\n400\n"));
+    more.push_str("0\nCIRCLE\n8\nSCALA\n10\n2500\n20\n1500\n40\n400\n");
     for deg in [0.0_f64, 90.0, 180.0, 270.0] {
         let (sin, cos) = deg.to_radians().sin_cos();
         let (a, b) = (P2(2500.0 + 400.0 * cos, 1500.0 + 400.0 * sin), P2(2500.0 + 1000.0 * cos, 1500.0 + 1000.0 * sin));
@@ -1042,6 +1065,19 @@ fn the_arcs_a_plan_draws_between_two_runs_are_the_curved_run_the_stair_turns_on(
     let out = run(&mut s, "cad_stair", told).expect("it builds");
     assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 12, 250.0)], "{out}");
     assert_eq!(landings_of(&s), vec![vec![(5.0, 90.0, 3, 500.0)]], "{out}");
+}
+
+#[test]
+fn a_curved_run_drawn_as_the_bend_of_a_polyline_is_read_as_the_arcs_it_draws() {
+    let mut s = a_curved_stair_in_a_polyline();
+    let ask = json!({"part": "PIANTA PIANO TERRA", "apply": true});
+    let out = run(&mut s, "cad_stair", ask).expect("it reads");
+    // Read exactly as the arcs of their own were: which is what says the bend is taken the way round the file
+    // means it, since the other way round would put the centre on the far side of the chord and the arcs nowhere
+    // near the ends of the run's top riser.
+    assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "winders": 3, "radius": 500.0, "off": 0.0}]), "{out}");
+    assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(10), json!(12)), "{out}");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 12, 250.0)], "{out}");
 }
 
 #[test]

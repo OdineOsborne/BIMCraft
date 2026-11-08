@@ -419,9 +419,9 @@ pub static ALL: &[Command] = &[
          same `winders - 1` risers. A circle \
          with lines drawn to it is a hinge, a bolt circle or the swing of a door as readily as a stair, so where \
          those three do not measure out the turn is read as a flat landing, as it is where no curve is drawn at \
-         all. A curved run carries a half turn, which the square of a landing cannot hold. An arc a polyline \
-         draws as a bulge between two of its points is read as the straight line between them, which `underlay` \
-         says in `left_out`, so a curved run drawn that way is not read as one. \
+         all. A curved run carries a half turn, which the square of a landing cannot hold. An arc drawn as the \
+         bend of a polyline, which is how a CAD draws most of them, is read as the arc it is and counts here as \
+         one. \
          \
          `height` is how far it climbs: where the level above stands, or what `height` says, and `height_from` \
          which it was. `risers` is how many it climbs in, which is how many steps the plan draws, since the lines \

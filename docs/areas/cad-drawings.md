@@ -28,9 +28,15 @@ could not read.
 `CIRCLE`, each on the layer its group code 8 names (an entity that names none is on layer `0`, as a drawing has it).
 `TEXT` and `MTEXT` come in as the words the drawing says, `DIMENSION` as what it measures and `HATCH` as what it
 fills with (all below). Everything else is counted by its own name and listed
-in `left_out`, the most of a kind first: `3251 POINT`, `4 SPLINE`. A polyline's bulge is read as the straight line between its points and
-said to be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a
-drawing is worse than none of it.
+in `left_out`, the most of a kind first: `3251 POINT`, `4 SPLINE`. A polyline's bulge is the arc it draws between
+two of its points and is read as that arc (`dxf::bow`), which splits the polyline into the pieces it is drawn in —
+an arc for each bend of it and a path for each run between them, the run back to its first point included where it
+closes, so none of it is lost with the flag. A bulge is the tangent of a quarter of the angle the arc takes up,
+negative where it runs clockwise from the one point to the other, so a positive one bows to the right of the way
+the polyline runs: the half circle shows it outright, since counter-clockwise from the west end of a chord to the
+east end passes under it and never over. A bend that is no arc is left as the line between its points and said to
+be; a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short, because half a drawing
+is worse than none of it.
 
 **The words a survey writes.** A survey writes on its drawing — the name of each room, what it measures, the height of
 a sill — and a plan that shows none of that is half a plan. A `TEXT` or an `MTEXT` comes in as `Shape::Words`: what it
@@ -798,11 +804,11 @@ between two runs, so a fan or a curve drawn with nothing joined on above it is n
 curved run from foot to top (a spiral) is read as no stair at all, because there is no straight run in it for a
 flight to be found in. On this plan there is nothing for one to turn into.
 
-And one limit more, which that same file names outright: it reports **606 polyline arcs, read as the straight
-line between their points** in `left_out`. A bulge — an arc between two points of a polyline — is read as that
-straight line by `dxf.rs` and is no `Shape::Arc`, so `underlay::arcs` does not hold it and a curved run drawn
-that way is not read as a curve. The reading takes an arc the file holds as an `ARC` or a `CIRCLE`; what
-`left_out` says is what it did not take.
+The arcs themselves need not be `ARC` entities: that same file reported **606 polyline arcs, read as the straight
+line between their points** in `left_out`, which is how a CAD draws most of its arcs, and `dxf::bow` now reads
+every one of them as the arc it is. A curved run drawn as the bend of a polyline is read as one drawn with arcs of
+its own, which is what says the bend is taken the way round the file means it: the other way round would put the
+centre on the far side of the chord, and the arcs nowhere near the ends of the run's top riser.
 
 ## The slab under the floor of a storey
 

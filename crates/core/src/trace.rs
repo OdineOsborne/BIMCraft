@@ -455,7 +455,18 @@ pub struct Curve {
 /// read there at all rather than something wrong.
 pub fn curves(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Curve>, String> {
     let how = how.checked()?;
-    let bends = crate::underlay::arcs(m, u);
+    // The arcs it draws where it is being read: an arc of no size is none, and one drawn outside the area asked
+    // for belongs to what is drawn beside it, as a line does.
+    let at = |bend: &crate::underlay::Bend, deg: f64| {
+        P2(bend.at.0 + bend.radius * deg.to_radians().cos(), bend.at.1 + bend.radius * deg.to_radians().sin())
+    };
+    let bends: Vec<crate::underlay::Bend> = crate::underlay::arcs(m, u)
+        .into_iter()
+        .map(|(_, bend)| bend)
+        .filter(|bend| {
+            bend.radius.is_finite() && bend.radius > 0.0 && bend.at.is_finite() && how.holds(at(bend, bend.from), at(bend, bend.to))
+        })
+        .collect();
     if bends.len() > MAX_BENDS {
         return Err(format!(
             "this drawing holds more than {MAX_BENDS} arcs: hide the layers that are not the building's, or say the area to              read with `region`"
@@ -463,11 +474,7 @@ pub fn curves(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Curve>, String> 
     }
     let (faces, ..) = faces_of(m, u, &how)?;
     let mut out: Vec<Curve> = Vec::new();
-    for (_, bend) in &bends {
-        let round = |deg: f64| P2(bend.at.0 + bend.radius * deg.to_radians().cos(), bend.at.1 + bend.radius * deg.to_radians().sin());
-        if !(bend.radius.is_finite() && bend.radius > 0.0 && bend.at.is_finite() && how.holds(round(bend.from), round(bend.to))) {
-            continue;
-        }
+    for bend in &bends {
         let slack = (bend.radius * CURVE_SLACK).max(how.thin);
         let wide = (slack / bend.radius).to_degrees();
         // The lines drawn out along the radius of it, each with how far round it stands and how far out its two

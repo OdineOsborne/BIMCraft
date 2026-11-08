@@ -5,8 +5,9 @@
 //! on the layer it names (group code 8), come in, and `TEXT` and `MTEXT` as the words the drawing says, where it says
 //! them; `DIMENSION` as what the drawing measures and the figure it writes over it, and `HATCH` as the areas it
 //! fills and the pattern it fills them with. Everything else is counted by its own name and listed, never guessed
-//! at. A polyline's bulge (an arc between two of its points) is read as the straight line between them and said to
-//! be, and one of more points than `MAX_VERTICES` is left out whole rather than cut short.
+//! at. A polyline's bulge is the arc it draws between two of its points and is read as that arc ([`bow`]), which
+//! splits the polyline into the pieces it is drawn in; one that is no arc is left as the line between them and said
+//! to be, and a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short.
 //! What a drawing says of itself is drawn and is no line of the building: a word, a measurement and a hatch are
 //! drawn with the plan and left out of the lines traced and snapped to, or a survey's lettering would come in as
 //! walls, a dimension's two lines as a wall's two faces, and a hatch's boundary as the faces it runs along.
@@ -308,8 +309,9 @@ struct Entity {
     from: Option<f64>,
     to: Option<f64>,
     flags: i64,
-    /// How many of its points were an arc this read straight.
-    bulges: usize,
+    /// The bend of each of its points that has one: which point it is, counted from the first, and the bulge the
+    /// file writes there, which is an arc from that point to the next.
+    bulge: Vec<(usize, f64)>,
     /// The name a `BLOCK` gives itself and an `INSERT` names, under code 2.
     name: String,
     /// What a `TEXT` or an `MTEXT` says, under code 1, with the chunks a long `MTEXT` is cut into under code 3
@@ -438,7 +440,8 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
     let mut d = Drawing { scale: o.scale.unwrap_or(1.0), ..Drawing::default() };
     let mut layers: Vec<Layer> = Vec::new();
     let mut left_out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut bulges = 0usize;
+    // The bends of a polyline that are no arc, left as the line between their points.
+    let mut straight = 0usize;
     let mut section = String::new();
     let mut header: Option<String> = None;
     let mut kind = String::new();
@@ -513,8 +516,12 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                 42 if put => e.scale.1 = value.parse().ok(),
                 42 if dim => {}
                 42 => {
-                    if value.parse::<f64>().is_ok_and(|b| b != 0.0) {
-                        e.bulges += 1;
+                    // The point it bends from is the one being read, which is not in its points until it is done.
+                    if let Ok(b) = value.parse::<f64>()
+                        && b != 0.0
+                        && e.bulge.len() < MAX_VERTICES
+                    {
+                        e.bulge.push((e.points.len(), b));
                     }
                 }
                 44 if put => e.spacing.0 = value.parse().ok(),
@@ -532,27 +539,26 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
         }
         // A new entity, or the end of one: what was being read is finished first.
         e.point();
-        bulges += e.bulges;
         // A POLYLINE is a header, and its points are the VERTEX entities that follow it, to its SEQEND. Anything else
         // holds its own points and is finished where it ends.
         let mut put: Option<Put> = None;
-        let done: Option<(String, Shape)> = match kind.as_str() {
+        let done: Vec<(String, Shape)> = match kind.as_str() {
             "POLYLINE" => {
                 open = Some(std::mem::take(&mut e));
-                None
+                Vec::new()
             }
             // A block opens where it is named and holds what is drawn until its end. Its base point is the point
             // of it that lands where it is put, so what it holds is kept from there.
             "BLOCK" => {
                 let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
                 block = Some((e.name.clone(), P2(at.0 * d.scale, at.1 * d.scale), Vec::new()));
-                None
+                Vec::new()
             }
             "ENDBLK" => {
                 if let Some((name, _, held)) = block.take() {
                     blocks.insert(name, held);
                 }
-                None
+                Vec::new()
             }
             "INSERT" => {
                 let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
@@ -566,44 +572,52 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                     grid: (across, e.grid.1.unwrap_or(1).clamp(0, MAX_SHAPES as i64)),
                     spacing: P2(e.spacing.0.unwrap_or(0.0) * d.scale, e.spacing.1.unwrap_or(0.0) * d.scale),
                 });
-                None
+                Vec::new()
             }
             "VERTEX" => {
                 if let Some(o) = &mut open {
+                    // Its bend is its own point's, which stands where this vertex lands among the polyline's.
+                    let at = o.points.len();
+                    o.bulge.extend(e.bulge.iter().map(|(_, b)| (at, *b)));
                     o.points.append(&mut e.points);
-                    o.bulges += e.bulges;
                 }
-                None
+                Vec::new()
             }
             // What the drawing measures. The figure it prints is read out of the picture a CAD drew it as, which is a
             // block of its own, so this is here and not in `finish`, where the blocks are not to hand.
-            "DIMENSION" => measurement(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)),
+            "DIMENSION" => measurement(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)).into_iter().collect(),
             // What the drawing fills an area with. Its boundary and its pattern are read out of its group codes in
             // the order they come, so this is here with the dimension and not in `finish`.
-            "HATCH" => filled(&e, d.scale, &mut left_out).map(|shape| (e.layer.clone(), shape)),
-            "SEQEND" => open.take().and_then(|mut o| {
-                bulges += o.bulges;
-                let layer = o.layer.clone();
-                finish("POLYLINE", &mut o, d.scale).map(|shape| (layer, shape))
-            }),
-            other => finish(other, &mut e, d.scale).map(|shape| (e.layer.clone(), shape)),
+            "HATCH" => filled(&e, d.scale, &mut left_out).map(|shape| (e.layer.clone(), shape)).into_iter().collect(),
+            "SEQEND" => match open.take() {
+                None => Vec::new(),
+                Some(mut o) => {
+                    let layer = o.layer.clone();
+                    pieces("POLYLINE", &mut o, d.scale, &mut straight).into_iter().map(|shape| (layer.clone(), shape)).collect()
+                }
+            },
+            other => pieces(other, &mut e, d.scale, &mut straight).into_iter().map(|shape| (e.layer.clone(), shape)).collect(),
         };
         // What was read is drawn into the block being read, where there is one, and into the drawing otherwise.
-        match (done, put) {
+        let read = !done.is_empty();
+        for (layer, shape) in done {
+            match &mut block {
+                Some((_, base, held)) => held.push(Drawn::Shape(layer, from_base(shape, *base))),
+                None if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => capped = true,
+                None => draw(&mut layers, &layer, shape),
+            }
+        }
+        match (read, put) {
             (_, Some(put)) => match &mut block {
                 Some((_, _, held)) => held.push(Drawn::Put(put)),
                 None => open_up(&put, &blocks, &mut layers, &mut left_out, &mut capped),
             },
-            (Some((layer, shape)), None) => match &mut block {
-                Some((_, base, held)) => held.push(Drawn::Shape(layer, from_base(shape, *base))),
-                None if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => capped = true,
-                None => draw(&mut layers, &layer, shape),
-            },
+            (true, None) => {}
             // What it does not read: named by its own kind, once for each of them. A POLYLINE is left out where its
             // vertices made no path, and its VERTEX and SEQEND are parts of it, not kinds of their own.
             // The words that hold a file together are no kind of thing: a section opens while its name is still being
             // read, so its own marker would otherwise be counted among what was left out.
-            (None, None)
+            (false, None)
                 if !kind.is_empty()
                     && !matches!(
                         kind.as_str(),
@@ -619,7 +633,7 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
                 };
                 *left_out.entry(what).or_default() += 1;
             }
-            (None, None) => {}
+            (false, None) => {}
         }
         e = Entity::default();
         kind = value.to_string();
@@ -639,8 +653,8 @@ pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
     if capped {
         left_out.insert(format!("shapes past the {MAX_SHAPES} a drawing holds"), 1);
     }
-    if bulges > 0 {
-        left_out.insert("polyline arcs, read as the straight line between their points".into(), bulges);
+    if straight > 0 {
+        left_out.insert("polyline bends that are no arc, read as the straight line between their points".into(), straight);
     }
     let mut named: Vec<(String, usize)> = left_out.into_iter().collect();
     named.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1020,6 +1034,81 @@ fn unread_dimension(e: &Entity) -> String {
         _ => "DIMENSION",
     }
     .to_string()
+}
+
+/// What an entity of `kind` is drawn as, in millimetres: one shape, or, where a polyline bends, the several that a
+/// bend splits it into. `straight` counts the bends that are no arc and are left as the line between their points.
+fn pieces(kind: &str, e: &mut Entity, scale: f64, straight: &mut usize) -> Vec<Shape> {
+    match kind {
+        "LWPOLYLINE" | "POLYLINE" if !e.bulge.is_empty() => bent(e, scale, straight),
+        _ => finish(kind, e, scale).into_iter().collect(),
+    }
+}
+
+/// The pieces a polyline that bends is drawn in: an arc for each bend of it, and a path for each run of points
+/// between them. A closed one is drawn with the run back to its first point, so none of it is lost with the flag.
+fn bent(e: &Entity, scale: f64, straight: &mut usize) -> Vec<Shape> {
+    let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
+    let points: Vec<P2> = e.points.iter().map(|p| mm(*p)).collect();
+    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
+    if points.len() < 2 || points.len() > MAX_VERTICES || !points.iter().all(sane) {
+        *straight += e.bulge.len();
+        return Vec::new();
+    }
+    let closed = e.flags & 1 == 1;
+    let (mut out, mut run): (Vec<Shape>, Vec<P2>) = (Vec::new(), Vec::new());
+    for i in 0..points.len() - usize::from(!closed) {
+        let (a, b) = (points[i], points[(i + 1) % points.len()]);
+        let bulge = e.bulge.iter().find(|(at, _)| *at == i).map(|(_, bulge)| *bulge);
+        match bulge.and_then(|bulge| bow(a, b, bulge)) {
+            Some(arc) => {
+                if run.len() > 1 {
+                    out.push(Shape::Path { points: std::mem::take(&mut run), closed: false });
+                }
+                run.clear();
+                out.push(arc);
+            }
+            None => {
+                *straight += usize::from(bulge.is_some());
+                if run.is_empty() {
+                    run.push(a);
+                }
+                run.push(b);
+            }
+        }
+    }
+    if run.len() > 1 {
+        out.push(Shape::Path { points: run, closed: false });
+    }
+    out
+}
+
+/// The arc a bulge draws from `a` to `b`, or none where it draws none. A bulge is the tangent of a quarter of the
+/// angle the arc takes up, signed: counter-clockwise from `a` where it is positive, and clockwise where it is
+/// negative — so a positive one bows to the right of the way the polyline runs, which the half circle shows
+/// outright (counter-clockwise from the west end of a chord to the east end passes under it, never over). An arc
+/// is held counter-clockwise from the first of its angles, so a negative bulge is the same arc read from `b`
+/// round to `a`.
+fn bow(a: P2, b: P2, bulge: f64) -> Option<Shape> {
+    let (across, turn) = (a.dist(b), 4.0 * bulge.atan());
+    let (sin, tan) = ((turn / 2.0).sin(), (turn / 2.0).tan());
+    if !(across.is_finite() && across > 0.0 && sin.abs() > 1e-12 && tan.abs() > 1e-12 && tan.is_finite()) {
+        return None;
+    }
+    let at = (a + b) * 0.5 + ((b - a) * (1.0 / across)).perp() * (across / (2.0 * tan));
+    let radius = (across / (2.0 * sin)).abs();
+    let deg = |p: P2| (p.1 - at.1).atan2(p.0 - at.0).to_degrees();
+    let (from, to) = match bulge > 0.0 {
+        true => (deg(a), deg(b)),
+        false => (deg(b), deg(a)),
+    };
+    let sane = at.0.is_finite() && at.1.is_finite() && at.0.abs() <= MAX_COORD && at.1.abs() <= MAX_COORD;
+    (sane && radius.is_finite() && radius > 0.0 && radius <= MAX_COORD && from.is_finite() && to.is_finite()).then_some(Shape::Arc {
+        at,
+        radius,
+        from,
+        to,
+    })
 }
 
 /// The shape an entity of `kind` makes, in millimetres, or none where it makes none: a kind this does not read, or one
