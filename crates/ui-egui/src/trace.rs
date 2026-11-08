@@ -1046,9 +1046,14 @@ fn stair_shown(ui: &mut Ui, report: &Value) {
     for l in report["landings"].as_array().into_iter().flatten() {
         let (Some(at), Some(which)) = (l["at"].as_f64(), l["which"].as_str()) else { continue };
         let risers = format!("{at:.0}");
-        let said = match l["winders"].as_u64().unwrap_or(0) {
-            0 => tf("After {} risers it turns {}.", &[&risers, t(which)]),
-            on => tf("After {} risers it turns {} on {} fanned treads.", &[&risers, t(which), &on.to_string()]),
+        let said = match (l["winders"].as_u64().unwrap_or(0), l["radius"].as_f64().unwrap_or(0.0)) {
+            (0, _) => tf("After {} risers it turns {}.", &[&risers, t(which)]),
+            // A radius makes those treads a curved run, drawn about a centre that far inside the run.
+            (on, radius) if radius > 0.0 => tf(
+                "After {} risers it turns {} on {} curved treads, the inside of them {} mm from the centre.",
+                &[&risers, t(which), &on.to_string(), &format!("{radius:.0}")],
+            ),
+            (on, _) => tf("After {} risers it turns {} on {} fanned treads.", &[&risers, t(which), &on.to_string()]),
         };
         ui.label(RichText::new(said).color(pal().muted));
         if let Some(off) = l["off"].as_f64().filter(|off| *off > 1.0) {

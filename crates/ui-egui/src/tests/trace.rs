@@ -345,6 +345,22 @@ fn the_walls_tab_builds_the_stair_the_plan_draws_at_the_going_it_draws_it() {
     assert!(!says(&h, "After 5 risers it turns left on 3 fanned treads."), "nothing joined on");
 }
 
+#[test]
+fn the_walls_tab_says_the_curved_run_the_plan_draws_between_two_runs() {
+    let mut h = a_storey_with_a_curved_stair();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    press(&mut h, "Read the Stair");
+    // The same twelve risers as over a fan of three treads, and the radius the plan draws the two arcs at.
+    assert!(says(&h, "This stair climbs 3000 mm in 12 risers of 250 mm, each step 280 mm deep."), "what it read");
+    assert!(
+        says(&h, "After 5 risers it turns left on 3 curved treads, the inside of them 500 mm from the centre."),
+        "the curved run between its two runs"
+    );
+    press(&mut h, "Build This Stair");
+    assert_eq!(stairs_of(&h), vec![(1000.0, 280.0, 12)], "as deep and as wide as the plan draws it");
+}
+
 /// Every stair of the project: how wide it is, the going of one step, and how many risers it climbs in.
 fn stairs_of(h: &Harness<BimApp>) -> Vec<(f64, f64, u32)> {
     let m = &h.state().session.model;
@@ -421,6 +437,17 @@ fn windows_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
 /// line the walls stop at, the underside of the slab this floor is, the two rakes of the roof, a rectangle around
 /// each window, and the two heights it is drawn to.
 fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
+    a_storey_whose_stair_turns(false)
+}
+
+/// The same storey, with the quarter turn of its stair drawn as a curved run and not as a fan: the two arcs of a
+/// run 1000 wide about a centre 500 mm past the edge of the run below, with the risers of three treads out along
+/// their radius, and the run above standing where that curve leaves off.
+fn a_storey_with_a_curved_stair() -> Harness<'static, BimApp> {
+    a_storey_whose_stair_turns(true)
+}
+
+fn a_storey_whose_stair_turns(curved: bool) -> Harness<'static, BimApp> {
     let mut lines = room("MURI", [0.0, 0.0, 10_000.0, 6000.0], 300.0);
     for [x0, x1] in [[3000.0, 4500.0], [6000.0, 7200.0]] {
         lines.push(("MURI".to_string(), [x0, 0.0, x0, 300.0]));
@@ -430,15 +457,36 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     // A stair that turns, standing in the plan against its north wall: five steps 280 apart and 1000 wide
     // climbing north, a quarter turn to the left on three fanned treads, and five more climbing west. The two
     // risers between those treads are drawn out from the corner on the inside of the turn, a third of it apart.
+    let (over, under) = match curved {
+        true => (6500.0, 4920.0),
+        false => (7000.0, 4420.0),
+    };
     for n in 0..5 {
         let y = 3300.0 + 280.0 * f64::from(n);
         lines.push(("SCALA".to_string(), [7000.0, y, 8000.0, y]));
-        let x = 7000.0 - 280.0 * f64::from(n);
-        lines.push(("SCALA".to_string(), [x, 4420.0, x, 5420.0]));
+        let x = over - 280.0 * f64::from(n);
+        lines.push(("SCALA".to_string(), [x, under, x, under + 1000.0]));
     }
-    let third = 1000.0 / 3.0_f64.sqrt();
-    lines.push(("SCALA".to_string(), [7000.0, 4420.0, 8000.0, 4420.0 + third]));
-    lines.push(("SCALA".to_string(), [7000.0, 4420.0, 7000.0 + third, 5420.0]));
+    // The two risers the turn is carried on between the runs' own: out from the corner on the inside of it, a
+    // third of the turn apart, or out along the radius of the two arcs a curved run is drawn between.
+    let mut bows = String::new();
+    match curved {
+        true => {
+            for radius in [500.0, 1500.0] {
+                bows.push_str(&format!("0\nARC\n8\nSCALA\n10\n6500\n20\n4420\n40\n{radius}\n50\n0\n51\n90\n"));
+            }
+            for deg in [30.0_f64, 60.0] {
+                let (sin, cos) = deg.to_radians().sin_cos();
+                let at = [6500.0 + 500.0 * cos, 4420.0 + 500.0 * sin, 6500.0 + 1500.0 * cos, 4420.0 + 1500.0 * sin];
+                lines.push(("SCALA".to_string(), at));
+            }
+        }
+        false => {
+            let third = 1000.0 / 3.0_f64.sqrt();
+            lines.push(("SCALA".to_string(), [7000.0, 4420.0, 8000.0, 4420.0 + third]));
+            lines.push(("SCALA".to_string(), [7000.0, 4420.0, 7000.0 + third, 5420.0]));
+        }
+    }
     lines.push(("PROSPETTO".to_string(), [20_000.0, 0.0, 30_000.0, 0.0]));
     lines.push(("PROSPETTO".to_string(), [20_000.0, 2800.0, 30_000.0, 2800.0]));
     // And the underside of the slab this floor is, 260 mm under it: the slab between the two lines.
@@ -456,7 +504,8 @@ fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
     let heights = "0\nTEXT\n8\nQUOTE\n10\n20500\n20\n0\n40\n250\n1\n69.80\n\
                    0\nTEXT\n8\nQUOTE\n10\n20500\n20\n3000\n40\n250\n1\n72.80\n";
     let mut h = app("");
-    h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&lines, heights)})).expect("it comes in");
+    let drawn = drawing_with(&lines, &format!("{heights}{bows}"));
+    h.state_mut().session.execute("underlay", &json!({"path": drawn})).expect("it comes in");
     let parts = json!([
         {"name": "PIANTA", "kind": "plan", "region": [[-2000, -2000], [12_000, 8000]]},
         {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [31_000, 8000]]},

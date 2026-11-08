@@ -63,7 +63,7 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -978,11 +978,16 @@ pub struct Stair {
 /// ramp; then the next run goes on straight (`turn` 0), turned left (90) or right (-90), or back
 /// beside the last, to its left (180) or its right (-180). It's as deep as the runs are wide.
 ///
-/// `winders` carries a quarter turn on fanned treads instead of a flat landing: that many treads in
-/// the square the landing stands in, radiating from the inside corner of the turn, each a riser
-/// above the last. The first of them stands where the flat landing would and the run above it
-/// leaves where it would, so the fan climbs `winders - 1` risers the landing does not. None (0) is
-/// the flat landing; a fan takes 2 to [`MOST_WINDERS`] treads and only a quarter turn.
+/// `winders` carries the turn on that many treads instead of a flat landing, each a riser above the
+/// last. The first of them stands where the flat landing would and the run above it leaves where it
+/// would, so they climb `winders - 1` risers the landing does not. None (0) is the flat landing; a
+/// turn is carried on 2 to [`MOST_WINDERS`] treads.
+///
+/// `radius` is what those treads are drawn about. None (0) is a fan: the treads fill the square the
+/// landing stands in, radiating from the corner on the inside of the turn, which only a quarter turn
+/// fills. A radius makes them a curved run instead: each tread lies between an arc that far from the
+/// centre of the turn and one the stair's width beyond it, which carries a half turn as readily as a
+/// quarter.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Landing {
@@ -991,9 +996,11 @@ pub struct Landing {
     pub turn: f64,
     #[serde(default, skip_serializing_if = "is_no_fan")]
     pub winders: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub radius: f64,
 }
 
-/// How many fanned treads at most carry one turn of a stair: past this each is too narrow to stand on.
+/// How many treads at most carry one turn of a stair: past this each is too narrow to stand on.
 pub const MOST_WINDERS: u32 = 12;
 
 /// A ramp from `level` up to `top_level` (or `height` mm), from the middle of its foot at `start`
@@ -4487,7 +4494,7 @@ fn crop(who: &str, a: P2, b: P2) -> Result<(), String> {
 
 /// Landings between runs, going up: each a run of two risers or more from the last and to the
 /// next (on a stair of `risers`), after a whole number of them; or on a ramp, up from its foot;
-/// each turning square or back, on a flat landing or on fanned treads where it turns a quarter.
+/// each turning square or back, on a flat landing, on fanned treads, or round a curve of its own.
 fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), String> {
     if landings.len() > 100 {
         return Err(format!("{who}: more than 100 landings"));
@@ -4497,16 +4504,32 @@ fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), 
         coord(&format!("{who} landing"), l.at)?;
         if l.winders == 1 || l.winders > MOST_WINDERS {
             return Err(format!(
-                "{who}: a turn is carried on 2 to {MOST_WINDERS} fanned treads, not {}; `winders` is left out for a landing that is flat",
+                "{who}: a turn is carried on 2 to {MOST_WINDERS} treads, not {}; `winders` is left out for a landing that is flat",
                 l.winders
+            ));
+        }
+        if !l.radius.is_finite() || l.radius < 0.0 || l.radius > MAX_COORD {
+            return Err(format!(
+                "{who}: `radius` is how far from the centre of the turn the inside of a curved run is drawn, in mm, and {} is \
+                 no such length",
+                l.radius
+            ));
+        }
+        if l.radius > 0.0 && l.winders < 2 {
+            return Err(format!(
+                "{who}: `radius` is the curve the treads of a turn are drawn about, so it goes with `winders` and not with \
+                 a landing that is flat"
             ));
         }
         if l.winders > 0 && risers.is_none() {
             return Err(format!("{who}: a ramp's landings are flat, so `winders` is a stair's and not a ramp's"));
         }
-        if l.winders > 0 && l.turn.abs() != 90.0 {
+        // A fan fills the square a flat landing would stand in, which only a quarter turn fills; a curved run is
+        // drawn about a centre of its own, so it carries a half turn as readily as a quarter.
+        if l.winders > 0 && !(l.turn.abs() == 90.0 || (l.radius > 0.0 && l.turn.abs() == 180.0)) {
             return Err(format!(
-                "{who}: fanned treads carry a quarter turn, so a landing on {} of them turns 90 or -90, not {}",
+                "{who}: fanned treads fill the square of a quarter turn, so a landing on {} of them turns 90 or -90, not {}; \
+                 a `radius` makes them a curved run, which turns 180 or -180 as well",
                 l.winders, l.turn
             ));
         }

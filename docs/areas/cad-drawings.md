@@ -750,8 +750,33 @@ the run above it leaves where it would, so what the fan adds is the treads betwe
 can be more than `steps`, and why `length`, which is what the runs are walked along, leaves those risers out.
 A stair is built with them the same way: `Landing { winders }` cuts the landing's square into that many wedges
 from the corner (`stairs::fan`), each a riser above the last, with the walk line through the middle of each, half
-the width out from the corner. `Model::check` holds it to a quarter turn, to 2 to `MOST_WINDERS` treads, and to a
+the width out from the corner. `Model::check` holds a fan to a quarter turn, to 2 to `MOST_WINDERS` treads, and to a
 stair rather than a ramp, and `Model::flight` leaves the risers it turns on out of every run's length.
+
+The other way to carry a turn while climbing it is a curved run: the treads turn about a centre of their own
+instead of filling the square of a landing, and the plan draws them between two arcs with their risers out along
+the radius. That arc is the one thing of a building a plan draws that has to be read as an arc and not as the
+line through the points along it (`underlay::lines`), because how far out it is drawn is the radius the run is
+built to — so `underlay::arcs` gives the arcs as the file holds them, each a `Bend`, and `trace::curves` gathers
+what one of them is drawn with: the lines out along its radius, each as far out as the rest of them are, which is
+what a run drawn to one width the whole way round means. A line that keeps neither is drawn about the same centre
+as something else, and then nothing is read there rather than something wrong.
+
+A circle with lines drawn to it is a hinge, a bolt circle or the swing of a door as readily as a stair, so what
+tells one of those from a curved run is not in `trace` either but in `cad_stair`, which knows where the runs
+stand: a curve belongs to a turn where its two arcs stand on the two ends of the top riser of the run below (the
+centre being out along that riser, past the end on the inside of the turn), where they are as far apart as that
+run is drawn wide, and where it turns as far as the runs themselves do. Its treads are counted as a fan's are —
+the first and the last of its risers are the two runs' own, so the treads are one more than the risers drawn
+between those two — and they climb the same `winders - 1` risers. A turn is read as a curved run where one is drawn and as a fan where the lines stand at the corner
+instead; both at once is nothing a stair is built with, so the curve is the one that is read.
+
+A stair is built with a curved run by `stairs::curve`: `Landing { winders, radius }` cuts the quarter or the half
+it turns into that many treads between an arc `radius` from the centre and one the stair's width beyond it, each
+a riser above the last, with the walk line through the middle of each at the mid radius of the two. With a radius
+of nothing at all that comes out where the fan does, which is why the run above a turn leaves the same place
+either way; what a curved run has and a fan has not is the well it turns about, left open inside the inner arc.
+A half turn is a curved run's and not a fan's, because the square of a landing cannot hold one.
 
 Which end of a run is its foot is the one thing a plan draws nothing of — but a run joined on to another has only
 the one end that can be its foot, so the runs are read in one piece and which end of the whole of it is the foot
@@ -767,9 +792,17 @@ anyone climbs: either the flight turns, or the plan draws only the steps under i
 comes to 633 and the rule of thumb is satisfied, and the run then reaches past the wing — the reading says both
 and settles neither, because the drawing does not.
 
-Nor is there a fan there: `landings` comes back empty, so there is no turn, and a fan is what carries a turn.
-That is also the limit of the reading, said plainly — it looks for a fan only at a turn between two runs, so a
-fan drawn with nothing joined on above it is not read. On this plan there is nothing for one to turn into.
+Nor is there a fan or a curved run there: `landings` comes back empty, so there is no turn, and both of those are
+ways of carrying a turn. That is also the limit of the reading, said plainly — it looks for either only at a turn
+between two runs, so a fan or a curve drawn with nothing joined on above it is not read, and a stair that is one
+curved run from foot to top (a spiral) is read as no stair at all, because there is no straight run in it for a
+flight to be found in. On this plan there is nothing for one to turn into.
+
+And one limit more, which that same file names outright: it reports **606 polyline arcs, read as the straight
+line between their points** in `left_out`. A bulge — an arc between two points of a polyline — is read as that
+straight line by `dxf.rs` and is no `Shape::Arc`, so `underlay::arcs` does not hold it and a curved run drawn
+that way is not read as a curve. The reading takes an arc the file holds as an `ARC` or a `CIRCLE`; what
+`left_out` says is what it did not take.
 
 ## The slab under the floor of a storey
 

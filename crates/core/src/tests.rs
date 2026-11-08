@@ -3034,8 +3034,8 @@ fn a_stair_turns_on_fanned_treads_where_its_landing_has_winders() {
     for (landings, why) in [
         (json!([{"at": 8, "turn": 0, "winders": 3}]), "quarter"),
         (json!([{"at": 8, "turn": 180, "winders": 3}]), "quarter"),
-        (json!([{"at": 8, "turn": -90, "winders": 1}]), "fanned"),
-        (json!([{"at": 8, "turn": -90, "winders": 99}]), "fanned"),
+        (json!([{"at": 8, "turn": -90, "winders": 1}]), "treads, not"),
+        (json!([{"at": 8, "turn": -90, "winders": 99}]), "treads, not"),
         (json!([{"at": 14, "turn": -90, "winders": 3}]), "risers"),
     ] {
         let e = s.execute("modify", &json!({"id": st, "landings": landings})).unwrap_err();
@@ -3048,6 +3048,57 @@ fn a_stair_turns_on_fanned_treads_where_its_landing_has_winders() {
     let e = s
         .execute("ramp", &json!({"start": [-4000, -6000], "angle": 0, "height": 600, "landings": [{"at": 300, "turn": 90, "winders": 3}]}))
         .unwrap_err();
+    assert!(e.contains("ramp"), "{e}");
+}
+
+#[test]
+fn a_radius_turns_a_stair_on_a_curved_run_between_two_arcs() {
+    let mut s = Session::new();
+    house(&mut s);
+    // The same 17 risers, and the same quarter turn after 8 of them on three treads — but drawn about a centre
+    // 500 mm past the edge of the run instead of filling the square at its head. The treads lie between an arc
+    // 500 from that centre and one 1500 from it, which is the stair's width beyond.
+    let told = json!({"start": [1000, 1000], "angle": 90, "landings": [{"at": 8, "turn": -90, "winders": 3, "radius": 500}]});
+    let st = run(&mut s, "stair", told)["id"].as_u64().unwrap();
+    let e = element(&mut s, st);
+    assert_eq!(e["risers"], 17);
+    assert_eq!(e["landings"], json!([{"at": 8.0, "turn": -90.0, "winders": 3, "radius": 500.0}]), "{e}");
+    // The run above it leaves where the curve leaves off, which is as far round as the turn goes: a quarter
+    // circle of the mid radius from the end of the run below, where a fan would have left it half a width on.
+    assert_eq!(e["runs"], json!([[[1000.0, 1000.0], [1000.0, 2960.0]], [[2000.0, 3960.0], [3680.0, 3960.0]]]), "{e}");
+    assert_eq!(e["length"], json!(3640.0), "13 treads walked, as over a fan");
+    // Three treads round the turn, each a riser above the last, at the middle of the run: the mid radius of the
+    // two arcs, a third of the quarter apart.
+    let each = 3000.0 / 17.0;
+    let tops = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&st).copied();
+    for (x, y, risers, which) in
+        [(1034.1, 3218.8, 8.0, "the first"), (1292.9, 3667.1, 9.0, "the second"), (1741.2, 3925.9, 10.0, "the third")]
+    {
+        let at = tops(&s, x, y);
+        assert!(at.is_some_and(|z| (z - risers * each).abs() < 1e-6), "{which} tread of the curve, {risers} risers up: {at:?}");
+    }
+    // And the well it turns about is open: inside the inner arc there is no stair at all, which is what a curved
+    // run has and a fan has not.
+    assert_eq!(tops(&s, 1858.6, 3101.4), None, "the well inside the inner arc");
+    // A half turn is drawn about a centre as readily as a quarter, which the square of a landing cannot hold: on
+    // four treads about a centre 400 past the edge, the run above comes back 1800 to the west of this one.
+    run(&mut s, "modify", json!({"id": st, "landings": [{"at": 8, "turn": 180, "winders": 4, "radius": 400}]}));
+    let e = element(&mut s, st);
+    assert_eq!(e["runs"], json!([[[1000.0, 1000.0], [1000.0, 2960.0]], [[-800.0, 2960.0], [-800.0, 1560.0]]]), "{e}");
+    // What a curved run is not: a turn no run turns, a radius with no treads to draw about it, and a radius that
+    // is no length.
+    for (landings, why) in [
+        (json!([{"at": 8, "turn": 0, "winders": 3, "radius": 500}]), "quarter"),
+        (json!([{"at": 8, "turn": -90, "radius": 500}]), "winders"),
+        (json!([{"at": 8, "turn": -90, "winders": 3, "radius": -500}]), "length"),
+    ] {
+        let e = s.execute("modify", &json!({"id": st, "landings": landings})).unwrap_err();
+        assert!(e.contains(why), "{landings}: {e}");
+    }
+    // A ramp's landings are flat, so it has no curved run either.
+    let told =
+        json!({"start": [-4000, -6000], "angle": 0, "height": 600, "landings": [{"at": 300, "turn": 90, "winders": 3, "radius": 500}]});
+    let e = s.execute("ramp", &told).unwrap_err();
     assert!(e.contains("ramp"), "{e}");
 }
 

@@ -416,6 +416,118 @@ pub fn rays(m: &Model, u: &Underlay, how: &How, at: &[P2], near: f64) -> Result<
     Ok(out)
 }
 
+/// How far out of true the risers of a curved run may be drawn and still be read as its risers, as a share of how
+/// far out they are drawn, and never less than the thinnest wall looked for.
+const CURVE_SLACK: f64 = 0.05;
+/// How many degrees off the radius one of them may be drawn.
+const CURVE_SKEW: f64 = 5.0;
+/// How many arcs are more than a drawing of a building holds.
+const MAX_BENDS: usize = 5_000;
+
+/// A curved run of steps a plan draws: an arc, and the risers drawn out along the radius of it.
+///
+/// A stair with a curved run draws the risers of its steps along the radius instead of parallel across the run,
+/// which is why [`flights`] passes them over, and draws the edges of the run as arcs — which is the one thing of
+/// a building a plan draws that has to be read as an arc and not as the line through the points along it, because
+/// how far out it is drawn is the radius the run is built to. A circle with lines drawn to it is a great many
+/// other things as well: a hinge, a bolt circle, the swing of a door. So what tells a curved run of a stair from
+/// those is where it stands and what it measures against the runs it turns between, which is `cad_stair`'s
+/// business and not this one's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Curve {
+    /// The centre its risers are drawn about.
+    pub at: P2,
+    /// How far from that the inside of the run is drawn, and how far the outside: the two arcs of it.
+    pub inner: f64,
+    pub outer: f64,
+    /// Its risers, in the order they stand round the turn, each the end of the line on the inside of the run and
+    /// then the end on the outside. Which end of the run is its foot is no more drawn here than in a flight.
+    pub steps: Vec<[P2; 2]>,
+    /// How far round the first of them stands from the last, in degrees.
+    pub sweep: f64,
+}
+
+/// The curved runs the drawing `u` holds, in the project's millimetres and where it stands.
+///
+/// Each is an arc the drawing draws with lines out along its radius: lines drawn from one of the two arcs to the
+/// other, each standing as far out as the rest of them do, which is what a run drawn to one width the whole way
+/// round means. A line that keeps neither is drawn about the same centre as something else, and then nothing is
+/// read there at all rather than something wrong.
+pub fn curves(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Curve>, String> {
+    let how = how.checked()?;
+    let bends = crate::underlay::arcs(m, u);
+    if bends.len() > MAX_BENDS {
+        return Err(format!(
+            "this drawing holds more than {MAX_BENDS} arcs: hide the layers that are not the building's, or say the area to              read with `region`"
+        ));
+    }
+    let (faces, ..) = faces_of(m, u, &how)?;
+    let mut out: Vec<Curve> = Vec::new();
+    for (_, bend) in &bends {
+        let round = |deg: f64| P2(bend.at.0 + bend.radius * deg.to_radians().cos(), bend.at.1 + bend.radius * deg.to_radians().sin());
+        if !(bend.radius.is_finite() && bend.radius > 0.0 && bend.at.is_finite() && how.holds(round(bend.from), round(bend.to))) {
+            continue;
+        }
+        let slack = (bend.radius * CURVE_SLACK).max(how.thin);
+        let wide = (slack / bend.radius).to_degrees();
+        // The lines drawn out along the radius of it, each with how far round it stands and how far out its two
+        // ends are drawn.
+        let mut found: Vec<(f64, [P2; 2], f64, f64)> = Vec::new();
+        for f in &faces {
+            let (a, b) = (f.at, f.end());
+            let (ra, rb) = (a.dist(bend.at), b.dist(bend.at));
+            let (near, far, rn, rf) = match ra <= rb {
+                true => (a, b, ra, rb),
+                false => (b, a, rb, ra),
+            };
+            // Out along the radius: drawn the way the radius runs where its near end stands, and its two ends as
+            // far apart in how far out they are drawn as it is long. A chord of the arc keeps neither, and a line
+            // drawn beside the radius instead of along it keeps the second and not the first.
+            if rn <= slack || (rf - rn - f.len).abs() > slack {
+                continue;
+            }
+            if (far - near).unit().cross((near - bend.at).unit()).abs() > CURVE_SKEW.to_radians().sin() {
+                continue;
+            }
+            // One of its ends is drawn on this arc, and it stands where the arc is drawn.
+            if (rn - bend.radius).abs() > slack && (rf - bend.radius).abs() > slack {
+                continue;
+            }
+            let deg = near - bend.at;
+            let deg = (deg.1.atan2(deg.0).to_degrees() - bend.from).rem_euclid(360.0);
+            match deg <= bend.sweep() + wide {
+                true => found.push((deg, [near, far], rn, rf)),
+                // Just short of the first of the arc, which is the same riser drawn a hair out of true.
+                false if deg >= 360.0 - wide => found.push((deg - 360.0, [near, far], rn, rf)),
+                false => {}
+            }
+        }
+        if found.len() < LEAST_STEPS {
+            continue;
+        }
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let k = found.len() as f64;
+        let (inner, outer) = (found.iter().map(|f| f.2).sum::<f64>() / k, found.iter().map(|f| f.3).sum::<f64>() / k);
+        if found.iter().any(|f| (f.2 - inner).abs() > slack || (f.3 - outer).abs() > slack) {
+            continue;
+        }
+        let sweep = match (found.first(), found.last()) {
+            (Some(first), Some(last)) => last.0 - first.0,
+            _ => continue,
+        };
+        let curve = Curve { at: bend.at, inner, outer, steps: found.iter().map(|f| f.1).collect(), sweep };
+        // A plan draws both arcs of a run, and the risers between them are the same risers read from either.
+        let had = |had: &Curve| {
+            had.at.dist(curve.at) <= slack && (had.inner - curve.inner).abs() <= slack && had.steps.len() == curve.steps.len()
+        };
+        if !out.iter().any(had) {
+            out.push(curve);
+        }
+    }
+    out.sort_by_key(|c| std::cmp::Reverse(c.steps.len()));
+    Ok(out)
+}
+
 /// The longest stretch of lines standing evenly apart in `group`, as a flight: in order across the run, with the
 /// going they keep, how wide they are drawn and which way the run goes. None where too few of them stand evenly
 /// to be a flight at all.

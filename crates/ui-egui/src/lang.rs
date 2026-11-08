@@ -2741,6 +2741,11 @@ const WORDS: &[[&str; 3]] = &[
         "Tras {} contrahuellas gira {} en {} peldaños en abanico.",
     ],
     [
+        "After {} risers it turns {} on {} curved treads, the inside of them {} mm from the centre.",
+        "Depois de {} espelhos vira {} em {} degraus curvos, o lado interno a {} mm do centro.",
+        "Tras {} contrahuellas gira {} en {} peldaños curvos, el lado interior a {} mm del centro.",
+    ],
+    [
         "The landing it is built with puts the next run {} mm from where the plan draws it.",
         "O patamar com que é construída põe o lanço seguinte a {} mm de onde a planta o desenha.",
         "La meseta con que se construye sitúa el tramo siguiente a {} mm de donde lo dibuja la planta.",

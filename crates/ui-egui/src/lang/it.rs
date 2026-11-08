@@ -1969,6 +1969,10 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["After {} risers it turns {}.", "Dopo {} alzate gira {}."],
     ["After {} risers it turns {} on {} fanned treads.", "Dopo {} alzate gira {} su {} gradini a ventaglio."],
     [
+        "After {} risers it turns {} on {} curved treads, the inside of them {} mm from the centre.",
+        "Dopo {} alzate gira {} su {} gradini curvi, il lato interno a {} mm dal centro.",
+    ],
+    [
         "The landing it is built with puts the next run {} mm from where the plan draws it.",
         "Il pianerottolo con cui viene costruita mette la rampa successiva a {} mm da dove la disegna la pianta.",
     ],

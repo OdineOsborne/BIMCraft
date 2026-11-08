@@ -52,6 +52,51 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
     out
 }
 
+/// A bend of a circle a drawing draws: where its centre stands in the project, how far out it is drawn, and the
+/// angles it runs between, counter-clockwise from the first to the second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bend {
+    pub at: P2,
+    pub radius: f64,
+    pub from: f64,
+    pub to: f64,
+}
+
+impl Bend {
+    /// How far round it goes from `from`, in degrees: a whole circle where it closes on itself.
+    pub fn sweep(&self) -> f64 {
+        let turn = self.to - self.from;
+        if turn <= 0.0 { turn + 360.0 } else { turn }
+    }
+
+    /// Whether it is drawn at `deg`, give or take `slack` degrees at either end of it.
+    pub fn holds(&self, deg: f64, slack: f64) -> bool {
+        let at = (deg - self.from).rem_euclid(360.0);
+        at <= self.sweep() + slack || at >= 360.0 - slack
+    }
+}
+
+/// The bends the underlay draws, each with the layer it is drawn on, in the project's millimetres and where it
+/// stands: the arcs as the drawing holds them, which [`lines`] gives as the line through the points along them.
+///
+/// A curved run of a stair is the one thing of a building a plan draws that has to be read as an arc and not as
+/// that line: how far out it is drawn is the radius the run is built to, and the centre it is drawn about is the
+/// centre the treads turn about. So it is read from the drawing itself.
+pub fn arcs(m: &Model, u: &Underlay) -> Vec<(String, Bend)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out: Vec<(String, Bend)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            let crate::dxf::Shape::Arc { at, radius, from, to } = shape else { continue };
+            // Turned with the drawing: an arc placed turned is drawn between the angles that far round.
+            out.push((layer.name.clone(), Bend { at: place(*at), radius: *radius, from: from + u.angle, to: to + u.angle }));
+        }
+    }
+    out
+}
+
 /// The words the underlay writes, each with the layer it is written on, as the strokes our own lettering draws them
 /// with, in this project's millimetres. They are drawn and nothing else: [`lines`] leaves them out.
 pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
