@@ -895,21 +895,24 @@ pub fn export(m: &Model) -> String {
                 let Some(&(_, storey)) = storeys.get(&r.level) else { continue };
                 let (base, l) = (m.elevation(r.level), stairs::ramp(m, r));
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let ent =
-                    w.add(format!("IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&r.landings, false, "RAMP")));
+                let ent = w.add(format!(
+                    "IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})",
+                    w.guid(ELEMENT, id),
+                    shape_of(&r.landings, r.spiral.is_some(), "RAMP")
+                ));
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
-                // Its flights, each solid from the floor up to its slope, as in 3D; its landings.
+                // Its flights, each solid from the floor up to its slope, as in 3D; a helical one is one flight
+                // of as many solids as its deck is drawn in pieces, because no plane holds more of a helicoid.
+                // Its landings.
                 let mut parts = Vec::new();
                 for (i, run) in l.runs.iter().enumerate() {
-                    let g = run.u * ((run.z.1 - run.z.0) / run.length.max(1e-9));
-                    let top = walls::Plane { z: run.z.0 - g.dot(run.start), g };
-                    let brep = w.prism(&run.ring(r.width), &walls::Plane::flat(base), &top, base);
-                    let shape = w.solid(&[brep], &[]);
+                    let breps: Vec<u64> =
+                        run.slabs(r.width).iter().map(|(ring, top)| w.prism(ring, &walls::Plane::flat(base), top, base)).collect();
+                    let shape = w.solid(&breps, &[]);
                     let fat = w.place(Some(at), (0.0, 0.0, 0.0), None);
-                    parts.push(
-                        w.add(format!("IFCRAMPFLIGHT({},$,'Flight',$,$,#{fat},#{shape},$,.STRAIGHT.)", w.guid(FLIGHT, w.part(id, i)))),
-                    );
+                    let kind = if run.bend.is_some() { ".SPIRAL." } else { ".STRAIGHT." };
+                    parts.push(w.add(format!("IFCRAMPFLIGHT({},$,'Flight',$,$,#{fat},#{shape},$,{kind})", w.guid(FLIGHT, w.part(id, i)))));
                 }
                 parts.extend(w.landings(&l, at, base, id));
                 wholes.insert(id, (ent, at, base, parts));

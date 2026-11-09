@@ -1838,6 +1838,58 @@ fn ramps_climb_at_the_options_bars_slope_and_turn_at_landings() {
 }
 
 #[test]
+fn a_radius_in_the_options_bar_coils_a_ramp_or_a_stair_about_a_centre() {
+    let mut h = app(BOX);
+    tool(&mut h, "Ramp");
+    h.get_by_role_and_label(Role::ComboBox, "Height:").click();
+    h.run();
+    press(&mut h, "Unconnected");
+    h.get_by_role_and_label(Role::TextInput, "Height:").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_role_and_label(Role::TextInput, "Height:").type_text("3000");
+    h.run();
+    type_into(&mut h, "Slope:", "10");
+    type_into(&mut h, "Width:", "3000");
+    // With a radius it coils: its foot, then which way it sets off, then which side it coils to.
+    type_into(&mut h, "Radius:", "4000");
+    click(&mut h, P2(1000.0, 1000.0));
+    click(&mut h, P2(5000.0, 1000.0));
+    assert!(ids(&h, "ramp").is_empty(), "which side it coils to is still to say");
+    click(&mut h, P2(1000.0, 5000.0));
+    let r = ids(&h, "ramp");
+    assert_eq!((r.len(), field(&h, r[0], "spiral")), (1, json!({"radius": 4000.0, "to": "left"})));
+    assert!(field(&h, r[0], "landings").is_null(), "one curved run, so no landing");
+    // Three metres up at a tenth is thirty metres of run, which 5.5 m out from the centre is 312 degrees round.
+    // Nobody tells it that, so it is said once it is made.
+    assert_eq!((field(&h, r[0], "length"), field(&h, r[0], "spiral_turn")), (json!(30000.0), json!(312.52)));
+    assert!(h.state().status.text.contains("313 degrees round"), "{:?}", h.state().status.text);
+    assert_eq!(ids(&h, "railing").len(), 2, "with its railings");
+    // The Stair tool coils the same way, and then the run clicked says only which way it sets off: here north,
+    // and the click east of it coils it to the right.
+    tool(&mut h, "Stair");
+    type_into(&mut h, "Width:", "1000");
+    type_into(&mut h, "Radius:", "300");
+    click(&mut h, P2(1000.0, 1000.0));
+    click(&mut h, P2(1000.0, 3000.0));
+    assert!(ids(&h, "stair").is_empty(), "which side it coils to is still to say");
+    click(&mut h, P2(3000.0, 3000.0));
+    let st = ids(&h, "stair");
+    assert_eq!((st.len(), field(&h, st[0], "spiral")), (1, json!({"radius": 300.0, "to": "right"})));
+    assert_eq!(field(&h, st[0], "runs"), json!([]), "a spiral stair has no straight run");
+    // Rubbed out of the bar, it runs straight again: the run clicked is a run once more, and climbs all the way.
+    h.get_by_label("Radius:").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    key(&mut h, Key::Backspace);
+    click(&mut h, P2(6000.0, 1000.0));
+    click(&mut h, P2(6000.0, 5500.0));
+    let straight = ids(&h, "stair")[1];
+    assert!(field(&h, straight, "spiral").is_null(), "no coil without a radius");
+    assert!(!field(&h, straight, "runs").as_array().is_none_or(Vec::is_empty), "it runs straight");
+}
+
+#[test]
 fn the_railing_tool_follows_a_stair_picked_or_a_path_clicked() {
     let mut h = app(&format!("{BOX}\nstair {{\"start\": [1000, 1000], \"end\": [1000, 2000]}}"));
     let stair = ids(&h, "stair")[0];

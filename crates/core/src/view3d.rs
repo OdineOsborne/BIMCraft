@@ -549,21 +549,14 @@ fn solids_in(m: &Model, elements: &[(Id, &Element)], index: Option<&walls::Index
                 }
                 out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
             }
-            // Each run solid from its level up to its slope, each landing up to its top.
+            // Each run solid from its level up to its slope, each landing up to its top; a helical one piece by
+            // piece, its two curved sides each one surface.
             Element::Ramp(r) => {
                 let (base, l) = (m.elevation(r.level), stairs::ramp(m, r));
                 for run in &l.runs {
-                    let g = run.u * ((run.z.1 - run.z.0) / run.length.max(1e-9));
-                    let top = Plane { z: run.z.0 - g.dot(run.start), g };
-                    out.push(Solid::Prism {
-                        owner: id,
-                        color: SLAB,
-                        tex: 0,
-                        ring: run.ring(r.width),
-                        bottom: Plane::flat(base),
-                        top,
-                        curve: None,
-                    });
+                    for (ring, top) in run.slabs(r.width) {
+                        out.push(Solid::Prism { owner: id, color: SLAB, tex: 0, ring, bottom: Plane::flat(base), top, curve: run.round() });
+                    }
                 }
                 out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
             }

@@ -2055,8 +2055,9 @@ fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: impl Key) {
 }
 
 /// A ramp in the plan of `level`: from its own level, its runs' and landings' outlines, dashed
-/// where they're over the cut plane, and its walk line marked UP; from the level it climbs to, all
-/// of it, marked DN.
+/// where they're over the cut plane — a helical one's arcs dashing from where they climb past it,
+/// because the whole of it is one run — and its walk line marked UP; from the level it climbs to,
+/// all of it, marked DN.
 fn ramp(d: &mut Drawing, m: &Model, r: &Ramp, level: impl Key) {
     let level = m.guid(level);
     let up = r.level == level;
@@ -2065,11 +2066,9 @@ fn ramp(d: &mut Drawing, m: &Model, r: &Ramp, level: impl Key) {
     }
     let l = stairs::ramp(m, r);
     let cut = if up { m.plan_range(level).cut } else { f64::INFINITY };
-    let rings = l.runs.iter().map(|run| (run.ring(r.width), run.z.0)).chain(l.pads.iter().map(|p| (p.ring.clone(), p.z)));
-    for (ring, z) in rings {
-        for (a, b) in geom::ring_edges(&ring) {
-            segment(d, a, b, z > cut);
-        }
+    let pads = l.pads.iter().flat_map(|p| geom::ring_edges(&p.ring).map(|(a, b)| (a, b, p.z)));
+    for (a, b, z) in l.runs.iter().flat_map(|run| run.edges(r.width)).chain(pads) {
+        segment(d, a, b, z > cut);
     }
     walk(d, m, &l.walk, up);
 }

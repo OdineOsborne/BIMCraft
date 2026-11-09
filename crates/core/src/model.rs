@@ -57,13 +57,15 @@ pub const CEILING_CUT: f64 = 2300.0;
 pub const CEILING_HEIGHT: f64 = 2600.0;
 /// The steepest slope a floor or a roof may have, degrees.
 pub const MAX_SLOPE: f64 = 75.0;
-/// The version of the project file this build writes, and the newest it reads. 4: a line weight is a pen (0 to 16), not
+/// The version of the project file this build writes, and the newest it reads. 8: a ramp may be helical (`spiral`), one
+/// curved run from its foot to its top. 7: a stair may be a spiral, the same. 6: a turn is carried on a curved run
+/// (`radius` on a landing). 5: a turn is carried on fanned treads (`winders`). 4: a line weight is a pen (0 to 16), not
 /// pixels of a sheet's drawing. 3: a type's layers and a family's forms and
 /// symbols hold ids and GUIDs; a family's types and parameters are library entries, and what uses them names them by GUID.
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 8;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -977,15 +979,17 @@ pub struct Stair {
     pub params: BTreeMap<String, serde_json::Value>,
 }
 
-/// A stair's one curved run from its foot to its top, a spiral stair: no straight run and no landing, every
-/// tread drawn between an arc `radius` from the centre it turns about and one the stair's width beyond it,
-/// each a riser above the last. The centre stands that far plus half its width from the middle of its foot,
-/// to the side it turns `to` as it climbs.
+/// The one curved run a stair or a ramp climbs in from its foot to its top: no straight run and no landing,
+/// drawn between an arc `radius` from the centre it turns about and one its width beyond it — a stair as a
+/// tread between them for every riser, a ramp as the one sloping deck of it. The centre stands that far plus
+/// half its width from the middle of its foot, to the side it turns `to` as it climbs.
 ///
-/// How far round it goes is not held here, because it cannot be: the storey says how many risers it climbs
-/// in, and the going at the walk line is the stair's `tread`, so each tread turns as far as that going takes
-/// it that far out from the centre and the whole of it turns as far as its treads do. A stair's info says
-/// how far that comes to.
+/// How far round it goes is not held here, because it cannot be: what the run has to cover is already said
+/// elsewhere, and the turn is what covering it comes to. A stair climbs in as many risers as the storey
+/// gives it, with the going at the walk line its `tread`, so each tread turns as far as that going takes it
+/// that far out from the centre; a ramp rises as far as its levels put it at the `slope` it rises, which is
+/// how long its run is, and that length at the walk line is how far round it reaches. Its info says how far
+/// that comes to.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spiral {
@@ -997,6 +1001,10 @@ pub struct Spiral {
 /// How far a tread of a spiral turns at most, in degrees: past this it is no tread, eight of them to the
 /// turn being tight already.
 pub const SPIRAL_STEEP: f64 = 45.0;
+
+/// How far round a helical ramp goes at most, in degrees: three turns of one storey, past which it is no one
+/// ramp of a building.
+pub const COIL_MOST: f64 = 1080.0;
 
 /// A landing between two runs of a stair or a ramp: after `at` risers of a stair, or `at` mm up a
 /// ramp; then the next run goes on straight (`turn` 0), turned left (90) or right (-90), or back
@@ -1032,7 +1040,8 @@ pub const MOST_RISERS: u32 = 200;
 
 /// A ramp from `level` up to `top_level` (or `height` mm), from the middle of its foot at `start`
 /// toward `angle` degrees: rising at its slope, `slope` percent (rise over run), in one run or in
-/// runs with a landing between each two. Solid down to its level.
+/// runs with a landing between each two; or, with a `spiral`, in one curved run the whole way up, a
+/// helical ramp, drawn about a centre to one side of its foot. Solid down to its level.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ramp {
@@ -1047,6 +1056,8 @@ pub struct Ramp {
     pub slope: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landings: Vec<Landing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spiral: Option<Spiral>,
     /// Its values of the project's parameters, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
@@ -4330,6 +4341,34 @@ impl Model {
                     landings(&who, &r.landings, None)?;
                     if let Some(l) = r.landings.last().filter(|l| l.at >= top - bottom - TOL) {
                         return Err(format!("{who}: a landing {} mm up isn't below its top, {} mm up", l.at, top - bottom));
+                    }
+                    if let Some(sp) = r.spiral {
+                        if !sp.radius.is_finite() || sp.radius < 0.0 || sp.radius > MAX_COORD {
+                            return Err(format!(
+                                "{who}: the inside of a helical ramp is drawn {} mm from the centre it turns about, which is no \
+                                 length: it is from 0 up to {MAX_COORD} mm",
+                                sp.radius
+                            ));
+                        }
+                        if !r.landings.is_empty() {
+                            return Err(format!(
+                                "{who}: a helical ramp is one curved run from its foot to its top, so it has no landings; \
+                                 `radius` on a landing turns a ramp of straight runs on a curve between two of them"
+                            ));
+                        }
+                        // The run is as long as the slope makes it, so how far round it goes follows from how far out the
+                        // walk line is: a ramp that goes further round than this is a tower of ramps and not one.
+                        let turn = ((top - bottom) / r.slope * 100.0 / (sp.radius + r.width / 2.0)).to_degrees();
+                        if !(turn.is_finite() && turn <= COIL_MOST) {
+                            return Err(format!(
+                                "{who}: it goes {turn:.0} degrees round, where a helical ramp goes {COIL_MOST:.0} at most: \
+                                 {} mm of run at {}% takes it that far round {} mm out from the centre, so move its centre \
+                                 out, widen it, or make it steeper",
+                                (top - bottom) / r.slope * 100.0,
+                                r.slope,
+                                sp.radius + r.width / 2.0
+                            ));
+                        }
                     }
                 }
                 Element::Railing(rl) => {

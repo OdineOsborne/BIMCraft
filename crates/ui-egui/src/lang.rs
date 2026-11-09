@@ -708,6 +708,7 @@ const WORDS: &[[&str; 3]] = &[
     ["Chain", "Cadeia", "Cadena"],
     ["Width:", "Largura:", "Ancho:"],
     ["Slope:", "Inclinação:", "Pendiente:"],
+    ["Radius:", "Raio:", "Radio:"],
     ["Overhang:", "Beiral:", "Voladizo:"],
     ["Gable", "Empena", "Hastial"],
     ["Constrain", "Restringir", "Restringir"],
@@ -1711,6 +1712,21 @@ const WORDS: &[[&str; 3]] = &[
         "Haz clic donde termina el tramo: más allá de su parte superior, un tramo, a la altura que indica la barra de opciones; antes, un descanso. Esc cancela.",
     ],
     [
+        "Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels.",
+        "Clique para onde ela parte do seu pé: com um raio, sobe num único lance curvo. Esc cancela.",
+        "Haz clic hacia donde arranca desde su pie: con un radio, sube en un solo tramo curvo. Esc cancela.",
+    ],
+    [
+        "Click which side it coils to as it climbs: to the left or the right of the way it sets off.",
+        "Clique para o lado para onde ela enrola ao subir: à esquerda ou à direita da direção em que parte.",
+        "Haz clic hacia el lado al que gira mientras sube: a la izquierda o a la derecha de la dirección en que arranca.",
+    ],
+    [
+        "It climbs in one curved run, {} degrees round.",
+        "Sobe num único lance curvo, {} graus de volta.",
+        "Sube en un solo tramo curvo, {} grados de giro.",
+    ],
+    [
         "Click which way the next run goes from the landing: on, left, right, or back beside it.",
         "Clique para onde o próximo lance segue a partir do patamar: em frente, à esquerda, à direita ou de volta ao lado.",
         "Haz clic hacia donde sigue el siguiente tramo desde el descanso: de frente, a la izquierda, a la derecha o de vuelta a su lado.",
@@ -1727,6 +1743,7 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["click where its run ends", "clique onde o lance termina", "haz clic donde termina el tramo"],
     ["ramp: `{}` is not a slope", "rampa: `{}` não é uma inclinação", "rampa: `{}` no es una pendiente"],
+    ["`{}` is not a radius", "`{}` não é um raio", "`{}` no es un radio"],
     ["ramp: `{}` is not a width", "rampa: `{}` não é uma largura", "rampa: `{}` no es un ancho"],
     ["ramp: {}", "rampa: {}", "rampa: {}"],
     ["{} of {} risers", "{} de {} espelhos", "{} de {} contrahuellas"],

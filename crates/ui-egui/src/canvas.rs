@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
     Clearance, Column, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Mass, Model,
-    NOTE_SIZE, Note, RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag, Wall,
+    NOTE_SIZE, Note, RISER, Ramp, Reference, Roof, Section, Side, Spiral, Spot, Stair, TOL, TREAD, Tag, Wall,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::snap::{self, Found, Kind, Reach};
@@ -1363,7 +1363,13 @@ impl BimApp {
                     (_, Ok((e, true))) => {
                         let mut params = serde_json::to_value(&e).unwrap_or_default();
                         params["railings"] = json!(self.railings);
-                        self.run(e.category(), params);
+                        let made = self.run(e.category(), params);
+                        // How far round a coiled one goes is told to nobody and follows from the rest, so it is
+                        // said once it is made.
+                        if let Some(turn) = made.as_ref().and_then(|v| v["spiral_turn"].as_f64()) {
+                            let text = tf("It climbs in one curved run, {} degrees round.", &[&format!("{turn:.0}")]);
+                            self.status = Status { text, error: false };
+                        }
                         Vec::new()
                     }
                     (_, Err(e)) => {
@@ -1581,7 +1587,22 @@ impl BimApp {
                 180f64.copysign(a)
             }
         });
-        let done = |landings: &[Landing]| landings.is_empty() || pts.len() > 2;
+        // With a radius in the Options Bar it coils about a centre that far inside it instead of running
+        // straight, and then the second click says which way it sets off and the third which side it coils
+        // to as it climbs; how far round it goes is not asked for, because it follows from the rest.
+        let spiral = match self.spiral_radius.trim() {
+            "" => None,
+            text => {
+                let radius = m.units.parse(text).ok_or_else(|| tf("`{}` is not a radius", &[text]))?;
+                let to = if pts.get(2).is_some_and(|p| (*p - end).dot(u.perp()) < 0.0) { Side::Right } else { Side::Left };
+                Some(Spiral { radius, to })
+            }
+        };
+        let done = |landings: &[Landing]| match spiral.is_some() {
+            // One curved run the whole way up, which the side it coils to finishes.
+            true => pts.len() > 2,
+            false => landings.is_empty() || pts.len() > 2,
+        };
         if ramp {
             let slope = number(&self.ramp_slope).ok_or_else(|| tf("ramp: `{}` is not a slope", &[&self.ramp_slope]))?;
             let width = m.units.parse(&self.ramp_width).ok_or_else(|| tf("ramp: `{}` is not a width", &[&self.ramp_width]))?;
@@ -1589,7 +1610,10 @@ impl BimApp {
             let (top_level, height) = (top["top_level"].as_u64().map(|t| m.guid(t)), top["height"].as_f64().unwrap_or(0.0));
             let (bottom, top) = m.span(level, 0.0, top_level, height);
             let up = (run * slope / 100.0 * 1000.0).round() / 1000.0;
-            let landings = if top - bottom - up > 1.0 { vec![Landing { at: up, turn, winders: 0, radius: 0.0 }] } else { Vec::new() };
+            let landings = match spiral.is_some() || top - bottom - up <= 1.0 {
+                true => Vec::new(),
+                false => vec![Landing { at: up, turn, winders: 0, radius: 0.0 }],
+            };
             let done = done(&landings);
             Ok((
                 Element::Ramp(Ramp {
@@ -1602,6 +1626,7 @@ impl BimApp {
                     width,
                     slope,
                     landings,
+                    spiral,
                 }),
                 done,
             ))
@@ -1618,12 +1643,13 @@ impl BimApp {
                 riser: RISER,
                 tread: TREAD,
                 landings: Vec::new(),
-                spiral: None,
+                spiral,
             };
             let (n, _, _) = m.flight(&st);
-            // As many risers as the run clicked holds, a tread between each two.
+            // As many risers as the run clicked holds, a tread between each two; a spiral stair climbs in one
+            // curved run, so the run clicked says only which way it sets off.
             let first = ((run / TREAD).round() + 1.0).max(2.0);
-            if f64::from(n) - first >= 2.0 {
+            if spiral.is_none() && f64::from(n) - first >= 2.0 {
                 st.landings.push(Landing { at: first, turn, winders: 0, radius: 0.0 });
             }
             let done = done(&st.landings);

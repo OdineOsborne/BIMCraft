@@ -432,6 +432,9 @@ pub struct BimApp {
     ramp_height: String,
     ramp_width: String,
     ramp_slope: String,
+    /// The Stair and Ramp tools' radius: with one, the stair or the ramp drawn coils about a centre
+    /// that far inside it instead of running straight, and is a spiral stair or a helical ramp.
+    spiral_radius: String,
     /// How high the Ceiling tool's ceilings are; the Slope Arrow's slope; the Shaft tool's top.
     ceiling_height: String,
     floor_slope: String,
@@ -825,6 +828,7 @@ impl BimApp {
             ramp_height: units.length(600.0),
             ramp_width: units.length(RAMP_WIDTH),
             ramp_slope: "8.33".into(),
+            spiral_radius: String::new(),
             ceiling_height: units.length(CEILING_HEIGHT),
             floor_slope: "5".into(),
             shaft_top: None,
@@ -1173,6 +1177,7 @@ impl BimApp {
                 &mut self.ceiling_height,
                 &mut self.ramp_height,
                 &mut self.ramp_width,
+                &mut self.spiral_radius,
                 &mut self.shaft_height,
                 &mut self.mass_height,
             ];
@@ -3202,6 +3207,8 @@ impl BimApp {
                     let l = ui.label(t("Width:"));
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.stair_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Radius:"));
+                    ui.add(TextEdit::singleline(&mut self.spiral_radius).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                     ui.checkbox(&mut self.railings, t("Railings"));
                 }
                 Tool::Ramp(_) => {
@@ -3213,6 +3220,8 @@ impl BimApp {
                     ui.add(TextEdit::singleline(&mut self.ramp_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                     let l = ui.label(t("Slope:"));
                     ui.add(TextEdit::singleline(&mut self.ramp_slope).desired_width(48.0).hint_text("%")).labelled_by(l.id);
+                    let l = ui.label(t("Radius:"));
+                    ui.add(TextEdit::singleline(&mut self.spiral_radius).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                     ui.checkbox(&mut self.railings, t("Railings"));
                 }
                 Tool::Roof => {
@@ -3412,6 +3421,14 @@ impl BimApp {
             Tool::Column => "Click to place a column, as high as the Options Bar says.",
             Tool::Run(..) | Tool::Stand(_) => structure::hint(&self.tool).unwrap_or_default(),
             Tool::Component | Tool::Fixture(_) => "Click where the component goes; Space turns it a quarter turn.",
+            // With a radius in the Options Bar, the run clicked says only which way it sets off, and the click
+            // after it which side it coils to.
+            Tool::Stair(pts) | Tool::Ramp(pts) if pts.len() == 1 && !self.spiral_radius.trim().is_empty() => {
+                "Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels."
+            }
+            Tool::Stair(pts) | Tool::Ramp(pts) if pts.len() == 2 && !self.spiral_radius.trim().is_empty() => {
+                "Click which side it coils to as it climbs: to the left or the right of the way it sets off."
+            }
             Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
             Tool::Stair(pts) if pts.len() == 1 => {
                 "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels."

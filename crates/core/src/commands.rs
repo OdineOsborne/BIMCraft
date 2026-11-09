@@ -805,7 +805,7 @@ pub static ALL: &[Command] = &[
          last, turning `to` the left (by default) or the right as it climbs, the centre standing `radius` and half the width \
          to that side of the middle of its foot. How far round it goes is not told to it and cannot be: the storey says how \
          many risers it climbs in and `tread` is the going at the walk line, so each tread turns as far as that going takes \
-         it out there and the whole of it turns as far as its treads do, which the stair's info gives as `spiral_turn`. \
+         it out there and the whole of it turns as far as its treads do, which it answers with, and its info gives, as `spiral_turn`. \
          With `railings`, a railing down each side too",
         stair,
     ),
@@ -813,10 +813,18 @@ pub static ALL: &[Command] = &[
         "ramp",
         "Ramp",
         &[],
-        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, slope?, landings?: [{at, turn?}, …], railings?} a ramp \
+        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, slope?, landings?: [{at, turn?}, …], \
+         spiral?: {radius, to?}, railings?} a ramp \
          from the middle of its foot at `start`, climbing toward `end` (or `angle` degrees) up to the next level, or `height` mm, \
          `width` wide (1200), at `slope` percent (8.33, 1 in 12), as long as that makes it; with landings `at` mm up, turning \
-         as a stair's do, and with `railings`, a railing down each side. Solid down to its level",
+         as a stair's do, and with `railings`, a railing down each side. Solid down to its level. \
+         `spiral` makes the whole of it one curved run instead, a helical ramp: no straight run and no landing, its deck \
+         sloping the whole way round between an arc `radius` from the centre it turns about and one the ramp's width beyond \
+         it, turning `to` the left (by default) or the right as it climbs, the centre standing `radius` and half the width to \
+         that side of the middle of its foot. How far round it goes is not told to it and cannot be: its levels say how far it \
+         rises and `slope` how steeply, so the run is as long as that makes it and goes as far round as that length reaches at \
+         the walk line, which it answers with, and its info gives, as `spiral_turn`; its `runs` then name the two ends of the curve and not a \
+         straight line between them",
         ramp,
     ),
     edit(
@@ -1842,7 +1850,12 @@ pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Inde
             let (bottom, top) = m.span(r.level, 0.0, r.top_level, r.height);
             let l = stairs::ramp(m, r);
             extra.insert("height".into(), json!(top - bottom));
-            extra.insert("length".into(), json!(hundredth(l.runs.iter().map(|r| r.length).sum())));
+            let length: f64 = l.runs.iter().map(|r| r.length).sum();
+            extra.insert("length".into(), json!(hundredth(length)));
+            // How far round a helical one goes, which is held nowhere: its run is as long as its slope makes it, so it
+            // turns as far as that length reaches at the walk line. A ramp of straight runs turns at its landings.
+            let turn = r.spiral.map(|sp| hundredth((length / (sp.radius + r.width / 2.0)).to_degrees()));
+            extra.insert("spiral_turn".into(), json!(turn));
             runs(&mut extra, &l);
         }
         Element::Railing(rl) => {
@@ -7195,7 +7208,11 @@ fn spiral_param(c: &str, p: &Value) -> Result<Option<crate::model::Spiral>, Stri
     match p.get("spiral") {
         v if absent(v) => Ok(None),
         Some(v @ Value::Object(_)) => serde_json::from_value(v.clone()).map(Some).map_err(|e| bad(c, format!("`spiral`: {e}"))),
-        Some(_) => Err(bad(c, "`spiral` is {radius, to?}: how far from the centre it turns about the inside of its treads is drawn")),
+        Some(_) => Err(bad(
+            c,
+            "`spiral` is {radius, to?}: how far from the centre it turns about the inside of it is drawn, \
+                              and which way it turns climbing",
+        )),
         None => Ok(None),
     }
 }
@@ -7233,9 +7250,11 @@ fn stair(s: &mut Session, p: &Value) -> R {
     };
     let (n, _, length) = m.flight(&st);
     let level = st.level;
+    // How far round a spiral one goes, which is held nowhere and follows from the rest.
+    let turn = st.spiral.map(|sp| hundredth((st.tread / (sp.radius + st.width / 2.0)).to_degrees() * f64::from(n.saturating_sub(1))));
     let id = s.model_mut().insert(Element::Stair(st));
     let railings = sides(c, s, p, id, level)?;
-    Ok(json!({"id": id, "risers": n, "length": length, "railings": railings}))
+    Ok(json!({"id": id, "risers": n, "length": length, "spiral_turn": turn, "railings": railings}))
 }
 
 /// With `railings`, a railing of the default type down each side of stair or ramp `id`: their ids.
@@ -7275,12 +7294,15 @@ fn ramp(s: &mut Session, p: &Value) -> R {
         width: num(c, p, "width")?.unwrap_or(RAMP_WIDTH),
         slope: num(c, p, "slope")?.unwrap_or(RAMP_SLOPE),
         landings: landings_param(c, p)?,
+        spiral: spiral_param(c, p)?,
     };
     let length: f64 = stairs::ramp(m, &r).runs.iter().map(|r| r.length).sum();
     let level = r.level;
+    // How far round a helical one goes, which is held nowhere and follows from the rest.
+    let turn = r.spiral.map(|sp| hundredth((length / (sp.radius + r.width / 2.0)).to_degrees()));
     let id = s.model_mut().insert(Element::Ramp(r));
     let railings = sides(c, s, p, id, level)?;
-    Ok(json!({"id": id, "length": hundredth(length), "railings": railings}))
+    Ok(json!({"id": id, "length": hundredth(length), "spiral_turn": turn, "railings": railings}))
 }
 
 fn railing(s: &mut Session, p: &Value) -> R {

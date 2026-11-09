@@ -363,6 +363,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Chain", "Catena"],
     ["Width:", "Larghezza:"],
     ["Slope:", "Pendenza:"],
+    ["Radius:", "Raggio:"],
     ["Overhang:", "Sporto:"],
     ["Gable", "Timpano"],
     ["Constrain", "Vincola"],
@@ -1140,6 +1141,15 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "Fai clic dove finisce la salita: oltre la sua sommità, una rampa alta quanto dice la barra delle opzioni; prima, un pianerottolo. Esc annulla.",
     ],
     [
+        "Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels.",
+        "Fai clic verso dove parte dal suo piede: con un raggio sale in una sola rampa curva. Esc annulla.",
+    ],
+    [
+        "Click which side it coils to as it climbs: to the left or the right of the way it sets off.",
+        "Fai clic da che parte gira salendo: a sinistra o a destra del verso in cui parte.",
+    ],
+    ["It climbs in one curved run, {} degrees round.", "Sale in una sola rampa curva, {} gradi di giro."],
+    [
         "Click which way the next run goes from the landing: on, left, right, or back beside it.",
         "Fai clic da che parte va la rampa successiva dal pianerottolo: dritto, a sinistra, a destra, o indietro accanto a essa.",
     ],
@@ -1150,6 +1160,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Click the path's next point. Enter finishes, Esc cancels.", "Fai clic sul punto successivo del percorso. Invio chiude, Esc annulla."],
     ["click where its run ends", "fai clic dove finisce la rampa"],
     ["ramp: `{}` is not a slope", "rampa: `{}` non è una pendenza"],
+    ["`{}` is not a radius", "`{}` non è un raggio"],
     ["ramp: `{}` is not a width", "rampa: `{}` non è una larghezza"],
     ["ramp: {}", "rampa: {}"],
     ["{} of {} risers", "{} di {} alzate"],

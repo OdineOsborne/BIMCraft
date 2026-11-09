@@ -331,6 +331,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Chain", "链"],
     ["Width:", "宽度："],
     ["Slope:", "坡度："],
+    ["Radius:", "半径："],
     ["Overhang:", "悬挑："],
     ["Gable", "山墙"],
     ["Constrain", "约束"],
@@ -973,6 +974,15 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "单击坡段的终点：越过顶端则为单跑，高度由选项栏指定；未到则为平台。按 Esc 取消。",
     ],
     [
+        "Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels.",
+        "单击它从底部出发的方向：设置半径后，它以一段弧形坡段上升。按 Esc 取消。",
+    ],
+    [
+        "Click which side it coils to as it climbs: to the left or the right of the way it sets off.",
+        "单击它上升时旋转的一侧：在出发方向的左侧或右侧。",
+    ],
+    ["It climbs in one curved run, {} degrees round.", "它以一段弧形坡段上升，共转 {} 度。"],
+    [
         "Click which way the next run goes from the landing: on, left, right, or back beside it.",
         "单击平台之后下一梯段的走向：直行、左转、右转，或折返到旁边。",
     ],
@@ -983,6 +993,7 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Click the path's next point. Enter finishes, Esc cancels.", "单击路径的下一个点。按 Enter 完成，按 Esc 取消。"],
     ["click where its run ends", "单击其梯段终点"],
     ["ramp: `{}` is not a slope", "坡道：`{}` 不是有效的坡度"],
+    ["`{}` is not a radius", "`{}` 不是有效的半径"],
     ["ramp: `{}` is not a width", "坡道：`{}` 不是有效的宽度"],
     ["ramp: {}", "坡道：{}"],
     ["{} of {} risers", "{} 个踢面（共 {} 个）"],

@@ -41,7 +41,8 @@ are, and `Model::ceiling_slabs` what's left. A shaft cuts each floor,
 ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). A stair or a ramp
 is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): a landing after `at` risers (a ramp's, `at`
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a stair's `spiral` makes the whole of it
-one curved run instead (`stairs::helix`), turning as far as its going carries it round; a railing on one follows its walk line moved out to
+one curved run instead (`stairs::helix`), turning as far as its going carries it round, and a ramp's makes it a helical
+ramp (`stairs::coil`), going as far round as its slope makes its run; a railing on one follows its walk line moved out to
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
 
@@ -62,3 +63,38 @@ A schedule asks every wall for that area, so it must not look through the projec
 wall schedule costs about 40 ms with the index and about 140 ms without it, and the gap grows with the square of the
 model. One element asked on its own (`element_json`, a tag, `inspect`) still looks the plain way, which for one element is
 the cheaper of the two.
+
+## The helical ramp, and coiling one by hand
+
+A ramp can be nothing but curve: one curved run from its foot to its top, a helical ramp, the kind a car climbs a
+storey on in a garage, with no straight run and no landing anywhere on it. `Ramp { spiral: Spiral { radius, to } }`
+says so — the same `Spiral` a spiral stair carries — and `stairs::coil` lays it out as the one ring between an arc
+`radius` from the centre it turns about and one the ramp's width beyond it, the centre standing `radius` and half
+the width to the side it turns `to`, which is where a spiral stair's centre stands too.
+
+How far round it goes is nowhere held in the model, for the same reason a spiral stair's turn is not: what the run
+has to cover is already said. The levels say how far it rises and `slope` how steeply, so the run is as long as
+those make it, and that length at the walk line — half the width out past `radius` — is how far round it reaches.
+Holding the turn instead would leave `slope` describing nothing, and then `Model::check` would be holding the rule
+on a ramp's slope against a number that is not the ramp's slope. So the turn is derived, answered by the `ramp`
+command and reported as `spiral_turn` in its info, and `Model::check` refuses a radius that is no length, a
+helical ramp with a landing on it, and one that goes further round than `COIL_MOST` (1080 degrees: three turns of
+one storey, past which it is a tower of ramps and not one).
+
+Its deck is a helicoid, which no plane holds: `Run { bend: Some(Bend { c, sweep }) }` carries a run round a centre
+instead of straight on, and `Run::slabs` cuts a bent one into as many pieces as a plan draws its arc in, each a
+ring in plan with the plane of its own top. The 3D view and IFC build a piece at a time (one `IFCRAMPFLIGHT`, of
+`.SPIRAL.`, whose body is the shells of all of them, inside an `IFCRAMP` of `.SPIRAL_RAMP.`), while a plan draws
+the one ring of the whole run, because a plan of a ramp shows the band it covers and not the pieces it is built
+from. Each piece is level square to the way it runs, as a ramp is; no flat piece of a helicoid is level along both
+the radial lines it meets its neighbours on, so where two meet they stand level on the walk line and a hair apart
+at the edges — about a centimetre for every metre out at a tenth of a slope. Reading one back from IFC is the one
+thing that does not round-trip: `import::ramp_from` measures a flight from its one flat sloping top, so a helical
+ramp comes back in `skipped` with its reason rather than as a straight run in the wrong place.
+
+Neither a helical ramp nor a spiral stair is drawn from a plan — a ramp leaves nothing in a drawing to tell it
+from two arcs, having no treads — so both are drawn by hand instead: the Stair and Ramp tools take a **Radius** in
+the Options Bar, and with one the three clicks say the middle of its foot, which way it sets off, and which side
+it coils to as it climbs. The length of the run clicked says nothing then, because the turn follows from the rest,
+so the window says how far round it went once it is made. A spiral stair can also be read from a plan, which is
+its own story: [CAD drawings](cad-drawings.md).

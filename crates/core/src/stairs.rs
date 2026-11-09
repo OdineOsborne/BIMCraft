@@ -7,7 +7,9 @@ use crate::model::{Element, MOST_RISERS, Model, RAILING_INSET, Railing, Ramp, Si
 use crate::walls::Plane;
 
 /// A run: from the middle of its foot, `start`, along unit `u`, `length` long, from height `z.0`
-/// up to `z.1`. A stair's has `risers` risers, its first at its start and its last at its end.
+/// up to `z.1`. A stair's has `risers` risers, its first at its start and its last at its end. A
+/// `bend` carries it round a centre instead of straight on, and then `length` is how far it runs
+/// along its walk line and `u` only where it sets off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Run {
     pub start: P2,
@@ -15,17 +17,95 @@ pub struct Run {
     pub length: f64,
     pub z: (f64, f64),
     pub risers: u32,
+    pub bend: Option<Bend>,
+}
+
+/// How a run bends: the centre it is drawn about, and how far round it goes from its foot, degrees
+/// counter-clockwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bend {
+    pub c: P2,
+    pub sweep: f64,
 }
 
 impl Run {
     pub fn end(&self) -> P2 {
-        self.start + self.u * self.length
+        match self.bend {
+            Some(b) => b.c + turned(self.start - b.c, b.sweep),
+            None => self.start + self.u * self.length,
+        }
     }
 
-    /// Its outline, `width` wide, counter-clockwise.
+    /// Its outline, `width` wide, counter-clockwise: the rectangle of a straight run, or the ring
+    /// between the two arcs of a bent one, drawn as a plan draws an arc.
     pub fn ring(&self, width: f64) -> Vec<P2> {
         let n = self.u.perp() * (width / 2.0);
-        vec![self.start - n, self.end() - n, self.end() + n, self.start + n]
+        let Some(b) = self.bend else {
+            return vec![self.start - n, self.end() - n, self.end() + n, self.start + n];
+        };
+        let mut ring = bow(b.c, self.start - n, 0.0, b.sweep);
+        ring.extend(bow(b.c, self.start + n, b.sweep, 0.0));
+        ccw(ring)
+    }
+
+    /// The centre a bent run is drawn about and how far out its walk line is from it, for its two
+    /// curved sides to read as one surface each.
+    pub fn round(&self) -> Option<(P2, f64)> {
+        self.bend.map(|b| (b.c, b.c.dist(self.start)))
+    }
+
+    /// Its outline in plan, stretch by stretch, with the height of its deck along each, so that a
+    /// plan can dash what stands over its cut plane: a straight run's four sides all stand at its
+    /// foot, as a run of one height is drawn, while a bent one's two arcs climb as they go round and
+    /// only its two ends stand at one height each.
+    pub fn edges(&self, width: f64) -> Vec<(P2, P2, f64)> {
+        let n = self.u.perp() * (width / 2.0);
+        let Some(b) = self.bend else {
+            return geom::ring_edges(&self.ring(width)).map(|(a, c)| (a, c, self.z.0)).collect();
+        };
+        let up = |deg: f64| self.z.0 + (self.z.1 - self.z.0) * if b.sweep == 0.0 { 0.0 } else { deg / b.sweep };
+        let mut out = Vec::new();
+        for side in [-1.0, 1.0] {
+            let arc = bow(b.c, self.start + n * side, 0.0, b.sweep);
+            let steps = arc.len().saturating_sub(1).max(1) as f64;
+            for (i, w) in arc.windows(2).enumerate() {
+                match w {
+                    [a, c] => out.push((*a, *c, up(b.sweep * (i as f64 + 0.5) / steps))),
+                    _ => continue,
+                }
+            }
+        }
+        let round = |p: P2| b.c + turned(p - b.c, b.sweep);
+        out.push((self.start - n, self.start + n, self.z.0));
+        out.push((round(self.start - n), round(self.start + n), self.z.1));
+        out
+    }
+
+    /// Its deck in pieces, each a ring in plan and the plane its top lies in, `width` wide: one for
+    /// a straight run, whose top is one sloping plane; for a bent one, as many as a plan draws its
+    /// arc in, because the top of it is a helicoid and no plane holds more of that than a piece.
+    pub fn slabs(&self, width: f64) -> Vec<(Vec<P2>, Plane)> {
+        // The plane level across the run that holds `zp` at `p` and `zq` at `q`.
+        let plane = |p: P2, q: P2, zp: f64, zq: f64| {
+            let d = q - p;
+            let g = if d.dot(d) > 1e-12 { d * ((zq - zp) / d.dot(d)) } else { P2(0.0, 0.0) };
+            Plane { z: zp - g.dot(p), g }
+        };
+        let n = self.u.perp() * (width / 2.0);
+        let Some(b) = self.bend else {
+            return vec![(self.ring(width), plane(self.start, self.end(), self.z.0, self.z.1))];
+        };
+        let steps = ((b.sweep.abs() / ARC_STEP).ceil() as usize).clamp(1, ARC_MOST);
+        (0..steps)
+            .map(|i| {
+                let (from, to) = (b.sweep * i as f64 / steps as f64, b.sweep * (i + 1) as f64 / steps as f64);
+                let mut ring = bow(b.c, self.start - n, from, to);
+                ring.extend(bow(b.c, self.start + n, to, from));
+                let at = |deg: f64| b.c + turned(self.start - b.c, deg);
+                let up = |deg: f64| self.z.0 + (self.z.1 - self.z.0) * if b.sweep == 0.0 { 0.0 } else { deg / b.sweep };
+                (ccw(ring), plane(at(from), at(to), up(from), up(to)))
+            })
+            .collect()
     }
 }
 
@@ -67,7 +147,7 @@ fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, t
     let (mut at, mut u) = (start, heading(angle));
     let mut out = Layout { runs: Vec::new(), pads: Vec::new(), walk: Vec::new(), width };
     for (i, (length, z, risers)) in runs.into_iter().enumerate() {
-        let run = Run { start: at, u, length, z, risers };
+        let run = Run { start: at, u, length, z, risers, bend: None };
         out.walk.extend([(run.start, z.0), (run.end(), z.1)]);
         out.runs.push(run);
         let Some(&Turn { turn, winders, radius, rise }) = turns.get(i) else { break };
@@ -152,15 +232,10 @@ fn curve(out: &mut Layout, e: P2, side: P2, w: f64, winders: u32, radius: f64, r
     let (k, c) = (f64::from(winders), e + side * (radius + w / 2.0));
     let (near, far) = (e + side * (w / 2.0), e - side * (w / 2.0));
     let round = |p: P2, deg: f64| c + turned(p - c, deg);
-    // An arc of it, drawn as a plan draws one: the points along it, no more than a few degrees apart.
-    let bow = |p: P2, from: f64, to: f64| {
-        let steps = (((to - from).abs() / ARC_STEP).ceil() as usize).clamp(1, ARC_MOST);
-        (0..=steps).map(|i| round(p, from + (to - from) * i as f64 / steps as f64)).collect::<Vec<P2>>()
-    };
     for j in 0..winders {
         let (a, b) = (turn * f64::from(j) / k, turn * f64::from(j + 1) / k);
-        let mut ring = bow(near, a, b);
-        ring.extend(bow(far, b, a));
+        let mut ring = bow(c, near, a, b);
+        ring.extend(bow(c, far, b, a));
         let up = z + rise * f64::from(j) / (k - 1.0).max(1.0);
         out.pads.push(Pad { ring: ccw(ring), z: up });
         // Up the middle of the run, which is the middle of the end of the run below it carried round.
@@ -194,9 +269,53 @@ fn helix(start: P2, angle: f64, width: f64, going: f64, risers: u32, each: f64, 
     out
 }
 
+/// A helical ramp: the one curved run of it, from the middle of its foot `start` heading `angle`
+/// degrees, `width` wide, rising from `z.0` to `z.1` at `slope` percent, about the centre [`Spiral`]
+/// puts to one side of its foot. It has no landing and no straight run at all, and its deck slopes
+/// the whole way round, so a plan draws it as the one ring between two arcs.
+///
+/// How far round it goes follows from the rest, as [`Spiral`] says: the slope says how long the run
+/// is, and that length at the walk line, half the width out past `radius`, is how far round it
+/// reaches.
+fn coil(start: P2, angle: f64, width: f64, z: (f64, f64), slope: f64, sp: Spiral) -> Layout {
+    let u = heading(angle);
+    let way = if matches!(sp.to, Side::Left) { 1.0 } else { -1.0 };
+    // How long the run is, as its slope makes it; a slope of none is no ramp, and the model refuses it, but a
+    // drawing is asked for before a model is checked.
+    let k = if slope > 0.0 { slope / 100.0 } else { 1.0 };
+    let length = ((z.1 - z.0) / k).max(0.0);
+    // How far round that length reaches at the walk line. A width of none and a centre on the walk line are
+    // no ramp either, and however far round a refused one would go, it is drawn as far as a drawing can.
+    let out_to = sp.radius + width / 2.0;
+    let sweep = if out_to > 0.0 { (length / out_to).to_degrees().clamp(0.0, COIL_DRAWN) * way } else { 0.0 };
+    let c = start + u.perp() * way * out_to;
+    let run = Run { start, u, length, z, risers: 0, bend: Some(Bend { c, sweep }) };
+    // Up the middle of it, point by point as the arc is drawn, each as far up as it is round.
+    let steps = ((sweep.abs() / ARC_STEP).ceil() as usize).clamp(1, ARC_MOST);
+    let walk = (0..=steps)
+        .map(|i| {
+            let t = i as f64 / steps as f64;
+            (c + turned(start - c, sweep * t), z.0 + (z.1 - z.0) * t)
+        })
+        .collect();
+    Layout { runs: vec![run], pads: Vec::new(), walk, width }
+}
+
+/// How far round a helical ramp is drawn at most, in degrees: the model refuses one that goes
+/// further than [`crate::model::COIL_MOST`], but a drawing is asked for before a model is checked,
+/// and a coil of four billion turns is no drawing.
+const COIL_DRAWN: f64 = 1440.0;
+
 /// How many degrees apart the points of an arc are drawn, and how many of them there may be.
 const ARC_STEP: f64 = 5.0;
 const ARC_MOST: usize = 144;
+
+/// An arc about `c`, drawn as a plan draws one: `p` carried from `from` round to `to` degrees, the
+/// points along it no more than [`ARC_STEP`] apart and no more than [`ARC_MOST`] of them.
+fn bow(c: P2, p: P2, from: f64, to: f64) -> Vec<P2> {
+    let steps = (((to - from).abs() / ARC_STEP).ceil() as usize).clamp(1, ARC_MOST);
+    (0..=steps).map(|i| c + turned(p - c, from + (to - from) * i as f64 / steps as f64)).collect()
+}
 
 /// `p` turned `deg` degrees counter-clockwise about the origin.
 fn turned(p: P2, deg: f64) -> P2 {
@@ -248,9 +367,13 @@ pub fn stair(m: &Model, st: &Stair) -> Layout {
     chain(st.start, st.angle, st.width, runs, &turns)
 }
 
-/// A ramp's runs: its rise split at its landings' heights, each run as long as its slope makes it.
+/// A ramp's runs: its rise split at its landings' heights, each run as long as its slope makes it;
+/// or, where it is helical, the one curved run of it.
 pub fn ramp(m: &Model, r: &Ramp) -> Layout {
     let (base, top) = m.span(r.level, 0.0, r.top_level, r.height);
+    if let Some(sp) = r.spiral {
+        return coil(r.start, r.angle, r.width, (base, top), r.slope, sp);
+    }
     let k = if r.slope > 0.0 { r.slope / 100.0 } else { 1.0 };
     let mut ups: Vec<f64> = vec![0.0];
     ups.extend(r.landings.iter().map(|l| l.at));
@@ -443,5 +566,70 @@ mod tests {
         let right = helix(P2(0.0, 0.0), 90.0, 1000.0, 300.0, 5, 200.0, 0.0, Spiral { to: Side::Right, ..sp });
         assert!(right.walk.iter().all(|(p, _)| (p.dist(P2(1000.0, 0.0)) - 1000.0).abs() < 1e-6), "{:?}", right.walk);
         assert!(right.walk.last().is_some_and(|(p, _)| p.0 > 0.0 && p.1 > 0.0), "{:?}", right.walk.last());
+    }
+
+    #[test]
+    fn a_helical_ramp_is_one_curved_run_that_slopes_the_whole_way_round() {
+        // Three metres up at 10%, from the middle of its foot at the origin heading east, three metres wide, the
+        // inside of it drawn four metres from the centre it coils about: the centre stands 5.5 m north of its
+        // foot, that and half its width, which is how far out its walk line runs.
+        let sp = Spiral { radius: 4000.0, to: Side::Left };
+        let l = coil(P2(0.0, 0.0), 0.0, 3000.0, (0.0, 3000.0), 10.0, sp);
+        let c = P2(0.0, 5500.0);
+        assert!(l.pads.is_empty(), "a helical ramp has no landing");
+        // One run, as long as its slope makes it, bent round that centre as far as that length reaches there.
+        let sweep = (30000.0 / 5500.0f64).to_degrees();
+        assert_eq!(l.runs.len(), 1);
+        let run = l.runs[0];
+        assert_eq!((run.length, run.z, run.risers), (30000.0, (0.0, 3000.0), 0));
+        assert_eq!(run.bend, Some(Bend { c, sweep }));
+        assert_eq!(run.round(), Some((c, 5500.0)));
+        // Its outline is the one ring between the two arcs, and covers the sector they cut and no more, give or
+        // take what a curve drawn as the chords of it falls short by.
+        let sector = sweep.to_radians() / 2.0 * (7000.0 * 7000.0 - 4000.0 * 4000.0);
+        let laid = geom::area(&run.ring(3000.0)).abs();
+        assert!(sector - laid > 0.0 && sector - laid < sector / 500.0, "{laid} of {sector}");
+        // Its walk line runs from the middle of its foot to the middle of its top, as far up as it is round at
+        // every point of it, every one of them 5.5 m out from the centre.
+        assert_eq!(l.walk.first().copied(), Some((P2(0.0, 0.0), 0.0)));
+        assert_eq!(l.walk.last().map(|(_, z)| *z), Some(3000.0));
+        assert!(l.walk.iter().all(|(p, _)| (p.dist(c) - 5500.0).abs() < 1e-6), "{:?}", l.walk);
+        let half = l.walk.iter().min_by(|a, b| (a.1 - 1500.0).abs().total_cmp(&(b.1 - 1500.0).abs()));
+        assert!(half.is_some_and(|(p, _)| p.dist(c + turned(P2(0.0, 0.0) - c, sweep / 2.0)) < 1500.0), "{half:?}");
+        // Its deck in pieces, each a plane level across the run: at the foot of the first it stands at the foot of
+        // the ramp, at the head of the last at its top, and each piece climbs its share of the rise.
+        let slabs = run.slabs(3000.0);
+        assert_eq!(slabs.len(), (sweep / 5.0).ceil() as usize);
+        let at = |deg: f64| c + turned(P2(0.0, 0.0) - c, deg);
+        for (i, (_, top)) in slabs.iter().enumerate() {
+            let (from, to) = (sweep * i as f64 / slabs.len() as f64, sweep * (i + 1) as f64 / slabs.len() as f64);
+            assert!((top.at(at(from)) - 3000.0 * from / sweep).abs() < 1e-6, "{i}: {}", top.at(at(from)));
+            assert!((top.at(at(to)) - 3000.0 * to / sweep).abs() < 1e-6, "{i}: {}", top.at(at(to)));
+            // Level square to the way it runs: a piece of it falls along the chord it covers and not across it.
+            let along = (at(to) - at(from)).unit();
+            assert!(top.g.cross(along).abs() < 1e-9, "{i}: {:?} across {along:?}", top.g);
+        }
+        // No flat piece of a helicoid is level along both the radial lines it meets its neighbours on, so where two
+        // of them meet they stand at the same height on the walk line and a hair apart at the edges: here, a
+        // centimetre for every metre out to the side at a tenth of a slope, which is the slope across the turn
+        // of one piece.
+        let shared = at(sweep / slabs.len() as f64);
+        let out = (shared - c).unit() * 1500.0;
+        if let [(_, first), (_, second), ..] = slabs.as_slice() {
+            assert!((first.at(shared) - second.at(shared)).abs() < 1e-9, "level where they meet");
+            let step = (first.at(shared + out) - second.at(shared + out)).abs();
+            assert!(step > 0.0 && step < 1.5 * 10.0, "{step} apart at the edge");
+        }
+        // What a plan draws of it: its two arcs stretch by stretch, each with the height of the deck along it, so
+        // the plan dashes them from where they climb over its cut plane, and its two ends, one at each height.
+        let drawn = run.edges(3000.0);
+        assert_eq!(drawn.len(), 2 * (slabs.len() + 1), "both arcs, and the two ends");
+        assert!(drawn.iter().rev().take(2).map(|(_, _, z)| *z).eq([3000.0, 0.0]), "its ends stand at its ends' heights");
+        let climbing: Vec<f64> = drawn.iter().take(drawn.len() - 2).map(|(_, _, z)| *z).collect();
+        assert!(climbing.iter().all(|z| (0.0..=3000.0).contains(z)) && climbing.windows(2).any(|w| w[1] > w[0]), "{climbing:?}");
+        // Coiling the other way puts the centre as far the other side of its foot, and carries it round that way.
+        let right = coil(P2(0.0, 0.0), 0.0, 3000.0, (0.0, 3000.0), 10.0, Spiral { to: Side::Right, ..sp });
+        assert_eq!(right.runs.first().and_then(|r| r.bend), Some(Bend { c: P2(0.0, -5500.0), sweep: -sweep }));
+        assert!(right.walk.iter().all(|(p, _)| (p.dist(P2(0.0, -5500.0)) - 5500.0).abs() < 1e-6), "{:?}", right.walk);
     }
 }

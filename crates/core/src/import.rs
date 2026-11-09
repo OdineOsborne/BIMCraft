@@ -2217,6 +2217,9 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             width: (width * 100.0).round() / 100.0,
             slope: (slope * 1e6).round() / 1e6,
             landings,
+            // Read from the one flat sloping top of each flight, so a helical ramp, whose top is a helicoid, is
+            // left out with its reason rather than read as a straight run.
+            spiral: None,
         };
         let rid = m.insert(Element::Ramp(ramp));
         from.insert(rid, who(id));

@@ -3182,6 +3182,73 @@ fn ramps_climb_at_their_slope_with_landings_between_runs() {
 }
 
 #[test]
+fn a_helical_ramp_coils_from_its_foot_to_its_top_in_one_curved_run() {
+    let mut s = Session::new();
+    house(&mut s);
+    // Three metres up at a tenth, three metres wide, the inside of it drawn four metres from the centre it coils
+    // about: the centre stands 5.5 m to the left of the middle of its foot, that being the radius and half the
+    // width, and the walk line up the middle of it runs that far out from there.
+    let told = json!({"start": [-4000, -6000], "angle": 0, "height": 3000, "slope": 10, "width": 3000, "spiral": {"radius": 4000}});
+    let r = run(&mut s, "ramp", told)["id"].as_u64().unwrap();
+    let e = element(&mut s, r);
+    assert_eq!(e["spiral"], json!({"radius": 4000.0, "to": "left"}), "{e}");
+    assert!(e["landings"].is_null(), "a helical ramp has no landing: {e}");
+    assert_eq!(e["length"], json!(30000.0), "3 m up at a tenth");
+    // How far round it goes is not told to it: its levels say it rises three metres and its slope says in thirty,
+    // and thirty metres of arc 5.5 m out from the centre is 312 degrees, most of the way round once.
+    assert_eq!(e["spiral_turn"], json!(312.52), "{e}");
+    // Its one run names the two ends of the curve, where a straight one's names the line it runs along.
+    let end = e["end"].as_array().and_then(|p| Some((p[0].as_f64()?, p[1].as_f64()?)));
+    assert!(end.is_some_and(|(x, y)| (x + 8053.6).abs() < 0.1 && (y + 4217.3).abs() < 0.1), "{e}");
+    assert_eq!(e["runs"].as_array().map(Vec::len), Some(1), "{e}");
+    // Its deck slopes the whole way round: read on the walk line, it stands a quarter of the way up a quarter of
+    // the way round, and so on to its top. A deck drawn in flat pieces stands a hair off the helix between them.
+    let top = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&r).copied();
+    for (x, y, up) in [(1382.4, -1631.2, 750.0), (-1785.9, 4534.6, 1500.0), (-8471.6, 2702.3, 2250.0)] {
+        let at = top(&s, x, y);
+        assert!(at.is_some_and(|z| (z - up).abs() < 0.1), "{up} mm up, a {} of the way round: {at:?}", up / 3000.0);
+    }
+    // The well it coils about is open: inside the inner arc there is no ramp at all.
+    assert_eq!(top(&s, -4000.0, -2500.0), None, "the well inside the inner arc");
+    // A railing down each side coils with it, 50 mm in from its edges: every point of the inner one runs 4050 mm
+    // out from the centre, give or take what mitring the corners of a curve drawn as chords moves them.
+    let ids = run(&mut s, "railing", json!({"host": r}))["ids"].as_array().cloned().unwrap_or_default();
+    let inner = element(&mut s, ids.first().and_then(|v| v.as_u64()).unwrap_or_default());
+    let path: Vec<(f64, f64)> =
+        inner["path"].as_array().cloned().unwrap_or_default().iter().filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?))).collect();
+    assert!(path.len() > 60, "a point for every few degrees of it: {}", path.len());
+    assert!(path.iter().all(|(x, y)| (P2(*x, *y).dist(P2(-4000.0, -500.0)) - 4050.0).abs() < 2.0), "{:?}", inner["path"]);
+    // Coiling the other way puts the centre as far the other side of its foot and carries it round that way, so
+    // every piece of it stands mirrored about the line its foot climbs along.
+    run(&mut s, "modify", json!({"id": r, "spiral": {"radius": 4000, "to": "right"}}));
+    for (x, y, up) in [(1382.4, -10368.8, 750.0), (-8471.6, -14702.3, 2250.0)] {
+        let at = top(&s, x, y);
+        assert!(at.is_some_and(|z| (z - up).abs() < 0.1), "{up} mm up coiling right: {at:?}");
+    }
+    // What a helical ramp is not: one with a landing, because it is one run from its foot to its top; a radius
+    // that is no length; and one that goes further round than a ramp of a building goes, which a run too long
+    // for how far out the walk line is comes to.
+    for (told, why) in [
+        (json!({"spiral": {"radius": 4000}, "landings": [{"at": 300, "turn": 90}]}), "landings"),
+        (json!({"spiral": {"radius": -4000}}), "length"),
+        (json!({"spiral": {"radius": 0}, "width": 1000, "slope": 1}), "degrees"),
+    ] {
+        let mut told = told;
+        told["id"] = json!(r);
+        let e = s.execute("modify", &told).unwrap_err();
+        assert!(e.contains(why), "{told}: {e}");
+    }
+    // In IFC it is a spiral ramp, and its deck one flight of as many solids as it is drawn in pieces.
+    run(&mut s, "modify", json!({"id": r, "spiral": {"radius": 4000}}));
+    let path = temp("coiled.ifc");
+    run(&mut s, "save", json!({"path": path}));
+    let ifc = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(ifc.contains(".SPIRAL_RAMP.") && ifc.matches("IFCRAMPFLIGHT(").count() == 1, "{ifc}");
+    assert!(ifc.contains(",.SPIRAL.)"), "its flight is spiral");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn railings_run_along_stairs_and_ramps_or_along_a_path() {
     let mut s = Session::new();
     house(&mut s);
