@@ -1976,6 +1976,14 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "The landing it is built with puts the next run {} mm from where the plan draws it.",
         "Il pianerottolo con cui viene costruita mette la rampa successiva a {} mm da dove la disegna la pianta.",
     ],
+    [
+        "It climbs in one spiral run turning {}, {} degrees round in all, the inside of its treads {} mm from the centre.",
+        "Sale in una sola rampa a chiocciola che gira {}, {} gradi in tutto, il lato interno dei gradini a {} mm dal centro.",
+    ],
+    [
+        "The spiral it is built with puts its top {} mm from where the plan draws the end of the curve.",
+        "La chiocciola con cui viene costruita mette la sua cima a {} mm da dove la pianta disegna la fine della curva.",
+    ],
     ["left", "a sinistra"],
     ["right", "a destra"],
     ["back left", "indietro a sinistra"],

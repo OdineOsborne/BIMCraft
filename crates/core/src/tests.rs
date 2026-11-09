@@ -3103,6 +3103,60 @@ fn a_radius_turns_a_stair_on_a_curved_run_between_two_arcs() {
 }
 
 #[test]
+fn a_spiral_turns_a_stair_the_whole_way_up_with_no_straight_run_at_all() {
+    let mut s = Session::new();
+    house(&mut s);
+    // The same 17 risers, climbing in one curved run instead of in straight ones: 16 treads between an arc 300
+    // from the centre it turns about and one 1300 from it, the stair being a metre wide. The centre stands 800
+    // west of the middle of its foot, that being the radius and half the width, and the walk line up the middle
+    // of it runs 800 out from there.
+    let told = json!({"start": [1000, 1000], "angle": 90, "spiral": {"radius": 300}});
+    let st = run(&mut s, "stair", told)["id"].as_u64().unwrap();
+    let e = element(&mut s, st);
+    assert_eq!(e["risers"], 17);
+    assert_eq!(e["spiral"], json!({"radius": 300.0, "to": "left"}), "{e}");
+    assert_eq!(e["runs"], json!([]), "a spiral stair has no straight run: {e}");
+    assert_eq!(e["length"], json!(4480.0), "16 treads walked");
+    // How far round it goes is not told to it: the storey says it climbs in 17 risers, the going at the walk line
+    // is its tread, and each of its 16 treads turns as far as 280 mm of arc 800 out from the centre — 20 degrees,
+    // and 321 for the whole of it. Its top comes out where that leaves it.
+    assert_eq!(e["spiral_turn"], json!(320.86), "{e}");
+    let end = e["end"].as_array().and_then(|p| Some((p[0].as_f64()?, p[1].as_f64()?)));
+    assert!(end.is_some_and(|(x, y)| (x - 820.45).abs() < 0.01 && (y - 494.99).abs() < 0.01), "{e}");
+    // Its treads, each a riser above the last, read on the walk line through the middle of each: the first a
+    // riser up, the second two, and the sixteenth and last a riser below the floor above.
+    let each = 3000.0 / 17.0;
+    let tops = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&st).copied();
+    for (x, y, risers, which) in [(987.8, 1139.3, 1.0, "the first"), (892.3, 1401.0, 2.0, "the second"), (723.0, 394.7, 16.0, "the last")] {
+        let at = tops(&s, x, y);
+        assert!(at.is_some_and(|z| (z - risers * each).abs() < 1e-6), "{which} tread, {risers} risers up: {at:?}");
+    }
+    // And the well it turns about is open, as a curved run has one and a fan has not: inside the inner arc there
+    // is no stair at all.
+    assert_eq!(tops(&s, 328.2, 1153.5), None, "the well inside the inner arc");
+    // Turning the other way puts the centre as far the other side of its foot and carries it round that way, so
+    // every tread of it stands mirrored about the line its foot climbs along.
+    run(&mut s, "modify", json!({"id": st, "spiral": {"radius": 300, "to": "right"}}));
+    for (x, y, risers, which) in [(1012.2, 1139.3, 1.0, "the first"), (1277.0, 394.7, 16.0, "the last")] {
+        let at = tops(&s, x, y);
+        assert!(at.is_some_and(|z| (z - risers * each).abs() < 1e-6), "{which} tread of it turning right: {at:?}");
+    }
+    // What a spiral is not: one with a landing, because it is one run from its foot to its top; a radius that is
+    // no length; and a tread that turns further than a tread turns, which a going too long for how far out the
+    // walk line is comes to.
+    for (told, why) in [
+        (json!({"spiral": {"radius": 300}, "landings": [{"at": 8, "turn": 90}]}), "landings"),
+        (json!({"spiral": {"radius": -300}}), "length"),
+        (json!({"spiral": {"radius": 0}, "width": 600, "tread": 700}), "degrees"),
+    ] {
+        let mut told = told;
+        told["id"] = json!(st);
+        let e = s.execute("modify", &told).unwrap_err();
+        assert!(e.contains(why), "{told}: {e}");
+    }
+}
+
+#[test]
 fn ramps_climb_at_their_slope_with_landings_between_runs() {
     let mut s = Session::new();
     house(&mut s);

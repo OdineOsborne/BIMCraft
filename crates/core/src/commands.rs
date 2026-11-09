@@ -20,7 +20,7 @@ use crate::model::{
     Facing, Floor, FloorType, Grid, Guid, Id, Key, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass,
     Model, NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, PlanView, ProjectParameter, RAMP_SLOPE,
     RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side,
-    Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    Spiral, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::paint;
 use crate::phasing;
@@ -409,6 +409,19 @@ pub static ALL: &[Command] = &[
          out. Where nothing stands at that corner, or where more lines do than a stair is ever built with (a \
          symbol, a hatch), the turn is read as a flat landing: no count is better than a wrong one. \
          \
+         A stair with no straight run anywhere on it is a spiral stair, one curved run from its foot to its top, \
+         and `spiral` is what the plan draws of one: where its `centre` stands, how far out the inside of its \
+         treads is drawn (`radius`), how wide the run is, which way it climbs (`to`), how many `steps` it draws \
+         and how far round they stand (`sweep`); `turn` is how far round the stair that is built goes, and `off` \
+         how far its top lands from where the plan draws the far end of the curve. Its going is the arc one tread \
+         covers at the walk line, which is where the going of a stair is measured, and its risers are the lines \
+         drawn out along the radius, counted as a flight's lines are. It is read only where no run of lines \
+         measures like a stair at all, because standing at the head of a run is what tells the curve that carries \
+         a turn from the stair that is nothing but curve, and only where it draws 8 steps or more at a stair's own \
+         measures: a circle with lines drawn to it is a hinge, a bolt circle or the swing of a door far more often \
+         than it is a stair. Where a plan draws a flight and a spiral both, `region` says which to read, and a \
+         drawing with more arcs in it than can be read at once gives no spiral, which `region` narrows as well. \
+         \
          A turn carried round a centre of its own instead is a curved run, and a plan draws that with the two \
          arcs its treads lie between and their risers out along the radius of them — which is the one thing of a \
          building a plan draws that has to be read as an arc, because how far out it is drawn is the `radius` the \
@@ -776,7 +789,7 @@ pub static ALL: &[Command] = &[
         "Stair",
         &[],
         "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, riser?, tread?, landings?: [{at, turn?, \
-         winders?, radius?}, …], railings?} a stair from the middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to \
+         winders?, radius?}, …], spiral?: {radius, to?}, railings?} a stair from the middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to \
          the next level: \
          as many risers as keep each at most `riser` mm (180), treads `tread` deep (280), `width` wide (1000). One straight \
          run, as long as that makes it; or with landings (each as deep as the stair is wide) after `at` risers, the next run \
@@ -787,6 +800,12 @@ pub static ALL: &[Command] = &[
          `radius` makes them a curved run instead, each tread between an arc that far from the centre of the turn and one the \
          stair's width beyond it — the centre standing out along the last riser of the run below, past its inside end — and that \
          turns 180 as readily as 90, leaving the run above as far round as it turns. \
+         `spiral` makes the whole of it one curved run instead, a spiral stair: no straight run and no landing, every tread \
+         between an arc `radius` from the centre it turns about and one the stair's width beyond it, each a riser above the \
+         last, turning `to` the left (by default) or the right as it climbs, the centre standing `radius` and half the width \
+         to that side of the middle of its foot. How far round it goes is not told to it and cannot be: the storey says how \
+         many risers it climbs in and `tread` is the going at the walk line, so each tread turns as far as that going takes \
+         it out there and the whole of it turns as far as its treads do, which the stair's info gives as `spiral_turn`. \
          With `railings`, a railing down each side too",
         stair,
     ),
@@ -1569,10 +1588,37 @@ pub fn m3(mm3: f64) -> f64 {
     (mm3 / 1e7).round() / 100.0
 }
 
+/// What the reading says of the spiral a plan draws: where its centre stands, how far out the inside of its treads
+/// is drawn and how wide the run is, which way it climbs, how many steps it draws and how far round they stand.
+/// And of the stair that would be built from it: how far round that goes, and how far its top lands from where the
+/// plan draws the far end of the curve. How far round it goes is as far as its treads carry it, the going at the
+/// walk line being an angle once for each tread, so where a plan cut partway up the flight draws fewer steps than
+/// the storey climbs in, the sweep it draws and the turn that is built do not agree.
+fn spiral_shown(cv: &crate::trace::Curve, going: f64, sp: Spiral, risers: Option<usize>, laid: Option<&stairs::Layout>) -> Value {
+    let walk = (cv.inner + cv.outer) / 2.0;
+    let turn = risers.map(|n| hundredth((going / walk).to_degrees() * n.saturating_sub(1) as f64));
+    let far = match sp.to {
+        Side::Left => cv.steps.last(),
+        Side::Right => cv.steps.first(),
+    };
+    let far = far.map(|[a, b]| (*a + *b) * 0.5);
+    json!({
+        "centre": [hundredth(cv.at.0), hundredth(cv.at.1)],
+        "radius": hundredth(cv.inner),
+        "width": hundredth(cv.outer - cv.inner),
+        "to": match sp.to { Side::Left => "left", Side::Right => "right" },
+        "steps": cv.steps.len(),
+        "sweep": hundredth(cv.sweep),
+        "turn": turn,
+        "off": laid.and_then(|laid| laid.walk.last()).zip(far).map(|((top, _), far)| hundredth(top.dist(far))),
+    })
+}
+
 /// A stair's or a ramp's runs, each from its foot to its top, and where its last one ends.
 fn runs(extra: &mut Map<String, Value>, l: &stairs::Layout) {
     let runs: Vec<[P2; 2]> = l.runs.iter().map(|r| [micron(r.start), micron(r.end())]).collect();
-    extra.insert("end".into(), json!(runs.last().map(|r| r[1])));
+    // Where the last of them ends, or, where it climbs in no straight run at all, where its walk line comes out.
+    extra.insert("end".into(), json!(runs.last().map(|r| r[1]).or_else(|| l.walk.last().map(|(p, _)| micron(*p)))));
     extra.insert("runs".into(), json!(runs));
 }
 
@@ -1785,6 +1831,11 @@ pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Inde
             extra.insert("risers".into(), json!(n));
             extra.insert("riser_height".into(), json!(hundredth(each)));
             extra.insert("length".into(), json!(length));
+            // How far round a spiral goes: as far as its treads carry it, the going at the walk line being an
+            // angle once for each of them. A stair of straight runs turns at its landings and not at all here.
+            let turn =
+                st.spiral.map(|sp| hundredth((st.tread / (sp.radius + st.width / 2.0)).to_degrees() * f64::from(n.saturating_sub(1))));
+            extra.insert("spiral_turn".into(), json!(turn));
             runs(&mut extra, &stairs::stair(m, st));
         }
         Element::Ramp(r) => {
@@ -3652,6 +3703,11 @@ const GOING_MOST: f64 = 400.0;
 const STAIR_NARROW: f64 = 600.0;
 const STAIR_WIDE: f64 = 2500.0;
 
+/// How many risers a curved run must draw before it is read as a stair that is nothing but curve: a circle with
+/// lines drawn to it is a hinge, a bolt circle or the swing of a door far more often than it is a spiral stair,
+/// and a spiral that climbs a storey draws more steps than any of those.
+const SPIRAL_LEAST: usize = 8;
+
 /// What two risers and a going come to on a stair anyone climbs, in millimetres: Blondel's rule, which has
 /// outlived every building code written since, and which is what says a count of steps read off a plan that was
 /// cut partway up the flight is one short.
@@ -3952,9 +4008,14 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
     // turn — where they are as far apart as that run is wide, and where it turns as far as the runs themselves
     // do. Its treads are counted as a fan's are: the first and the last of its risers are the two runs' own, drawn
     // already, so the treads are one more than the risers drawn between those two.
-    let bows = match heads.iter().flatten().next() {
-        None => Vec::new(),
-        Some(_) => crate::trace::curves(&s.model, &u, &how).map_err(|e| bad(c, e))?,
+    // Read where there is a turn for one to carry, and where no run of lines measures like a stair at all: then
+    // the stair may be one curved run from its foot to its top, and nothing else. A turn asks outright, so a
+    // drawing too crowded with arcs to read is an error there; where nothing turns, the curves are looked at on
+    // the chance that the stair is all curve, and a drawing like that gives no spiral and loses no reading.
+    let bows = match (heads.iter().flatten().next().is_some(), runs.is_empty()) {
+        (true, _) => crate::trace::curves(&s.model, &u, &how).map_err(|e| bad(c, e))?,
+        (false, true) => crate::trace::curves(&s.model, &u, &how).unwrap_or_default(),
+        (false, false) => Vec::new(),
     };
     let round: Vec<(u32, f64)> = heads
         .iter()
@@ -3986,6 +4047,41 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
             false => (fan, 0.0),
         })
         .collect();
+    // A spiral stair: one curved run from its foot to its top, drawn as the two arcs of its edges with a radial
+    // line for each riser and no straight run anywhere on it. Read only where no run of lines measures like a
+    // stair, because standing at the head of a run is what tells the curve that carries a turn from the stair
+    // that is all curve; where a plan draws both, `region` says which part of it to read. The going of it is the
+    // arc one tread covers at the walk line, which is where the going of a stair is measured.
+    let coiled =
+        |cv: &crate::trace::Curve| cv.sweep.to_radians() * (cv.inner + cv.outer) / 2.0 / cv.steps.len().saturating_sub(1).max(1) as f64;
+    let coil = match runs.is_empty() {
+        false => None,
+        true => bows.iter().find(|cv| {
+            cv.steps.len() >= SPIRAL_LEAST
+                && (GOING_LEAST..=GOING_MOST).contains(&coiled(cv))
+                && (STAIR_NARROW..=STAIR_WIDE).contains(&(cv.outer - cv.inner))
+        }),
+    };
+    // Where its foot stands, which way it climbs from there, and the spiral it climbs in where it is one. Which
+    // end of a curve is its foot a plan draws no more of than it draws of a run, so it is read the same way: the
+    // end furthest south, or furthest west where the two stand level, and `flip` turns it round. The way it
+    // climbs from there runs along the arc, which is the radius at that end turned a quarter turn the way it goes.
+    let placed: Option<(P2, f64, Option<Spiral>)> = match (runs.first(), coil) {
+        (Some((_, foot, _, way)), _) => Some((*foot, *way, None)),
+        (None, Some(cv)) => {
+            let (first, last) = (mid(cv.steps.first()), mid(cv.steps.last()));
+            let back = last.1 < first.1 - TOL || ((last.1 - first.1).abs() <= TOL && last.0 < first.0);
+            // Its steps stand counter-clockwise round the centre, so from the first of them it climbs to the
+            // left and from the last of them to the right.
+            let (foot, to) = match back != flip {
+                true => (last, Side::Right),
+                false => (first, Side::Left),
+            };
+            let along = (foot - cv.at).unit().perp() * if matches!(to, Side::Left) { 1.0 } else { -1.0 };
+            Some((foot, bearing(foot, foot + along), Some(Spiral { radius: hundredth(cv.inner), to })))
+        }
+        _ => None,
+    };
     // The risers a turn on treads climbs that a flat landing does not: its first tread stands where the landing
     // would and the run above it leaves where it would, so what it adds is the treads between those two.
     let over: Vec<f64> = carried.iter().map(|(w, _)| f64::from(w.saturating_sub(1))).collect();
@@ -4032,12 +4128,17 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         (None, None) => (None, "nothing"),
     };
     let foot_run = runs.first().and_then(|(j, ..)| found.get(*j));
-    let going = told_going.or_else(|| foot_run.map(|f| (f.going * 100.0).round() / 100.0));
-    let width = told_width.or_else(|| foot_run.map(|f| (f.width * 100.0).round() / 100.0));
+    let going = told_going.or_else(|| foot_run.map(|f| (f.going * 100.0).round() / 100.0)).or_else(|| coil.map(|cv| hundredth(coiled(cv))));
+    let width = told_width
+        .or_else(|| foot_run.map(|f| (f.width * 100.0).round() / 100.0))
+        .or_else(|| coil.map(|cv| hundredth(cv.outer - cv.inner)));
     // How many risers it climbs in: as many as its runs draw lines together, because the lines of a flight are
     // its risers and the stair starts at the first of them, and one more for each riser its fans turn on beyond
     // their first tread. A plan cut partway up draws only those under the cut.
-    let risers = told_risers.or_else(|| (!runs.is_empty()).then(|| drawn.iter().sum::<usize>() + fanned as usize));
+    // A spiral draws a line for each of its risers as a flight does, the first of them at its foot.
+    let risers = told_risers
+        .or_else(|| (!runs.is_empty()).then(|| drawn.iter().sum::<usize>() + fanned as usize))
+        .or_else(|| coil.map(|cv| cv.steps.len()));
     let riser = match (height, risers) {
         (Some(height), Some(risers)) if risers > 0 => Some(height / risers as f64),
         _ => None,
@@ -4067,21 +4168,22 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         .zip(carried.iter().copied())
         .map(|((at, turn), (winders, radius))| Landing { at, turn, winders, radius })
         .collect();
-    let st = match (runs.first(), going, width, height, riser) {
-        (Some((_, start, _, way)), Some(going), Some(width), Some(height), Some(riser)) if riser > 0.0 => Some(Stair {
+    let st = match (placed, going, width, height, riser) {
+        (Some((start, way, spiral)), Some(going), Some(width), Some(height), Some(riser)) if riser > 0.0 => Some(Stair {
             params: Default::default(),
             level,
             // Up to the level above where that is what gives the height, so the stair follows it as a wall does.
             top_level: told_height.is_none().then_some(on).flatten(),
             height,
-            start: *start,
-            angle: *way,
+            start,
+            angle: way,
             width,
             // The riser is a stair's greatest, and `Model::flight` takes as many as keep each under it: one of
             // this height is that many exactly.
             riser,
             tread: going,
             landings: landings.clone(),
+            spiral,
         }),
         _ => None,
     };
@@ -4105,7 +4207,7 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
         "part": told.as_ref().map(|part| part.name.clone()),
         "level": s.model.level(level).map(|l| l.name.clone()),
         "flights": listed,
-        "steps": (!runs.is_empty()).then(|| drawn.iter().sum::<usize>()),
+        "steps": (!runs.is_empty()).then(|| drawn.iter().sum::<usize>()).or_else(|| coil.map(|cv| cv.steps.len())),
         "going": going.map(hundredth),
         "width": width.map(hundredth),
         "length": match (going, risers) {
@@ -4114,9 +4216,10 @@ fn cad_stair(s: &mut Session, p: &Value) -> R {
             }
             _ => None,
         },
-        "start": runs.first().map(|(_, foot, ..)| [hundredth(foot.0), hundredth(foot.1)]),
-        "angle": runs.first().map(|(_, _, _, way)| hundredth(*way)),
-        "climbs": runs.first().map(|(_, _, _, way)| compass(*way)),
+        "start": placed.map(|(foot, ..)| [hundredth(foot.0), hundredth(foot.1)]),
+        "angle": placed.map(|(_, way, _)| hundredth(way)),
+        "climbs": placed.map(|(_, way, _)| compass(way)),
+        "spiral": coil.zip(placed.and_then(|(_, _, sp)| sp)).map(|(cv, sp)| spiral_shown(cv, coiled(cv), sp, risers, laid.as_ref())),
         "landings": said,
         "height": height.map(hundredth),
         "height_from": height_from,
@@ -7087,6 +7190,16 @@ fn climb(c: &str, p: &Value, start: P2) -> Result<f64, String> {
     }
 }
 
+/// `spiral` {radius, to?}, or none: the one curved run a spiral stair climbs in.
+fn spiral_param(c: &str, p: &Value) -> Result<Option<crate::model::Spiral>, String> {
+    match p.get("spiral") {
+        v if absent(v) => Ok(None),
+        Some(v @ Value::Object(_)) => serde_json::from_value(v.clone()).map(Some).map_err(|e| bad(c, format!("`spiral`: {e}"))),
+        Some(_) => Err(bad(c, "`spiral` is {radius, to?}: how far from the centre it turns about the inside of its treads is drawn")),
+        None => Ok(None),
+    }
+}
+
 /// `landings` [{at, turn?}, …], or none.
 fn landings_param(c: &str, p: &Value) -> Result<Vec<Landing>, String> {
     match p.get("landings") {
@@ -7116,6 +7229,7 @@ fn stair(s: &mut Session, p: &Value) -> R {
         riser: dim("riser", RISER)?,
         tread: dim("tread", TREAD)?,
         landings: landings_param(c, p)?,
+        spiral: spiral_param(c, p)?,
     };
     let (n, _, length) = m.flight(&st);
     let level = st.level;

@@ -1040,6 +1040,24 @@ fn stair_shown(ui: &mut Ui, report: &Value) {
     if let (Some(width), Some(climbs)) = (said("width"), report["climbs"].as_str()) {
         ui.label(RichText::new(tf("It is {} mm wide and climbs {}.", &[&width, t(climbs)])).color(pal().muted));
     }
+    // A spiral stair has no landing to say, climbing in one curved run from its foot to its top: what is said of
+    // it instead is which way it turns, how far round it comes to and how far out the inside of its treads is
+    // drawn. How far round is nowhere held in the stair — the going is, and the turn follows from it — so where
+    // the plan draws fewer steps than the storey climbs in, the stair that is built turns further than the plan
+    // draws it turning and its top lands somewhere else, which is what the second line says.
+    let coil = &report["spiral"];
+    if let (Some(radius), Some(turn), Some(to)) = (coil["radius"].as_f64(), coil["turn"].as_f64(), coil["to"].as_str()) {
+        let said = tf(
+            "It climbs in one spiral run turning {}, {} degrees round in all, the inside of its treads {} mm from the centre.",
+            &[t(to), &format!("{turn:.0}"), &format!("{radius:.0}")],
+        );
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if let Some(off) = coil["off"].as_f64().filter(|off| *off > 1.0) {
+        let said =
+            tf("The spiral it is built with puts its top {} mm from where the plan draws the end of the curve.", &[&format!("{off:.0}")]);
+        ui.label(RichText::new(said).color(pal().muted));
+    }
     // The landings between its runs: each turn in a word, and, where a built landing puts the next run somewhere
     // else than the plan draws it, how far off — a built landing is as deep as the stair is wide, and a drawn one
     // is under no such rule.

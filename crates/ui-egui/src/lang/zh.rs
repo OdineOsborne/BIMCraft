@@ -1685,6 +1685,14 @@ pub(super) const WORDS: &[[&str; 2]] = &[
         "在 {} 级踏步之后转向{}，共 {} 级弧形踏步，内侧距圆心 {} 毫米。",
     ],
     ["The landing it is built with puts the next run {} mm from where the plan draws it.", "所建平台使下一段距平面图所绘位置 {} 毫米。"],
+    [
+        "It climbs in one spiral run turning {}, {} degrees round in all, the inside of its treads {} mm from the centre.",
+        "以一段螺旋梯段上行，转向{}，共 {} 度，踏步内侧距圆心 {} 毫米。",
+    ],
+    [
+        "The spiral it is built with puts its top {} mm from where the plan draws the end of the curve.",
+        "所建螺旋梯使其顶端距平面图所绘弧线末端 {} 毫米。",
+    ],
     ["left", "左"],
     ["right", "右"],
     ["back left", "左后折返"],

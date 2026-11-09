@@ -361,6 +361,26 @@ fn the_walls_tab_says_the_curved_run_the_plan_draws_between_two_runs() {
     assert_eq!(stairs_of(&h), vec![(1000.0, 280.0, 12)], "as deep and as wide as the plan draws it");
 }
 
+#[test]
+fn the_walls_tab_says_the_spiral_run_a_plan_draws_with_no_run_on_it() {
+    let mut h = a_storey_with_a_spiral_stair();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Find");
+    press(&mut h, "Read the Stair");
+    // Nothing in the plan is drawn the way a flight is, so the stair is read from the curve alone: 16 risers over
+    // the 3 m to the storey above, and the going is the arc one tread covers at the walk line, 1000 out from the
+    // centre and 16 degrees round.
+    assert!(says(&h, "This stair climbs 3000 mm in 16 risers of 188 mm, each step 279 mm deep."), "what it read");
+    // Which end of a curve is its foot a plan draws nothing of, so the end furthest south is read as the foot,
+    // and from there it turns to the right.
+    assert!(
+        says(&h, "It climbs in one spiral run turning right, 240 degrees round in all, the inside of its treads 500 mm from the centre."),
+        "the spiral it climbs in"
+    );
+    press(&mut h, "Build This Stair");
+    assert_eq!(stairs_of(&h), vec![(1000.0, 279.25, 16)], "as wide as the plan draws it and as deep as its turn makes it");
+}
+
 /// Every stair of the project: how wide it is, the going of one step, and how many risers it climbs in.
 fn stairs_of(h: &Harness<BimApp>) -> Vec<(f64, f64, u32)> {
     let m = &h.state().session.model;
@@ -437,17 +457,33 @@ fn windows_of(h: &Harness<BimApp>) -> Vec<(f64, f64)> {
 /// line the walls stop at, the underside of the slab this floor is, the two rakes of the roof, a rectangle around
 /// each window, and the two heights it is drawn to.
 fn a_storey_with_an_elevation() -> Harness<'static, BimApp> {
-    a_storey_whose_stair_turns(false)
+    a_storey_whose_stair_climbs(Climb::Fan)
 }
 
 /// The same storey, with the quarter turn of its stair drawn as a curved run and not as a fan: the two arcs of a
 /// run 1000 wide about a centre 500 mm past the edge of the run below, with the risers of three treads out along
 /// their radius, and the run above standing where that curve leaves off.
 fn a_storey_with_a_curved_stair() -> Harness<'static, BimApp> {
-    a_storey_whose_stair_turns(true)
+    a_storey_whose_stair_climbs(Climb::Curve)
 }
 
-fn a_storey_whose_stair_turns(curved: bool) -> Harness<'static, BimApp> {
+/// The same storey again, its stair climbing in one spiral run and no straight one: the two arcs of a run 1000
+/// wide about a centre in the middle of the room, with a radial riser for each of its 16 steps, 16 degrees apart
+/// round 240 degrees of turn.
+fn a_storey_with_a_spiral_stair() -> Harness<'static, BimApp> {
+    a_storey_whose_stair_climbs(Climb::Spiral)
+}
+
+/// How the stair of that storey climbs: a quarter turn on fanned treads, the same turn on a curved run, or one
+/// spiral run the whole way up with no straight run at all.
+#[derive(Clone, Copy, PartialEq)]
+enum Climb {
+    Fan,
+    Curve,
+    Spiral,
+}
+
+fn a_storey_whose_stair_climbs(how: Climb) -> Harness<'static, BimApp> {
     let mut lines = room("MURI", [0.0, 0.0, 10_000.0, 6000.0], 300.0);
     for [x0, x1] in [[3000.0, 4500.0], [6000.0, 7200.0]] {
         lines.push(("MURI".to_string(), [x0, 0.0, x0, 300.0]));
@@ -457,11 +493,11 @@ fn a_storey_whose_stair_turns(curved: bool) -> Harness<'static, BimApp> {
     // A stair that turns, standing in the plan against its north wall: five steps 280 apart and 1000 wide
     // climbing north, a quarter turn to the left on three fanned treads, and five more climbing west. The two
     // risers between those treads are drawn out from the corner on the inside of the turn, a third of it apart.
-    let (over, under) = match curved {
-        true => (6500.0, 4920.0),
-        false => (7000.0, 4420.0),
+    let (over, under) = match how {
+        Climb::Curve => (6500.0, 4920.0),
+        _ => (7000.0, 4420.0),
     };
-    for n in 0..5 {
+    for n in (0..5).filter(|_| how != Climb::Spiral) {
         let y = 3300.0 + 280.0 * f64::from(n);
         lines.push(("SCALA".to_string(), [7000.0, y, 8000.0, y]));
         let x = over - 280.0 * f64::from(n);
@@ -470,8 +506,8 @@ fn a_storey_whose_stair_turns(curved: bool) -> Harness<'static, BimApp> {
     // The two risers the turn is carried on between the runs' own: out from the corner on the inside of it, a
     // third of the turn apart, or out along the radius of the two arcs a curved run is drawn between.
     let mut bows = String::new();
-    match curved {
-        true => {
+    match how {
+        Climb::Curve => {
             for radius in [500.0, 1500.0] {
                 bows.push_str(&format!("0\nARC\n8\nSCALA\n10\n6500\n20\n4420\n40\n{radius}\n50\n0\n51\n90\n"));
             }
@@ -481,7 +517,19 @@ fn a_storey_whose_stair_turns(curved: bool) -> Harness<'static, BimApp> {
                 lines.push(("SCALA".to_string(), at));
             }
         }
-        false => {
+        // The spiral: both arcs of it drawn about the middle of the room, and a riser out along the radius for
+        // each of the 16 steps it climbs in, which is what gives the going at the walk line.
+        Climb::Spiral => {
+            for radius in [500.0, 1500.0] {
+                bows.push_str(&format!("0\nARC\n8\nSCALA\n10\n3000\n20\n3000\n40\n{radius}\n50\n0\n51\n240\n"));
+            }
+            for n in 0..16 {
+                let (sin, cos) = (16.0 * f64::from(n)).to_radians().sin_cos();
+                let at = [3000.0 + 500.0 * cos, 3000.0 + 500.0 * sin, 3000.0 + 1500.0 * cos, 3000.0 + 1500.0 * sin];
+                lines.push(("SCALA".to_string(), at));
+            }
+        }
+        Climb::Fan => {
             let third = 1000.0 / 3.0_f64.sqrt();
             lines.push(("SCALA".to_string(), [7000.0, 4420.0, 8000.0, 4420.0 + third]));
             lines.push(("SCALA".to_string(), [7000.0, 4420.0, 7000.0 + third, 5420.0]));

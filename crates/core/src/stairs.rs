@@ -3,7 +3,7 @@
 //! in from a side.
 
 use crate::geom::{self, P2};
-use crate::model::{Element, Model, RAILING_INSET, Railing, Ramp, Side, Stair, heading};
+use crate::model::{Element, MOST_RISERS, Model, RAILING_INSET, Railing, Ramp, Side, Spiral, Stair, heading};
 use crate::walls::Plane;
 
 /// A run: from the middle of its foot, `start`, along unit `u`, `length` long, from height `z.0`
@@ -76,7 +76,10 @@ fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, t
         // run: to the next run's far edge, beside it when it turns back.
         let side = n * if turn > 0.0 { 1.0 } else { -1.0 };
         // The treads a turn is carried on, where it is carried on treads at all: a curved run between two arcs
-        // where it is drawn about a centre, and a fan in the square of the landing where it is not.
+        // where it is drawn about a centre, and a fan in the square of the landing where it is not. Held to what a
+        // stair is built with whoever asks: a count out of a file or a command is checked after the model is
+        // changed and not before it is drawn, and a tread for each of four billion is no drawing.
+        let winders = winders.min(crate::model::MOST_WINDERS);
         if winders >= 2 && radius > 0.0 && matches!(turn.abs(), 90.0 | 180.0) {
             (at, u) = (curve(&mut out, e, side, w, winders, radius, rise, turn, z.1), turned(u, turn));
             continue;
@@ -108,9 +111,7 @@ fn chain(start: P2, angle: f64, width: f64, runs: Vec<(f64, (f64, f64), u32)>, t
 /// landing would have left it.
 #[allow(clippy::too_many_arguments)]
 fn fan(out: &mut Layout, e: P2, u: P2, side: P2, w: f64, winders: u32, rise: f64, z: f64) -> P2 {
-    // Held to what a stair is built with whoever asks: a count out of a file or a command is checked after the
-    // model is changed and not before it is drawn, and a wedge for each of four billion treads is no drawing.
-    let winders = winders.clamp(2, crate::model::MOST_WINDERS);
+    let winders = winders.max(2);
     let (pivot, a, b) = (e + side * (w / 2.0), side * -1.0, u);
     let (k, far) = (f64::from(winders), pivot + a * w + b * w);
     // Where a ray out from the corner, `t` of the way round the turn, meets the edge of the square,
@@ -143,8 +144,9 @@ fn fan(out: &mut Layout, e: P2, u: P2, side: P2, w: f64, winders: u32, rise: f64
 #[allow(clippy::too_many_arguments)]
 fn curve(out: &mut Layout, e: P2, side: P2, w: f64, winders: u32, radius: f64, rise: f64, turn: f64, z: f64) -> P2 {
     // Held to what a stair is built with whoever asks: a count out of a file or a command is checked after the
-    // model is changed and not before it is drawn, and a tread for each of four billion is no drawing.
-    let winders = winders.clamp(2, crate::model::MOST_WINDERS);
+    // model is changed and not before it is drawn, and a tread for each of four billion is no drawing. One tread
+    // alone climbs nothing, so the share of the rise it carries is its own and not a part of none.
+    let winders = winders.clamp(1, MOST_RISERS);
     // The centre it turns about stands past the edge of the run on the inside of the turn, and the two ends of
     // the run's last riser stand on the two arcs: the near one `radius` out, the far one the width beyond.
     let (k, c) = (f64::from(winders), e + side * (radius + w / 2.0));
@@ -159,12 +161,37 @@ fn curve(out: &mut Layout, e: P2, side: P2, w: f64, winders: u32, radius: f64, r
         let (a, b) = (turn * f64::from(j) / k, turn * f64::from(j + 1) / k);
         let mut ring = bow(near, a, b);
         ring.extend(bow(far, b, a));
-        let up = z + rise * f64::from(j) / (k - 1.0);
+        let up = z + rise * f64::from(j) / (k - 1.0).max(1.0);
         out.pads.push(Pad { ring: ccw(ring), z: up });
         // Up the middle of the run, which is the middle of the end of the run below it carried round.
         out.walk.push((round(e, (a + b) / 2.0), up));
     }
     round(e, turn)
+}
+
+/// A spiral stair: the one curved run of it, from the middle of its foot `start` heading `angle` degrees,
+/// `width` wide, climbing `risers` risers of `each` from `base`, its going at the walk line `going`. Every
+/// riser of it is a tread of the turn, so it has no straight run at all: `risers - 1` treads, the last of
+/// them a riser below the floor above, and the walk line from the middle of its foot on one floor to the
+/// middle of its top riser on the other.
+///
+/// How far round it goes follows from the rest, as [`Spiral`] says: each tread turns as far as the going
+/// takes it at the walk line, half the width out past `radius` from the centre it turns about.
+#[allow(clippy::too_many_arguments)]
+fn helix(start: P2, angle: f64, width: f64, going: f64, risers: u32, each: f64, base: f64, sp: Spiral) -> Layout {
+    let mut out = Layout { runs: Vec::new(), pads: Vec::new(), walk: Vec::new(), width };
+    let u = heading(angle);
+    let side = u.perp() * if matches!(sp.to, Side::Left) { 1.0 } else { -1.0 };
+    let treads = risers.saturating_sub(1).clamp(1, MOST_RISERS);
+    // How far one tread turns: its going, as an angle at the walk line. A width of none and a centre on the walk
+    // line are no stair, and the model refuses both, but a drawing is asked for before a model is checked.
+    let out_to = sp.radius + width / 2.0;
+    let step = if out_to > 0.0 { (going / out_to).to_degrees() } else { 0.0 };
+    let turn = step.clamp(0.0, 360.0) * f64::from(treads) * if matches!(sp.to, Side::Left) { 1.0 } else { -1.0 };
+    out.walk.push((start, base));
+    let top = curve(&mut out, start, side, width, treads, sp.radius, each * f64::from(treads.saturating_sub(1)), turn, base + each);
+    out.walk.push((top, base + each * f64::from(risers)));
+    out
 }
 
 /// How many degrees apart the points of an arc are drawn, and how many of them there may be.
@@ -186,6 +213,9 @@ fn ccw(ring: Vec<P2>) -> Vec<P2> {
 pub fn stair(m: &Model, st: &Stair) -> Layout {
     let (n, each, _) = m.flight(st);
     let base = m.elevation(st.level);
+    if let Some(sp) = st.spiral {
+        return helix(st.start, st.angle, st.width, st.tread, n, each, base, sp);
+    }
     let mut spans: Vec<(u32, u32)> = Vec::new();
     let mut from = 0u32;
     // A fan's own risers, held to what a stair is built with as [`fan`] holds them, so the runs it
@@ -381,5 +411,37 @@ mod tests {
         // With no radius at all the same quarter turn is the fan, and the run above it leaves where that left it.
         let fan = chain(P2(0.0, 0.0), 90.0, 1000.0, runs, &[Turn { radius: 0.0, ..turn }]);
         assert!(near(fan.runs[1].start, P2(500.0, 1500.0)), "{:?}", fan.runs[1]);
+    }
+
+    #[test]
+    fn a_spiral_stair_is_one_curved_run_of_treads_from_its_foot_to_its_top() {
+        let near = |a: P2, b: P2| a.dist(b) < 1e-6;
+        // Five risers of 200 from the middle of its foot at the origin, heading north, a metre wide, the inside of
+        // its treads 500 from the centre it turns about: the centre stands a metre west of its foot, that and half
+        // its width, and the walk line up the middle of it is a metre out from there.
+        let sp = Spiral { radius: 500.0, to: Side::Left };
+        let l = helix(P2(0.0, 0.0), 90.0, 1000.0, 300.0, 5, 200.0, 0.0, sp);
+        assert!(l.runs.is_empty(), "a spiral stair has no straight run");
+        // Four treads for five risers, each a riser above the last and the top one a riser below the floor above.
+        assert_eq!(l.pads.len(), 4);
+        assert_eq!(l.pads.iter().map(|p| p.z).collect::<Vec<_>>(), vec![200.0, 400.0, 600.0, 800.0]);
+        // Each turns as far as its going takes it a metre out: 300 mm of arc, which is 0.3 of a radian. Together
+        // they cover that much of the ring between the two arcs and no more, give or take what a curve drawn as
+        // the chords of it falls short by.
+        let step = 0.3f64.to_degrees();
+        let sector = 4.0 * 0.3 / 2.0 * (1500.0 * 1500.0 - 500.0 * 500.0);
+        let laid: f64 = l.pads.iter().map(|p| geom::area(&p.ring).abs()).sum();
+        assert!(sector - laid > 0.0 && sector - laid < sector / 500.0, "{laid} of {sector}");
+        // Its walk line runs from the middle of its foot on the floor to the middle of its top riser on the floor
+        // above, every point of it a metre out from the centre.
+        let c = P2(-1000.0, 0.0);
+        assert_eq!(l.walk.first().copied(), Some((P2(0.0, 0.0), 0.0)));
+        assert_eq!(l.walk.last().map(|(_, z)| *z), Some(1000.0));
+        assert!(l.walk.iter().all(|(p, _)| (p.dist(c) - 1000.0).abs() < 1e-6), "{:?}", l.walk);
+        assert!(l.walk.last().is_some_and(|(p, _)| near(*p, c + turned(P2(0.0, 0.0) - c, 4.0 * step))), "{:?}", l.walk.last());
+        // Turning the other way puts the centre as far the other side of its foot, and carries it round that way.
+        let right = helix(P2(0.0, 0.0), 90.0, 1000.0, 300.0, 5, 200.0, 0.0, Spiral { to: Side::Right, ..sp });
+        assert!(right.walk.iter().all(|(p, _)| (p.dist(P2(1000.0, 0.0)) - 1000.0).abs() < 1e-6), "{:?}", right.walk);
+        assert!(right.walk.last().is_some_and(|(p, _)| p.0 > 0.0 && p.1 > 0.0), "{:?}", right.walk.last());
     }
 }

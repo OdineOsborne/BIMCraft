@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::engine::Session;
 use crate::geom::P2;
-use crate::model::Element;
+use crate::model::{Element, Side};
 
 /// A DXF of two lines and a circle on two layers, in a folder of this call's own, and its path.
 fn drawing(name: &str) -> String {
@@ -926,6 +926,31 @@ fn a_curved_stair_drawn(bent: bool) -> Session {
     a_plan_drawn_with(&more)
 }
 
+/// The survey with a spiral stair drawn in its plan: the two arcs of its edges, 500 and 1500 from the centre it
+/// turns about, and a radial line for each of its 16 risers, 16 degrees apart round 240 degrees of turn. Nothing
+/// else in the plan measures like a run of steps, because a stair that is all curve is read only where nothing
+/// does. The circle with four lines out along its radius is drawn here too: it measures like a curved run and
+/// draws too few steps to be a stair that climbs a storey, so it is not read as one.
+fn a_spiral_stair() -> Session {
+    let mut more = String::new();
+    for radius in [500.0_f64, 1500.0] {
+        more.push_str(&format!("0\nARC\n8\nSCALA\n10\n9500\n20\n2000\n40\n{radius}\n50\n0\n51\n240\n"));
+    }
+    for n in 0..16 {
+        let deg = 16.0 * f64::from(n);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let (a, b) = (P2(9500.0 + 500.0 * cos, 2000.0 + 500.0 * sin), P2(9500.0 + 1500.0 * cos, 2000.0 + 1500.0 * sin));
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n{}\n20\n{}\n11\n{}\n21\n{}\n", a.0, a.1, b.0, b.1));
+    }
+    more.push_str("0\nCIRCLE\n8\nSCALA\n10\n2500\n20\n1500\n40\n400\n");
+    for deg in [0.0_f64, 90.0, 180.0, 270.0] {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let (a, b) = (P2(2500.0 + 400.0 * cos, 1500.0 + 400.0 * sin), P2(2500.0 + 1000.0 * cos, 1500.0 + 1000.0 * sin));
+        more.push_str(&format!("0\nLINE\n8\nSCALA\n10\n{}\n20\n{}\n11\n{}\n21\n{}\n", a.0, a.1, b.0, b.1));
+    }
+    a_plan_drawn_with(&more)
+}
+
 /// The survey with `more` lines drawn in its plan, its two parts said and its walls traced from it, so what is
 /// drawn there has a storey to stand on.
 fn a_plan_drawn_with(more: &str) -> Session {
@@ -963,6 +988,19 @@ fn stairs_of(s: &Session) -> Vec<(f64, f64, u32, f64)> {
                 let (risers, each, _) = s.model.flight(st);
                 Some((st.width, st.tread, risers, (each * 100.0).round() / 100.0))
             }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every stair's spiral, where it climbs in one: how far out the inside of its treads is drawn, and which way it
+/// turns as it climbs.
+fn spirals_of(s: &Session) -> Vec<Option<(f64, Side)>> {
+    s.model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Stair(st) => Some(st.spiral.map(|sp| (sp.radius, sp.to))),
             _ => None,
         })
         .collect()
@@ -1078,6 +1116,47 @@ fn a_curved_run_drawn_as_the_bend_of_a_polyline_is_read_as_the_arcs_it_draws() {
     assert_eq!(out["landings"], json!([{"at": 5.0, "turn": 90.0, "which": "left", "winders": 3, "radius": 500.0, "off": 0.0}]), "{out}");
     assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(10), json!(12)), "{out}");
     assert_eq!(stairs_of(&s), vec![(1000.0, 280.0, 12, 250.0)], "{out}");
+}
+
+#[test]
+fn the_curve_a_plan_draws_with_no_run_on_it_is_the_spiral_a_stair_climbs_in() {
+    let mut s = a_spiral_stair();
+    let ask = json!({"part": "PIANTA PIANO TERRA"});
+    let out = run(&mut s, "cad_stair", ask.clone()).expect("it reads");
+    // Nothing in this plan is drawn the way a flight is, so there is no run at all and the stair is read from the
+    // curve: the 16 lines drawn out along its radius are its risers, as a flight's lines are, and the going is the
+    // arc one tread covers at the walk line — 16 degrees of a radius of 1000, which is 279.25 mm.
+    assert_eq!(out["flights"], json!([]), "{out}");
+    assert_eq!((out["steps"].clone(), out["risers"].clone()), (json!(16), json!(16)), "{out}");
+    assert_eq!((out["going"].clone(), out["width"].clone()), (json!(279.25), json!(1000.0)), "{out}");
+    assert_eq!(out["landings"], json!([]), "a spiral is one run from its foot to its top: {out}");
+    // Which end of it is the foot a plan draws no more of than it draws of a run: the end furthest south is read
+    // as the foot, so it climbs clockwise from the end of the turn, which is to its right.
+    let said = &out["spiral"];
+    assert_eq!(
+        (said["centre"].clone(), said["radius"].clone(), said["width"].clone(), said["to"].clone()),
+        (json!([9500.0, 2000.0]), json!(500.0), json!(1000.0), json!("right")),
+        "{out}"
+    );
+    assert_eq!((said["steps"].clone(), said["sweep"].clone(), said["turn"].clone()), (json!(16), json!(240.0), json!(240.0)), "{out}");
+    assert_eq!(out["start"], json!([9000.0, 1133.97]), "{out}");
+    assert_eq!(out["angle"], json!(150.0), "along the arc at its foot, which is its radius there turned a quarter");
+    // And the stair that is built from it comes out where the plan draws the far end of the curve, which is the
+    // check on the whole of the reading: the turn is nowhere held in the stair, only the going is, so a going read
+    // wrong, a radius read wrong or a riser counted wrong would all land its top somewhere else.
+    assert!(said["off"].as_f64().is_some_and(|off| off < 1.0), "{out}");
+    let mut told = ask.clone();
+    told["apply"] = json!(true);
+    let out = run(&mut s, "cad_stair", told).expect("it builds");
+    assert_eq!(stairs_of(&s), vec![(1000.0, 279.25, 16, 187.5)], "{out}");
+    assert_eq!(spirals_of(&s), vec![Some((500.0, Side::Right))], "{out}");
+    assert_eq!(landings_of(&s), vec![Vec::new()], "{out}");
+    // Told it climbs the other way, the other end of the curve is its foot and it turns the other way with it.
+    let mut told = ask.clone();
+    told["flip"] = json!(true);
+    let out = run(&mut s, "cad_stair", told).expect("it reads");
+    assert_eq!(out["start"], json!([10500.0, 2000.0]), "{out}");
+    assert_eq!((out["spiral"]["to"].clone(), out["angle"].clone()), (json!("left"), json!(90.0)), "{out}");
 }
 
 #[test]

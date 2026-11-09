@@ -469,7 +469,8 @@ pub fn curves(m: &Model, u: &Underlay, how: &How) -> Result<Vec<Curve>, String> 
         .collect();
     if bends.len() > MAX_BENDS {
         return Err(format!(
-            "this drawing holds more than {MAX_BENDS} arcs: hide the layers that are not the building's, or say the area to              read with `region`"
+            "this drawing holds more than {MAX_BENDS} arcs: hide the layers that are not the building's, or say the \
+             area to read with `region`"
         ));
     }
     let (faces, ..) = faces_of(m, u, &how)?;

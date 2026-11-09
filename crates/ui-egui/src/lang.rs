@@ -2750,6 +2750,16 @@ const WORDS: &[[&str; 3]] = &[
         "O patamar com que é construída põe o lanço seguinte a {} mm de onde a planta o desenha.",
         "La meseta con que se construye sitúa el tramo siguiente a {} mm de donde lo dibuja la planta.",
     ],
+    [
+        "It climbs in one spiral run turning {}, {} degrees round in all, the inside of its treads {} mm from the centre.",
+        "Sobe num único lanço em espiral que vira {}, {} graus no total, o lado interno dos degraus a {} mm do centro.",
+        "Sube en un único tramo en espiral que gira {}, {} grados en total, el lado interior de los peldaños a {} mm del centro.",
+    ],
+    [
+        "The spiral it is built with puts its top {} mm from where the plan draws the end of the curve.",
+        "A espiral com que é construída põe o seu topo a {} mm de onde a planta desenha o fim da curva.",
+        "La espiral con que se construye sitúa su cabeza a {} mm de donde la planta dibuja el final de la curva.",
+    ],
     ["left", "à esquerda", "a la izquierda"],
     ["right", "à direita", "a la derecha"],
     ["back left", "para trás pela esquerda", "atrás por la izquierda"],

@@ -784,6 +784,36 @@ of nothing at all that comes out where the fan does, which is why the run above 
 either way; what a curved run has and a fan has not is the well it turns about, left open inside the inner arc.
 A half turn is a curved run's and not a fan's, because the square of a landing cannot hold one.
 
+A stair can also be nothing but curve: one curved run from its foot to its top, a spiral stair, with no straight
+run and no landing anywhere on it. `Stair { spiral: Spiral { radius, to } }` says so, and `stairs::helix` lays it
+out through the same `stairs::curve`: every riser of it is a tread of the turn, `risers - 1` of them, the last a
+riser below the floor above, and the walk line runs from the middle of its foot on one floor to the middle of its
+top riser on the other. The centre it turns about stands `radius` and half the width to the side it turns `to`,
+which is where a turn's centre stands against the run below it, so the two agree.
+
+How far round a spiral goes is nowhere held in the model, because it cannot be. Three numbers cannot all be free:
+the storey says how many risers it climbs in, the going at the walk line is the stair's own `tread`, and the turn
+is what those two come to — each tread turns as far as the going takes it half a width out past `radius`, and the
+whole of it turns as far as its treads do. Holding the turn instead would leave `tread` describing nothing, and
+then `Model::check` would be holding Blondel's rule against a number that is not the stair's going. So the turn is
+derived, reported as `spiral_turn` in the stair's info and in the window, and `Model::check` refuses a tread that
+turns further than `SPIRAL_STEEP` (45 degrees: eight treads to the turn is tight already), a radius that is no
+length, and a spiral with a landing on it.
+
+A plan draws a spiral as the two arcs of its edges with a radial line for each riser, which is exactly what
+`trace::curves` reads — so the reading of it is the same machinery, asked a different question. `cad_stair` reads
+one only where no run of lines measures like a stair at all, because standing at the head of a run is what tells
+the curve that carries a turn from the stair that is all curve, and only where the curve draws `SPIRAL_LEAST`
+steps or more (8) at a stair's own going and width, because a circle with lines drawn to it is a hinge, a bolt
+circle or the swing of a door far more often than it is a stair. The going is the arc one tread covers at the walk
+line, which is where a going is measured; the risers are the radial lines, counted as a flight's lines are; and
+which end is the foot is read as a run's is (the end furthest south, or furthest west where the two stand level),
+`flip` turning it round and the side it turns to with it, since its steps stand counter-clockwise round the centre
+and so it climbs to the left from the first of them and to the right from the last. The check on the whole of that
+is `off`: how far the stair that is built puts its top from where the plan draws the far end of the curve. The turn
+is held nowhere, so a going read wrong, a radius read wrong or a riser counted wrong would each land its top
+somewhere else.
+
 Which end of a run is its foot is the one thing a plan draws nothing of — but a run joined on to another has only
 the one end that can be its foot, so the runs are read in one piece and which end of the whole of it is the foot
 is read as one run's is: from its south end, or from its west where it runs east and west. `flip` turns the whole
@@ -799,10 +829,11 @@ comes to 633 and the rule of thumb is satisfied, and the run then reaches past t
 and settles neither, because the drawing does not.
 
 Nor is there a fan or a curved run there: `landings` comes back empty, so there is no turn, and both of those are
-ways of carrying a turn. That is also the limit of the reading, said plainly — it looks for either only at a turn
-between two runs, so a fan or a curve drawn with nothing joined on above it is not read, and a stair that is one
-curved run from foot to top (a spiral) is read as no stair at all, because there is no straight run in it for a
-flight to be found in. On this plan there is nothing for one to turn into.
+ways of carrying a turn. That is also the limit of the reading, said plainly — a fan or a curve is looked for only
+at a turn between two runs, so one drawn with nothing joined on above it is not read as a turn; and a spiral is
+looked for only where no run of lines measures like a stair, so a plan that draws a flight and a spiral both gives
+up the flight, and `region` is what says which of them to read. On this plan there is neither: one flight, and no
+arc anywhere in the region it is read from.
 
 The arcs themselves need not be `ARC` entities: that same file reported **606 polyline arcs, read as the straight
 line between their points** in `left_out`, which is how a CAD draws most of its arcs, and `dxf::bow` now reads

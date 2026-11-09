@@ -63,7 +63,7 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -953,7 +953,8 @@ pub struct Component {
 /// A stair from `level` up to `top_level` (or `height` mm), climbing from the middle of its first
 /// riser at `start` toward `angle` degrees (counter-clockwise from east): as many risers as keep
 /// each no higher than `riser`, a tread `tread` deep between each two; in one straight run, or in
-/// runs with a landing between each two.
+/// runs with a landing between each two; or, with a `spiral`, in one curved run the whole way up,
+/// drawn about a centre to one side of its foot.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stair {
@@ -969,10 +970,33 @@ pub struct Stair {
     pub tread: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landings: Vec<Landing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spiral: Option<Spiral>,
     /// Its values of the project's parameters, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
 }
+
+/// A stair's one curved run from its foot to its top, a spiral stair: no straight run and no landing, every
+/// tread drawn between an arc `radius` from the centre it turns about and one the stair's width beyond it,
+/// each a riser above the last. The centre stands that far plus half its width from the middle of its foot,
+/// to the side it turns `to` as it climbs.
+///
+/// How far round it goes is not held here, because it cannot be: the storey says how many risers it climbs
+/// in, and the going at the walk line is the stair's `tread`, so each tread turns as far as that going takes
+/// it that far out from the centre and the whole of it turns as far as its treads do. A stair's info says
+/// how far that comes to.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spiral {
+    pub radius: f64,
+    #[serde(default)]
+    pub to: Side,
+}
+
+/// How far a tread of a spiral turns at most, in degrees: past this it is no tread, eight of them to the
+/// turn being tight already.
+pub const SPIRAL_STEEP: f64 = 45.0;
 
 /// A landing between two runs of a stair or a ramp: after `at` risers of a stair, or `at` mm up a
 /// ramp; then the next run goes on straight (`turn` 0), turned left (90) or right (-90), or back
@@ -1002,6 +1026,9 @@ pub struct Landing {
 
 /// How many treads at most carry one turn of a stair: past this each is too narrow to stand on.
 pub const MOST_WINDERS: u32 = 12;
+
+/// How many risers at most one stair climbs in: past this it is no one flight of a building.
+pub const MOST_RISERS: u32 = 200;
 
 /// A ramp from `level` up to `top_level` (or `height` mm), from the middle of its foot at `start`
 /// toward `angle` degrees: rising at its slope, `slope` percent (rise over run), in one run or in
@@ -4248,13 +4275,40 @@ impl Model {
                         size(&format!("{who} {what}"), v)?;
                     }
                     let (n, _, _) = self.flight(st);
-                    if !(2..=200).contains(&n) {
+                    if !(2..=MOST_RISERS).contains(&n) {
                         return Err(format!(
-                            "{who}: {n} risers; a stair takes 2 to 200, so check its height and its riser ({} mm)",
+                            "{who}: {n} risers; a stair takes 2 to {MOST_RISERS}, so check its height and its riser ({} mm)",
                             st.riser
                         ));
                     }
                     landings(&who, &st.landings, Some(f64::from(n)))?;
+                    if let Some(sp) = st.spiral {
+                        if !sp.radius.is_finite() || sp.radius < 0.0 || sp.radius > MAX_COORD {
+                            return Err(format!(
+                                "{who}: `radius` is how far from the centre it turns about the inside of a spiral's treads \
+                                 is drawn, in mm, and {} is no such length",
+                                sp.radius
+                            ));
+                        }
+                        if !st.landings.is_empty() {
+                            return Err(format!(
+                                "{who}: a spiral stair is one curved run from its foot to its top, so it has no landings; \
+                                 `radius` on a landing turns a stair of straight runs on a curve between two of them"
+                            ));
+                        }
+                        // The going at the walk line is the stair's, so how far each tread turns follows from how far out
+                        // the walk line is: a tread that turns further than this is no tread.
+                        let turn = (st.tread / (sp.radius + st.width / 2.0)).to_degrees();
+                        if !(turn.is_finite() && turn <= SPIRAL_STEEP) {
+                            return Err(format!(
+                                "{who}: each tread of it turns {turn:.0} degrees, where a spiral's turns {SPIRAL_STEEP:.0} at \
+                                 most: a going of {} mm turns that far {} mm out from the centre, so widen it, move its \
+                                 centre out, or draw the going shorter",
+                                st.tread,
+                                sp.radius + st.width / 2.0
+                            ));
+                        }
+                    }
                 }
                 Element::Ramp(r) => {
                     level_ok(r.level)?;

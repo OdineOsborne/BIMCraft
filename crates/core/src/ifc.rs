@@ -76,7 +76,10 @@ pub const PHASING: &str = "BIMCraft_Phasing";
 pub const IMPLIED: &str = "Implied: no phase is set for it, so it was made in the first phase";
 
 /// What a stair's or a ramp's IFC type is, by its landings: `kind` is STAIR or RAMP.
-fn shape_of(landings: &[crate::model::Landing], kind: &str) -> String {
+fn shape_of(landings: &[crate::model::Landing], spiral: bool, kind: &str) -> String {
+    if spiral {
+        return format!(".SPIRAL_{kind}.");
+    }
     let turns: Vec<f64> = landings.iter().map(|l| l.turn).collect();
     let shape = match turns.as_slice() {
         [] => "STRAIGHT_RUN",
@@ -858,8 +861,11 @@ pub fn export(m: &Model) -> String {
                 let (_, each, _) = m.flight(st);
                 let (base, l) = (m.elevation(st.level), stairs::stair(m, st));
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let ent =
-                    w.add(format!("IFCSTAIR({},$,'Stair',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&st.landings, "STAIR")));
+                let ent = w.add(format!(
+                    "IFCSTAIR({},$,'Stair',$,$,#{at},$,'{id}',{})",
+                    w.guid(ELEMENT, id),
+                    shape_of(&st.landings, st.spiral.is_some(), "STAIR")
+                ));
                 contained.entry(st.level).or_default().push(ent);
                 products.insert(id, ent);
                 // Its flights, each tread a block from the floor up to it, as in 3D; its landings.
@@ -889,7 +895,8 @@ pub fn export(m: &Model) -> String {
                 let Some(&(_, storey)) = storeys.get(&r.level) else { continue };
                 let (base, l) = (m.elevation(r.level), stairs::ramp(m, r));
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let ent = w.add(format!("IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&r.landings, "RAMP")));
+                let ent =
+                    w.add(format!("IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&r.landings, false, "RAMP")));
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
                 // Its flights, each solid from the floor up to its slope, as in 3D; its landings.

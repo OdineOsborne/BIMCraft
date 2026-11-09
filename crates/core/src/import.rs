@@ -2156,6 +2156,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             riser: climb / f64::from(risers),
             tread: (tread(&first) * 1000.0).round() / 1000.0,
             landings,
+            spiral: None,
         };
         let sid = m.insert(Element::Stair(stair));
         from.insert(sid, who(id));
