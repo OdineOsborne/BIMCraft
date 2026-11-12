@@ -57,7 +57,8 @@ pub const CEILING_CUT: f64 = 2300.0;
 pub const CEILING_HEIGHT: f64 = 2600.0;
 /// The steepest slope a floor or a roof may have, degrees.
 pub const MAX_SLOPE: f64 = 75.0;
-/// The version of the project file this build writes, and the newest it reads. 8: a ramp may be helical (`spiral`), one
+/// The version of the project file this build writes, and the newest it reads. 9: the project may hold the ground it
+/// stands on (`ground`), the points a survey measured. 8: a ramp may be helical (`spiral`), one
 /// curved run from its foot to its top. 7: a stair may be a spiral, the same. 6: a turn is carried on a curved run
 /// (`radius` on a landing). 5: a turn is carried on fanned treads (`winders`). 4: a line weight is a pen (0 to 16), not
 /// pixels of a sheet's drawing. 3: a type's layers and a family's forms and
@@ -65,7 +66,7 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// 2: the library has ids and GUIDs too
 /// (`library`), and what names a library entry holds its GUID. 1: elements have GUIDs, ids six digits, and what points at
 /// an element holds its GUID. None (0): a file from before.
-pub const FORMAT: u32 = 8;
+pub const FORMAT: u32 = 9;
 /// How far past the model a level reaches without an extent of its own, mm.
 pub const LEVEL_PAST: f64 = 1000.0;
 
@@ -436,6 +437,25 @@ impl Mass {
         }
         ring
     }
+}
+
+/// The ground a project stands on, Revit's toposurface: the points a survey measured, and the surface of triangles
+/// between them (`ground.rs`). It stands on no level, because the land is under all of them: its points carry their
+/// own heights, as every height in a project is, above the project's own zero.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ground {
+    #[serde(default)]
+    pub name: String,
+    /// The points measured, `[x, y, z]` in millimetres. Three that are not in one line at the least, because fewer
+    /// are no surface.
+    pub spots: Vec<[f64; 3]>,
+    /// How far apart in height the contour lines a plan draws of it stand, mm; nothing is `ground::CONTOUR`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub interval: f64,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A door or window in a host wall, centred `offset` mm along it from the wall's start. Of a `family`
@@ -1290,7 +1310,8 @@ macro_rules! visit_refs {
                     if let Some(g) = & $($m)? part.level { f(g) }
                 }
             }
-            Element::Grid(_) | Element::Sheet(_) | Element::Schedule(_) | Element::Link(_) => {}
+            // The ground stands on no level and points at nothing: its own points carry its heights.
+            Element::Grid(_) | Element::Sheet(_) | Element::Schedule(_) | Element::Link(_) | Element::Ground(_) => {}
             Element::PlanView(v) => {
                 f(& $($m)? v.level);
                 if let Some(g) = & $($m)? v.parent { f(g) }
@@ -1357,6 +1378,8 @@ pub enum Element {
     Ceiling(Ceiling),
     Shaft(Shaft),
     Mass(Mass),
+    /// The land the project stands on, Revit's toposurface.
+    Ground(Ground),
     Door(Opening),
     Window(Opening),
     Room(Room),
@@ -1413,7 +1436,8 @@ impl Element {
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
-            | Element::Railing(Railing { params, .. }) => Some(params),
+            | Element::Railing(Railing { params, .. })
+            | Element::Ground(Ground { params, .. }) => Some(params),
             _ => None,
         }
     }
@@ -1436,7 +1460,8 @@ impl Element {
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
-            | Element::Railing(Railing { params, .. }) => Some(params),
+            | Element::Railing(Railing { params, .. })
+            | Element::Ground(Ground { params, .. }) => Some(params),
             _ => None,
         }
     }
@@ -1566,6 +1591,7 @@ impl Element {
             Element::Ceiling(_) => "ceiling",
             Element::Shaft(_) => "shaft",
             Element::Mass(_) => "mass",
+            Element::Ground(_) => "ground",
             Element::Door(_) => "door",
             Element::Window(_) => "window",
             Element::Room(_) => "room",
@@ -2897,7 +2923,9 @@ impl Model {
             | Element::Viewport(_)
             | Element::Schedule(_)
             | Element::Link(_)
-            | Element::View3D(_) => None,
+            | Element::View3D(_)
+            // The land is under every level of the project and stands on none of them.
+            | Element::Ground(_) => None,
         }
     }
 
@@ -3948,6 +3976,32 @@ impl Model {
                         if let Some(why) = crate::massing::loft_problem(&ms.boundary, crown) {
                             return Err(format!("{who}: {why}"));
                         }
+                    }
+                }
+                Element::Ground(g) => {
+                    text(&who, "name", &g.name)?;
+                    if g.spots.len() > crate::ground::MOST_SPOTS {
+                        return Err(format!(
+                            "{who}: it is made of {} points, where a ground is made of {} at most: a survey of more than that is a point cloud, which a project reads as one",
+                            g.spots.len(),
+                            crate::ground::MOST_SPOTS
+                        ));
+                    }
+                    for s in &g.spots {
+                        point(&format!("{who} point"), P2(s[0], s[1]))?;
+                        coord(&format!("{who} point height"), s[2])?;
+                    }
+                    coord(&format!("{who} interval"), g.interval)?;
+                    if g.interval < 0.0 {
+                        return Err(format!("{who}: its contours stand {} mm apart, which is no height", g.interval));
+                    }
+                    // Two points are a line and a line is no land: what is wanted is three that are not in one, and
+                    // what makes the ground is the surface between them.
+                    if !crate::ground::stands(&g.spots) {
+                        return Err(format!(
+                            "{who}: its {} points are no surface: a ground is made of three points at least, and of no three that lie in one line",
+                            g.spots.len()
+                        ));
                     }
                 }
                 Element::Door(o) | Element::Window(o) => {

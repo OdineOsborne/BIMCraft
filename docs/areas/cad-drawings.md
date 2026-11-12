@@ -870,6 +870,42 @@ the facade, at 69.5365 — **263 mm** under it — and the slab comes out **260 
 to the faces of the walls that stand on it. The other line it draws below the floor, 1583 mm down and wider than
 the facade, is the fall of the ground, and no slab is read from it.
 
+## The ground the survey measured
+
+Everything else read off a drawing is read off lines someone drew. The land is not: a surveyor goes out with an
+instrument, reads a point, and the drawing records it as a marker with the height written beside it in metres. That
+is a measurement, and it is the only one in the file (`underlay::survey`, `cad_ground`).
+
+A `POINT` is now read as the shape it is (`dxf::Shape::Point`), drawn as a small cross the same size at every scale,
+and snapped to as the centre of a circle is. Before this it was thrown away: the permesso di costruire carries 2468
+of them, and the whole survey of the plot was in them.
+
+Nothing in the file ties a marker to its height — they are two entities on two layers, and the file says no more
+about the one than about the other. So they are paired by nothing but how close they stand: **closest pair first,
+each marker taking one height and each height going to one marker**, and neither reaching further than `QUOTA_REACH`
+(8) times the lettering the height is written in. Counting the reach in the lettering is what makes it the same rule
+whatever size the drawing is drawn at — a label sits beside its mark a line or two of text away, whether the text is
+2 mm or 2 m. What is left at either end is counted and said rather than guessed at: a marker with no height is a
+point the reading cannot place, and a height with no marker is a figure written for something else.
+
+What is drawn on **`DEFPOINTS`** is left out whole. AutoCAD never plots that layer; what is on it is the points a
+dimension is defined by, and a survey has nothing there. Of the permesso di costruire's 2468 points, 1783 are on it.
+
+Measured on that drawing: the survey of the plot is drawn once and put into the sheet three times over, so a region
+is drawn round one of them. One copy gives **63 markers, every one of them with a height**, 2 heights spare, the
+land running from **66.55 m to 70.48 m — 3.93 m of fall** across the plot, and each height written **122 to 1192 mm**
+from its marker. Built with the floor of the house at 69.85 m, that is a ground of 110 triangles covering **1347 m²
+seen from above and 1371 m² of land**, the difference being the slope. Nothing in the drawing writes any of those
+numbers.
+
+`floor` is what the drawing writes for the project's own zero, as it is for `cad_storey` and `cad_floor`: a survey
+writes its heights above the sea and a project measures them from its own zero, and `apply` needs it. Given again
+from the same reading it builds no second ground: the one standing takes the points now read.
+
+What is **not** read is a survey whose markers carry their own heights — a drawing in three dimensions. The height
+is taken from what the drawing writes, because that is what a surveyor's plan always carries and what this one
+carries; a `POINT` at z 0 in a flat drawing says nothing, and telling the two cases apart would be a guess.
+
 ## The rooms those walls shut in
 
 A survey is traced for the building, and a building is rooms. The walls are what says where they are: a room is an

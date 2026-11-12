@@ -726,6 +726,8 @@ pub(crate) fn plan_shows(m: &Model, plan: impl Key) -> Vec<P2> {
             // A drawing under this plan is part of what it shows: a survey linked into an empty project opens on it.
             Element::Underlay(u) if u.level == level => extent.extend(crate::underlay::extent(m, u).unwrap_or_default()),
             Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(m.mass_outline(ms, r.cut)),
+            // The ground is in every plan, so what it covers is part of what every plan shows.
+            Element::Ground(g) => extent.extend(g.spots.iter().map(|s| P2(s[0], s[1]))),
             Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
             Element::Dimension(dm) if m.annotation_in(e, key) => extent.push(dm.at),
@@ -795,6 +797,9 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
     d.weigh(|_| annotation);
     d
 }
+
+/// Half the arms of the cross a plan draws a surveyed point with, pixels of the drawing.
+const MARK: f32 = 3.0;
 
 /// How far past the lowest and highest heights a section's grids run, mm.
 const GRID_PAST: f64 = 600.0;
@@ -1301,6 +1306,15 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
                 None => d.line(&points, Pen::HAIRLINE, color, closed),
             }
         }
+        // The points a survey measured: a small cross at each, drawn the same size whatever the plan's scale, as a
+        // marker is drawn and not as a length of the land.
+        for (layer, at) in crate::underlay::marks(m, u) {
+            let Some((color, _)) = pen(&layer) else { continue };
+            let (x, y) = d.view.px(at);
+            for arm in [[(x - MARK, y), (x + MARK, y)], [(x, y - MARK), (x, y + MARK)]] {
+                d.stroke(arm.to_vec(), Pen::HAIRLINE, color, None, false);
+            }
+        }
         // What the drawing says is drawn with what it draws: a survey's room names, the figures of its dimensions,
         // the letter on its north point. They are its lettering and never dashed, whatever the phase says.
         for (layer, stroke) in crate::underlay::words(m, u).into_iter().chain(crate::underlay::measures(m, u)) {
@@ -1472,6 +1486,15 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, n: f64, ti
                 }
             }
             _ if up => {}
+            // The ground, in every plan of the project, because the land is under all of them: its contour lines, the
+            // ones the plan's cut plane passes over drawn dashed, as what stands over the cut is everywhere else.
+            Element::Ground(g) => {
+                for (z, lines) in crate::ground::contours(&g.spots, g.interval) {
+                    for [a, b] in lines {
+                        segment(&mut d, a, b, z > range.cut);
+                    }
+                }
+            }
             // A mass the plane passes through: its outline, dashed.
             Element::Mass(ms) if m.mass_cut_by(ms, range.cut) => d.dashed(&m.mass_outline(ms, range.cut), BY_CATEGORY, MASS, true),
             Element::Stair(st) => stair(&mut d, m, st, level),

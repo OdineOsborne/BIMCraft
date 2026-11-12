@@ -341,6 +341,29 @@ pub static ALL: &[Command] = &[
         cad_roof,
     ),
     edit(
+        "cad_ground",
+        "CAD Ground",
+        &[],
+        "{underlay?, part, floor?, interval?, name?, apply?} the ground a survey already measured, read off the drawing \
+         and reported without changing the project unless `apply` asks for it. A plan of the land is drawn the \
+         surveyor's way: a marker where the instrument read, and the height written beside it in metres. Nothing in \
+         the file ties the one to the other, so they are paired by how close they stand — closest pair first, each \
+         point taking one height and each height going to one point, and neither reaching further than eight times \
+         the lettering the height is written in, which is the same rule whatever size the drawing is drawn at. \
+         `points` is how many points were paired, `without` how many markers no height was written near (those are \
+         left out), `spare` how many heights belonged to no marker, and `nearest` and `furthest` how far the \
+         closest and the furthest of the pairs stood apart: a `furthest` near the reach is a pairing to look at. \
+         What is drawn on `DEFPOINTS` is left out whole, because AutoCAD never plots that layer and what is on it is \
+         the points a dimension is defined by and no survey. `lowest`, `highest` and `fall` are the heights found, as \
+         the drawing writes them; `floor` is the height the drawing writes for the project's own zero, which every \
+         height is taken from, and `apply` needs it. `interval` is how far apart the contour lines a plan draws \
+         stand. `apply` builds the ground, as `ground` does, and returns its `id`, `triangles`, `area_m2` and \
+         `surface_m2`; given again it builds no second ground, it gives the one there these points. A survey whose \
+         markers carry their own heights, a drawing in three dimensions, is not read that way: the height is taken \
+         from what the drawing writes",
+        cad_ground,
+    ),
+    edit(
         "cad_floor",
         "CAD Floor",
         &[],
@@ -597,6 +620,13 @@ pub static ALL: &[Command] = &[
         "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?} a hole through the floors, ceilings and roofs it \
          passes through, from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`",
         shaft,
+    ),
+    edit(
+        "ground",
+        "Toposurface",
+        &["TP"],
+        "{spots: [[x,y,z],…], interval?, name?} the ground the project stands on, Revit's toposurface: the points a survey          measured, each with the height it stands at, and the surface of the triangles between them. Three points that are          not in one line at the least, and 2000 at most; the triangulation is the Delaunay one, which joins each point to          its neighbours and to none across them, so it does not depend on the order the points are given in. A plan draws          it as contour lines, one at every height a whole number of `interval` mm (half a metre where nothing says), the          ones over the plan's cut plane solid and the rest dashed; 3D draws the surface itself. It stands on no level,          because the land is under all of them, and its points carry their own heights above the project's zero. The reply          and its info have `spots`, `triangles`, `lowest`, `highest`, `area_m2` (what it covers seen from above) and          `surface_m2` (the land itself, which is larger wherever it slopes). Read one off the survey a drawing already          carries with `cad_ground`",
+        ground,
     ),
     edit(
         "mass",
@@ -1759,6 +1789,19 @@ pub(crate) fn element_json_indexed(m: &Model, id: Id, index: Option<&walls::Inde
         }
     });
     match e {
+        Element::Ground(g) => {
+            let (flat, real) = crate::ground::areas(&g.spots);
+            // How many points it is made of; `spots` itself, which the element holds, is the points.
+            extra.insert("points".into(), json!(g.spots.len()));
+            extra.insert("triangles".into(), json!(crate::ground::mesh(&g.spots).len()));
+            if let Some((lo, hi)) = crate::ground::span(&g.spots) {
+                extra.insert("lowest".into(), json!(hundredth(lo)));
+                extra.insert("highest".into(), json!(hundredth(hi)));
+            }
+            // What it covers seen from above, and the land itself, which is the larger of the two wherever it slopes.
+            extra.insert("area_m2".into(), json!(m2(flat)));
+            extra.insert("surface_m2".into(), json!(m2(real)));
+        }
         Element::Wall(w) => {
             let axis = Axis::of(w);
             let length = hundredth(axis.length() * 1e4) / 1e4;
@@ -3470,6 +3513,82 @@ fn cad_roof(s: &mut Session, p: &Value) -> R {
 /// further off is the storey underneath and no slab.
 const SLAB_THIN: f64 = 100.0;
 const SLAB_THICK: f64 = 1000.0;
+
+fn cad_ground(s: &mut Session, p: &Value) -> R {
+    let c = "cad_ground";
+    let (_, u) = chosen_underlay(c, &s.model, p, "read")?;
+    let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which part of the drawing the survey is drawn in"))?;
+    let part = part_of(c, &u, &name)?;
+    let floor = num(c, p, "floor")?;
+    let interval = num(c, p, "interval")?.unwrap_or(0.0);
+    if interval < 0.0 {
+        return Err(bad(c, format!("`interval` is how far apart the contour lines stand, in mm, and {interval} is no height")));
+    }
+    let apply = flag(c, p, "apply")?;
+    if apply && floor.is_none() {
+        return Err(bad(
+            c,
+            "`apply` needs `floor`: a survey writes its heights above the sea and a project measures them from its own zero, \
+             and `floor` is the height the drawing writes for that zero",
+        ));
+    }
+    let read = crate::underlay::survey(&s.model, &u, part.region);
+    let (lowest, highest) = read.spots.iter().fold((f64::MAX, f64::MIN), |(lo, hi), one| (lo.min(one.height), hi.max(one.height)));
+    let (nearest, furthest) = read.spots.iter().fold((f64::MAX, 0.0f64), |(lo, hi), one| (lo.min(one.away), hi.max(one.away)));
+    let found = !read.spots.is_empty();
+    let mut out = json!({
+        "part": name,
+        "points": read.spots.len(),
+        "without": read.without,
+        "spare": read.spare,
+        "nearest": found.then(|| hundredth(nearest)),
+        "furthest": found.then(|| hundredth(furthest)),
+        "lowest": found.then(|| hundredth(lowest)),
+        "highest": found.then(|| hundredth(highest)),
+        "fall": found.then(|| hundredth(highest - lowest)),
+        "floor": floor,
+    });
+    if !apply {
+        return Ok(out);
+    }
+    let Some(floor) = floor else { return Ok(out) };
+    // The project measures heights from its own zero, and the survey writes them above the sea: what the drawing
+    // writes for the floor is where that zero stands in the drawing's own heights.
+    let spots: Vec<[f64; 3]> = read.spots.iter().map(|one| [one.at.0, one.at.1, one.height - floor]).collect();
+    if spots.len() < 3 {
+        return Err(bad(
+            c,
+            format!(
+                "the survey drawn in `{name}` gives {} points with a height written beside them, where a ground is made of three \
+                 at least",
+                spots.len()
+            ),
+        ));
+    }
+    let told = string(c, p, "name")?;
+    // Given again from the same reading, the ground that is there takes these points: a second run is a reading
+    // done again and not another piece of land.
+    let standing = s.model.elements.iter().find_map(|(id, e)| matches!(e, Element::Ground(_)).then_some(*id));
+    let mut make = json!({"spots": spots, "interval": interval});
+    if let Some(told) = told {
+        make["name"] = json!(told);
+    }
+    let id = match standing {
+        Some(id) => {
+            make["id"] = json!(id);
+            s.execute("modify", &make)?;
+            id
+        }
+        None => s.execute("ground", &make)?["id"].as_u64().unwrap_or_default(),
+    };
+    let made = element_json(&s.model, id);
+    for key in ["id", "triangles", "area_m2", "surface_m2"] {
+        if let (Some(o), Some(v)) = (out.as_object_mut(), made.get(key)) {
+            o.insert(key.into(), v.clone());
+        }
+    }
+    Ok(out)
+}
 
 fn cad_floor(s: &mut Session, p: &Value) -> R {
     let c = "cad_floor";
@@ -6481,6 +6600,40 @@ fn mass_size(m: &Model, ms: &Mass) -> (f64, f64, f64) {
     (m2(geom::area(&ms.boundary).abs()), top - bottom, (m.mass_volume(ms, bottom, top) / 1e7).round() / 100.0)
 }
 
+/// The points of `key`, each `[x, y, z]` in millimetres.
+fn spots_param(c: &str, p: &Value, key: &str) -> Result<Vec<[f64; 3]>, String> {
+    let a = p.get(key).and_then(Value::as_array).ok_or_else(|| bad(c, format!("`{key}` [[x, y, z], …] is required")))?;
+    if a.len() > crate::ground::MOST_SPOTS {
+        return Err(bad(c, format!("`{key}` has more than {} points", crate::ground::MOST_SPOTS)));
+    }
+    a.iter()
+        .map(|v| {
+            let three = v.as_array().filter(|a| a.len() == 3).ok_or_else(|| bad(c, format!("`{key}`: {v} is no point [x, y, z] in mm")))?;
+            let mut out = [0.0; 3];
+            for (q, said) in out.iter_mut().zip(three) {
+                *q = said
+                    .as_f64()
+                    .filter(|x| x.is_finite() && x.abs() <= MAX_COORD)
+                    .ok_or_else(|| bad(c, format!("`{key}`: {said} of {v} is no number in mm")))?;
+            }
+            Ok(out)
+        })
+        .collect()
+}
+
+fn ground(s: &mut Session, p: &Value) -> R {
+    let c = "ground";
+    let spots = spots_param(c, p, "spots")?;
+    let interval = num(c, p, "interval")?.unwrap_or(0.0);
+    if interval < 0.0 {
+        return Err(bad(c, format!("`interval` is how far apart the contour lines stand, in mm, and {interval} is no height")));
+    }
+    let name = string(c, p, "name")?.unwrap_or_else(|| s.model.language.word("Ground").into());
+    let g = crate::model::Ground { name, spots, interval, params: Default::default() };
+    let id = s.model_mut().insert(Element::Ground(g));
+    Ok(element_json(&s.model, id))
+}
+
 fn mass(s: &mut Session, p: &Value) -> R {
     let c = "mass";
     let m = &s.model;
@@ -8823,6 +8976,13 @@ pub(crate) fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeS
             n.leader = n.leader.map(f);
         }
         Element::Spot(sp) => sp.at = f(sp.at),
+        // The ground is moved in plan, and every point of it keeps the height it was measured at.
+        Element::Ground(g) => {
+            for s in &mut g.spots {
+                let p = f(P2(s[0], s[1]));
+                (s[0], s[1]) = (p.0, p.1);
+            }
+        }
         // A link is moved and turned as a whole; its file stays as it is.
         Element::Link(l) => (l.at, l.angle) = turned(f, l.at, l.angle),
         Element::Underlay(u) => (u.at, u.angle) = turned(f, u.at, u.angle),

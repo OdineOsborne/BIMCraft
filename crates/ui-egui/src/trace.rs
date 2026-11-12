@@ -91,6 +91,10 @@ pub(crate) struct TraceDialog {
     /// the ones it could be (none: the highest of them, which is what the command picks for itself).
     pub(crate) slab: Option<Value>,
     pub(crate) under: Option<f64>,
+    /// The Ground tab: how far apart the contour lines of the land stand, and the last reading of the survey the
+    /// drawing carries.
+    pub(crate) contours: f64,
+    pub(crate) ground: Option<Value>,
     /// Whether the stair is held to the one run the reading was taken from, where the plan joins runs that are no
     /// flight of it.
     pub(crate) alone: bool,
@@ -426,6 +430,106 @@ fn part_json(m: &Model, part: &Part) -> Value {
 /// The Openings tab: the sill and the head of every opening, read off an elevation that stands against its plan
 /// (`cad_openings`). Reading builds nothing and changes nothing: what it says is what the drawing draws. Apply then
 /// gives that to the openings the Walls tab built, which until then stand at the size a starter type is.
+/// The Ground tab: the land, read off the survey the drawing carries. A surveyor's plan marks each point the
+/// instrument read and writes its height beside it, so the land is the one thing in a drawing that was measured and
+/// not drawn — and the only one a plan alone gives in three dimensions.
+fn ground_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, ground: &mut Option<Value>) {
+    let said = t(
+        "A survey marks each point it measured and writes its height beside it. The ground is the surface between those points, and the heights are written above the sea, so it needs to know where the project's own zero stands.",
+    );
+    ui.label(RichText::new(said).color(pal().muted));
+    ui.add_space(6.0);
+    let Some(u) = underlay_of(m, d.underlay) else { return };
+    let plans: Vec<String> = u.parts.iter().filter(|part| part.kind == PartKind::Plan).map(|part| part.name.clone()).collect();
+    if plans.is_empty() {
+        ui.label(RichText::new(t("It needs a plan among its parts, and the Parts tab is where they are said.")).color(pal().muted));
+        return;
+    }
+    let held = d.plan.clone().filter(|name| plans.contains(name)).or_else(|| plans.first().cloned());
+    d.plan = held;
+    let Some(plan) = d.plan.clone() else { return };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let label = ui.label(t("The survey"));
+        if let Some(picked) = combo(ui, (d.underlay, "ground-plan"), label.id, &plan, &plans) {
+            d.plan = Some(picked);
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| changed |= measure(ui, "The storey's floor", &mut d.floor, 0.0..=10_000_000.0, " mm"));
+    ui.horizontal(|ui| changed |= measure(ui, "Contours every", &mut d.contours, 0.0..=100_000.0, " mm"));
+    if changed {
+        d.ground = None;
+    }
+    let (underlay, floor, contours) = (d.underlay, d.floor, d.contours);
+    let params = |apply: bool| {
+        let mut p = json!({"underlay": underlay, "part": plan.clone()});
+        if floor > 0.0 {
+            p["floor"] = json!(floor);
+        }
+        if contours > 0.0 {
+            p["interval"] = json!(contours);
+        }
+        if apply {
+            p["apply"] = json!(true);
+        }
+        p
+    };
+    ui.add_space(8.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(t("Read the Survey")).clicked() {
+            *ground = Some(params(false));
+        }
+        let read = d.ground.as_ref().and_then(|r| r["points"].as_u64()).unwrap_or(0) >= 3;
+        if ui.add_enabled(read && floor > 0.0, Button::new(t("Build the Ground"))).clicked() {
+            *ground = Some(params(true));
+        }
+    });
+    if let Some(report) = &d.ground {
+        ground_shown(ui, report);
+    }
+}
+
+/// What the last reading of the survey said: how many points took a height, how far the land falls, and what was
+/// left over at either end of the pairing, which is what says whether the reading is to be believed.
+fn ground_shown(ui: &mut Ui, report: &Value) {
+    let number = |key: &str| report[key].as_u64().unwrap_or(0);
+    let points = number("points");
+    if points < 3 {
+        let said = t("Fewer than three points of this survey have a height written beside them, so there is no surface to build.");
+        ui.label(RichText::new(said).color(pal().error));
+        return;
+    }
+    match (report["lowest"].as_f64(), report["highest"].as_f64(), report["fall"].as_f64()) {
+        (Some(low), Some(high), Some(fall)) => {
+            let said = tf(
+                "{} points measured, from {} m to {} m: the land falls {} m across them.",
+                &[&points.to_string(), &format!("{:.2}", low / 1000.0), &format!("{:.2}", high / 1000.0), &format!("{:.2}", fall / 1000.0)],
+            );
+            ui.label(RichText::new(said).strong());
+        }
+        _ => return,
+    }
+    // What was left at either end of the pairing: a marker with no height is a point this cannot place, and a
+    // height with no marker is a figure written for something else.
+    if number("without") > 0 || number("spare") > 0 {
+        let said = tf(
+            "{} markers have no height written near them, and {} heights belong to no marker.",
+            &[&number("without").to_string(), &number("spare").to_string()],
+        );
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if let (Some(near), Some(far)) = (report["nearest"].as_f64(), report["furthest"].as_f64()) {
+        let said = tf("Each height is written {} to {} mm from its marker.", &[&format!("{near:.0}"), &format!("{far:.0}")]);
+        ui.label(RichText::new(said).color(pal().muted));
+    }
+    if let (Some(area), Some(surface)) = (report["area_m2"].as_f64(), report["surface_m2"].as_f64()) {
+        let said = tf("It covers {} m², and the land itself, which slopes, is {} m².", &[&format!("{area:.0}"), &format!("{surface:.0}")]);
+        ui.label(RichText::new(said).strong());
+    }
+}
+
 fn heights_tab(
     ui: &mut Ui,
     d: &mut TraceDialog,
@@ -1185,6 +1289,14 @@ fn found_shown(ui: &mut Ui, report: &Value, alone: bool) {
 impl BimApp {
     /// Trace Walls (TW): the drawing under the plan on screen. A window with no plan open, or a plan with no drawing
     /// under it, says so, as Link CAD does.
+    /// Trace Walls on its Ground tab: where the land is read off the survey the drawing carries.
+    pub(crate) fn open_ground(&mut self) {
+        self.open_trace();
+        if let Some(d) = self.trace_dialog.as_mut() {
+            d.tab = 4;
+        }
+    }
+
     pub(crate) fn open_trace(&mut self) {
         let Some(level) = self.plan_level() else {
             self.status = crate::Status { text: t("Trace Walls: open a plan first").to_string(), error: true };
@@ -1227,6 +1339,9 @@ impl BimApp {
             gables: None,
             slab: None,
             under: None,
+            // Half a metre apart, as a surveyor's plan draws them.
+            contours: bimcraft_core::ground::CONTOUR,
+            ground: None,
             alone: false,
             stair: None,
             flight: None,
@@ -1260,7 +1375,7 @@ impl BimApp {
         let (mut close, mut layers, mut find, mut build) = (false, None::<Value>, false, false);
         let (mut parts, mut read) = (None::<Value>, None::<Value>);
         let (mut storey, mut roofing, mut slabbing) = (None::<Value>, None::<Value>, None::<Value>);
-        let mut stairing = None::<Value>;
+        let (mut stairing, mut grounding) = (None::<Value>, None::<Value>);
         let mut open = true;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
@@ -1277,7 +1392,13 @@ impl BimApp {
                 ui.set_min_height(360.0);
                 ui.label(RichText::new(tf("From the drawing {}, under this plan.", &[&name])).color(pal().muted));
                 ui.add_space(6.0);
-                let tabs = [t("Layers").to_string(), t("Parts").to_string(), category("wall", true), t("Heights").to_string()];
+                let tabs = [
+                    t("Layers").to_string(),
+                    t("Parts").to_string(),
+                    category("wall", true),
+                    t("Heights").to_string(),
+                    t("Ground").to_string(),
+                ];
                 ui.horizontal(|ui| {
                     for (i, label) in tabs.iter().enumerate() {
                         if ui.selectable_label(d.tab == i, label).clicked() {
@@ -1290,7 +1411,8 @@ impl BimApp {
                     0 => layers_tab(ui, &d, &model, &mut layers),
                     1 => parts_tab(ui, &d, &model, &mut parts),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build, &mut stairing),
-                    _ => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
+                    3 => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
+                    _ => ground_tab(ui, &mut d, &model, &mut grounding),
                 }
                 if !d.error.is_empty() {
                     ui.add_space(6.0);
@@ -1301,16 +1423,18 @@ impl BimApp {
             });
         let (reading, storeying) = (read.is_some(), storey.is_some());
         let (roofed, slabbed, staired) = (roofing.is_some(), slabbing.is_some(), stairing.is_some());
-        let asked = match (layers, parts, read, storey, roofing, slabbing, stairing, find || build) {
+        let grounded = grounding.is_some();
+        let asked = match (layers, parts, read, storey, roofing, slabbing, stairing, grounding, find || build) {
             (Some(p), ..) => Some(("cad_layers", p)),
             (_, Some(p), ..) => Some(("cad_parts", p)),
             (_, _, Some(p), ..) => Some(("cad_openings", p)),
             (_, _, _, Some(p), ..) => Some(("cad_storey", p)),
             (_, _, _, _, Some(p), ..) => Some(("cad_roof", p)),
             (_, _, _, _, _, Some(p), ..) => Some(("cad_floor", p)),
-            (_, _, _, _, _, _, Some(p), _) => Some(("cad_stair", p)),
-            (None, None, None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
-            (None, None, None, None, None, None, None, false) => None,
+            (_, _, _, _, _, _, Some(p), ..) => Some(("cad_stair", p)),
+            (_, _, _, _, _, _, _, Some(p), _) => Some(("cad_ground", p)),
+            (None, None, None, None, None, None, None, None, true) => Some(("trace_walls", d.params(find))),
+            (None, None, None, None, None, None, None, None, false) => None,
         };
         if let Some((id, params)) = asked {
             d.error.clear();
@@ -1331,6 +1455,9 @@ impl BimApp {
                 Some(reply) if slabbed => d.slab = Some(reply),
                 // And what the plan says of the stair in it, which is the going of its steps and how wide.
                 Some(reply) if staired => d.stair = Some(reply),
+                // And what the survey says of the land, which is the one thing in the drawing that was measured
+                // rather than drawn.
+                Some(reply) if grounded => d.ground = Some(reply),
                 Some(reply) => {
                     if build {
                         let walls = reply["walls"].as_u64().unwrap_or(0).to_string();

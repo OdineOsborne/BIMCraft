@@ -271,6 +271,7 @@ pub fn category(category: &str, several: bool) -> String {
             (["Shaft Opening", "Abertura de shaft", "Abertura de ducto"], ["Shaft Openings", "Aberturas de shaft", "Aberturas de ducto"])
         }
         "mass" => (["Mass", "Massa", "Masa"], ["Masses", "Massas", "Masas"]),
+        "ground" => (["Toposurface", "Terreno", "Terreno"], ["Toposurfaces", "Terrenos", "Terrenos"]),
         "massfloor" => (["Mass Floor", "Piso de massa", "Piso de masa"], ["Mass Floors", "Pisos de massa", "Pisos de masa"]),
         "ramp" => (["Ramp", "Rampa", "Rampa"], ["Ramps", "Rampas", "Rampas"]),
         "railing" => (["Railing", "Guarda-corpo", "Barandal"], ["Railings", "Guarda-corpos", "Barandales"]),
@@ -2677,6 +2678,47 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Home", "Início", "Inicio"],
     ["Legends are coming in a later version.", "As legendas virão em uma versão futura.", "Las leyendas llegarán en una versión futura."],
+    ["Ground", "Terreno", "Terreno"],
+    ["The survey", "O levantamento", "El levantamiento"],
+    ["Contours every", "Curvas de nível a cada", "Curvas de nivel cada"],
+    ["Read the Survey", "Ler o levantamento", "Leer el levantamiento"],
+    ["Build the Ground", "Construir o terreno", "Construir el terreno"],
+    [
+        "A survey marks each point it measured and writes its height beside it. The ground is the surface between those points, and the heights are written above the sea, so it needs to know where the project's own zero stands.",
+        "Um levantamento marca cada ponto que mediu e escreve a cota ao lado. O terreno é a superfície entre esses pontos, e as cotas são escritas acima do nível do mar, por isso é preciso dizer onde está o zero do projeto.",
+        "Un levantamiento marca cada punto que midió y escribe la cota al lado. El terreno es la superficie entre esos puntos, y las cotas están sobre el nivel del mar, así que hay que decir dónde está el cero del proyecto.",
+    ],
+    [
+        "It needs a plan among its parts, and the Parts tab is where they are said.",
+        "Precisa de uma planta entre suas partes, e a aba Partes é onde elas se dizem.",
+        "Necesita una planta entre sus partes, y la pestaña Partes es donde se dicen.",
+    ],
+    [
+        "Fewer than three points of this survey have a height written beside them, so there is no surface to build.",
+        "Menos de três pontos deste levantamento têm cota escrita ao lado, então não há superfície a construir.",
+        "Menos de tres puntos de este levantamiento tienen cota escrita al lado, así que no hay superficie que construir.",
+    ],
+    [
+        "{} points measured, from {} m to {} m: the land falls {} m across them.",
+        "{} pontos medidos, de {} m a {} m: o terreno desce {} m entre eles.",
+        "{} puntos medidos, de {} m a {} m: el terreno baja {} m entre ellos.",
+    ],
+    [
+        "{} markers have no height written near them, and {} heights belong to no marker.",
+        "{} marcas não têm cota escrita perto, e {} cotas não pertencem a marca alguma.",
+        "{} marcas no tienen cota escrita cerca, y {} cotas no pertenecen a ninguna marca.",
+    ],
+    [
+        "Each height is written {} to {} mm from its marker.",
+        "Cada cota está escrita de {} a {} mm da sua marca.",
+        "Cada cota está escrita de {} a {} mm de su marca.",
+    ],
+    [
+        "It covers {} m², and the land itself, which slopes, is {} m².",
+        "Cobre {} m², e o terreno em si, que é inclinado, tem {} m².",
+        "Cubre {} m², y el terreno mismo, que está en pendiente, tiene {} m².",
+    ],
+    ["Toposurface", "Terreno", "Terreno"],
     ["Trace Walls", "Traçar paredes", "Trazar muros"],
     [
         "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in",

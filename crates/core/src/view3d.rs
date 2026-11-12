@@ -49,6 +49,8 @@ const GLASS: Rgb = Rgb(166, 200, 228);
 const ROOF: Rgb = Rgb(176, 118, 96);
 const CEILING: Rgb = Rgb(244, 242, 236);
 const MASS: Rgb = Rgb(158, 190, 224);
+/// The ground: the colour of earth, so the land reads as the land and not as another slab of the building.
+const EARTH: Rgb = Rgb(150, 134, 104);
 const RAIL: Rgb = Rgb(120, 122, 128);
 /// A beam, a footing, a structural column made of nothing the library has.
 const STRUCTURE: Rgb = Rgb(182, 184, 190);
@@ -512,6 +514,12 @@ fn solids_in(m: &Model, elements: &[(Id, &Element)], index: Option<&walls::Index
                         out.push(Solid::Prism { owner: id, color, tex, ring, bottom, top, curve: None });
                     }
                 }
+            }
+            // The ground: the surface between the points a survey measured, which is no solid — it is the face of the
+            // land, and a section cuts it as a line and not as a filled thickness.
+            Element::Ground(g) => {
+                let tris = crate::ground::mesh(&g.spots);
+                out.push(Solid::Mesh { owner: id, color: EARTH, tex: 0, caps: tris.len(), round: false, cut: true, tris });
             }
             // Lofted, a skin of triangles from the footprint to the top outline.
             Element::Mass(ms) if ms.lofted() => {

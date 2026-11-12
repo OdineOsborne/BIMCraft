@@ -46,6 +46,37 @@ ramp (`stairs::coil`), going as far round as its slope makes its run; a railing 
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
 
+## The ground, which is measured and not drawn
+
+The land a project stands on is the one thing a survey **measures** rather than draws, and the one thing a plan alone
+gives in three dimensions: a marker where the instrument read, and the height beside it. So a ground
+(`model::Ground`, Revit's toposurface) holds nothing but those points, `[x, y, z]` in millimetres like everything
+else, and the surface is worked out from them (`ground.rs`).
+
+Which surface is not a free choice. The points are scattered, and the one triangulation of a scattered set that does
+not depend on the order they were measured in is the **Delaunay** one, where no point of the set lies inside the
+circle through any triangle's three corners — it joins each point to its neighbours and to none across them, which is
+what a surveyor's own drawing shows. `ground::mesh` builds it one point at a time (Bowyer–Watson) inside a triangle
+big enough to hold them all, which goes at the end; a triangle with no area holds everything, so the sliver three
+points in a line would make is taken out and the hole it leaves triangulated again. Points nearer than a millimetre
+in plan are one point, because two measurements of one point cannot both be corners of a triangulation.
+
+The ground stands on **no level**: the land is under all of them, and its points carry their own heights above the
+project's zero. `Model::check` refuses a ground of fewer than three points, or of points that lie in one line (tested
+along the longest line they stretch out on, which is one pass over them and not a triangulation), and one of more than
+`MOST_SPOTS` (2000), past which a survey is a point cloud, which a project reads as one (`cloud.rs`).
+
+A plan draws it as **contour lines**, at every height a whole number of `interval` mm (half a metre where nothing
+says), dashed over the plan's cut plane as everything else that stands over it is. Nothing is drawn at the very
+height of the lowest or the highest point, because that line is the edge of what was surveyed and not a line of the
+land, and a ground with no fall at all has no contour. The 3D view draws the triangles themselves, in the colour of
+earth; a ground is a **surface and no solid**, so a section cuts it as a line and not as a filled thickness, and a
+spot elevation hosted on it reads the height of the land under it, as one on a floor reads the floor.
+IFC writes it as an `IfcGeographicElement` of type `.TERRAIN.`, its body the triangles as an
+`IfcTriangulatedFaceSet`, standing in the site and in no storey, and reads one back as its points — which is all a
+ground holds, the surface between them being worked out from them again. Another kind of geographic element, a tree
+or a bore hole, is no ground and is left out with its reason.
+
 ## What a wall measures
 
 A wall reports two areas of one of its faces (`element_json`, the `Area` and `Net Area` fields of its schedule): `area_m2`,

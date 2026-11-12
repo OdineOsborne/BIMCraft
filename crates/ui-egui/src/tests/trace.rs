@@ -765,3 +765,64 @@ fn a_refusal_is_said_inside_the_window_beside_the_button_that_was_pressed() {
     assert!(h.state().status.text.is_empty(), "not in the far corner of the view");
     assert!(ids(&h, "wall").is_empty());
 }
+
+/// A survey of the land as a surveyor draws one: a marker at each point it read, with the height written beside it
+/// in metres. The land falls a metre from west to east over the ten the plot is across.
+fn a_surveyed_plot() -> Harness<'static, BimApp> {
+    let mut marks = String::new();
+    for (x, y, says) in
+        [(0.0, 0.0, "70.00"), (10_000.0, 0.0, "69.00"), (10_000.0, 10_000.0, "69.00"), (0.0, 10_000.0, "70.00"), (5000.0, 5000.0, "69.50")]
+    {
+        marks.push_str(&format!("0\nPOINT\n8\nPT_CENTRO\n10\n{x}\n20\n{y}\n30\n0.0\n"));
+        marks.push_str(&format!("0\nTEXT\n8\nPT_QUOTA\n10\n{}\n20\n{y}\n40\n200\n1\n{says}\n", x + 300.0));
+    }
+    let mut h = app("");
+    let drawn = drawing_with(&[], &marks);
+    h.state_mut().session.execute("underlay", &json!({"path": drawn})).expect("it comes in");
+    let parts = json!([{"name": "RILIEVO", "kind": "plan", "region": [[-2000, -2000], [12_000, 12_000]]}]);
+    h.state_mut().session.execute("cad_parts", &json!({"parts": parts})).expect("it takes them");
+    h.run();
+    h
+}
+
+/// Every ground in the project: how many points it is made of and how far its land falls, in millimetres.
+fn grounds_of(h: &Harness<'static, BimApp>) -> Vec<(usize, f64)> {
+    h.state()
+        .session
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Ground(g) => {
+                let (lo, hi) = bimcraft_core::ground::span(&g.spots)?;
+                Some((g.spots.len(), hi - lo))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_ground_tab_builds_the_land_the_survey_measured() {
+    let mut h = a_surveyed_plot();
+    shortcut(&mut h, "TW");
+    press(&mut h, "Ground");
+    press(&mut h, "Read the Survey");
+    // What it read: five markers, each with its height, and how far the land falls between the lowest and the
+    // highest of them.
+    assert!(says(&h, "5 points measured, from 69.00 m to 70.00 m: the land falls 1.00 m across them."), "what it read");
+    assert!(says(&h, "Each height is written 300 to 300 mm from its marker."), "and how the heights were paired");
+    assert!(grounds_of(&h).is_empty(), "a reading builds nothing");
+    // Building it needs the project's own zero said, because a survey writes its heights above the sea.
+    if let Some(d) = h.state_mut().trace_dialog.as_mut() {
+        d.floor = 69_850.0;
+    }
+    h.run();
+    press(&mut h, "Read the Survey");
+    press(&mut h, "Build the Ground");
+    assert_eq!(grounds_of(&h), vec![(5, 1000.0)], "the five points it measured, a metre of fall between them");
+    assert!(says(&h, "It covers 100 m², and the land itself, which slopes, is 100 m²."), "how big it is");
+    // Built again from the same reading it is the same ground read again, and not a second piece of land.
+    press(&mut h, "Build the Ground");
+    assert_eq!(grounds_of(&h).len(), 1);
+}

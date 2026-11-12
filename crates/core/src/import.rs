@@ -1811,6 +1811,44 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(id);
     }
 
+    // The ground: an IfcGeographicElement of terrain, whose body is the triangles between the points a survey
+    // measured. What comes back is those points, which is all a ground holds: the surface between them is worked out
+    // from them again, as it was made from them in the first place. Another kind of geographic element — a tree, a
+    // bore hole — is no ground, and is left out with everything else BIMCraft has no element for.
+    for id in named(&["IFCGEOGRAPHICELEMENT"]) {
+        let Some(x) = e(id).filter(|x| enumeration(x.args.get(8)) == Some("TERRAIN")) else { continue };
+        let mut spots: Vec<[f64; 3]> = Vec::new();
+        let mut crowded = false;
+        for p in r.body(x).iter().flatten() {
+            let q = micron(r.flat(*p));
+            // A corner is shared by the triangles that meet at it, and one point measured once is one point.
+            if spots.iter().any(|s| (s[0] - q.0).abs() < 1.0 && (s[1] - q.1).abs() < 1.0) {
+                continue;
+            }
+            if spots.len() >= crate::ground::MOST_SPOTS {
+                crowded = true;
+                break;
+            }
+            spots.push([q.0, q.1, (p[2] * 1000.0).round() / 1000.0]);
+        }
+        if crowded {
+            let why = "it is made of more points than a ground holds";
+            leave(&mut skipped, &mut seen, id, why);
+            continue;
+        }
+        if !crate::ground::stands(&spots) {
+            leave(&mut skipped, &mut seen, id, "its body is no surface: a ground is three points at least, and no three in one line");
+            continue;
+        }
+        let name = text(x.args.get(2)).map(clip).unwrap_or_default();
+        let ground = crate::model::Ground { name, spots, interval: 0.0, params: Default::default() };
+        let gid = m.insert(Element::Ground(ground));
+        from.insert(gid, who(id));
+        origin.entry(id).or_insert(gid);
+        elements_from.entry(id).or_default().push(gid);
+        seen.insert(id);
+    }
+
     // Columns: a section across them, and how high they stand; one that carries load is a structural column, and a
     // footing that isn't a strip is an isolated one, a column laid down.
     let strip = |id: u64| e(id).is_some_and(|x| matches!(enumeration(x.args.get(8)), Some("STRIP_FOOTING" | "FOOTING_BEAM")));

@@ -37,6 +37,9 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                         false,
                     ));
                 }
+                // A point a survey measured is a place and no line: it is drawn ([`marks`]), and the ground is read
+                // off the points with what the drawing writes beside them ([`survey`]).
+                crate::dxf::Shape::Point { .. } => {}
                 // A word is what the drawing says and no line of the building: it is drawn ([`words`]) and never
                 // traced over or snapped to, or a survey's lettering would come in as walls.
                 crate::dxf::Shape::Words { .. } => {}
@@ -118,6 +121,24 @@ pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
     out
 }
 
+/// The points a survey measured, each with the layer it is drawn on and where it stands in the project: a plan draws
+/// a small cross at each of them. What height each stands at is not in the point; the drawing writes it beside it,
+/// which is what [`survey`] reads.
+pub fn marks(m: &Model, u: &Underlay) -> Vec<(String, P2)> {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Vec::new() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let mut out: Vec<(String, P2)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            if let crate::dxf::Shape::Point { at } = shape {
+                out.push((layer.name.clone(), place(*at)));
+            }
+        }
+    }
+    out
+}
+
 /// What the drawing writes inside `region` that is the name of what is drawn there: of the words written in it, the
 /// one written largest, and the lowest where two are written as large. A survey captions each sheet under it, in
 /// lettering taller than the names of the rooms inside the plan, so that caption is what the part is called; a part
@@ -186,6 +207,88 @@ fn height_said(text: &str) -> Option<f64> {
         return None;
     }
     said.parse().ok()
+}
+
+/// One point a survey measured: where it stands in the project, the height the drawing writes beside it in
+/// millimetres as the drawing writes them, and how far from the point that height is written.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured {
+    pub at: P2,
+    pub height: f64,
+    pub away: f64,
+}
+
+/// What a survey measured inside a region: the points it wrote a height beside, and what was left over at each end
+/// of the pairing — points with no height written near them, and heights written near no point.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Survey {
+    pub spots: Vec<Measured>,
+    pub without: usize,
+    pub spare: usize,
+}
+
+/// How far from a point a height may be written and still be that point's, counted in the height of the lettering it
+/// is written in: a surveyor writes the quota beside the mark, a line or two of text away, and one written further
+/// off than this belongs to another mark. Counting it in the lettering is what makes it the same rule whatever the
+/// drawing is drawn at.
+pub const QUOTA_REACH: f64 = 8.0;
+
+/// The layer AutoCAD never plots, and so neither does this: it holds the points a dimension is defined by, which are
+/// no part of the drawing and are not points a survey measured.
+const UNPLOTTED: &str = "DEFPOINTS";
+
+/// What a survey measured inside `region`: each point it marks, with the height written nearest it.
+///
+/// A plan of the land is drawn the surveyor's way: a marker where the instrument read, and the height written beside
+/// it in metres. Neither says anything about the other, so the two are paired by nothing but how close they stand —
+/// closest pair first, each point taking one height and each height going to one point, and none of them reaching
+/// further than [`QUOTA_REACH`] times the lettering it is written in. What is left at either end is counted and said,
+/// because a point with no height is a point this reading cannot place, and a height with no point is a figure that
+/// was written for something else.
+pub fn survey(m: &Model, u: &Underlay, region: [P2; 2]) -> Survey {
+    let Some(drawing) = m.drawings.get(&u.path) else { return Survey::default() };
+    let (sin, cos) = u.angle.to_radians().sin_cos();
+    let place = |p: P2| P2(u.at.0 + p.0 * cos - p.1 * sin, u.at.1 + p.0 * sin + p.1 * cos);
+    let [sw, ne] = region;
+    let within = |p: P2| p.0 >= sw.0 && p.0 <= ne.0 && p.1 >= sw.1 && p.1 <= ne.1;
+    let mut points: Vec<P2> = Vec::new();
+    // Each height written in the region: where it is written, what it says in millimetres, and how far it may
+    // reach, which is the lettering it is written in.
+    let mut written: Vec<(P2, f64, f64)> = Vec::new();
+    for layer in drawing.layers.iter().filter(|l| l.name != UNPLOTTED && !u.hidden.iter().any(|h| h == &l.name)) {
+        for shape in &layer.shapes {
+            match shape {
+                crate::dxf::Shape::Point { at } if within(place(*at)) => points.push(place(*at)),
+                crate::dxf::Shape::Words { at, text, height, .. } if *height > 0.0 && within(place(*at)) => {
+                    if let Some(says) = height_said(text) {
+                        written.push((place(*at), says * 1000.0, height * QUOTA_REACH));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Every pair that could be, closest first: a point and a height are each other's once neither is taken.
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (i, p) in points.iter().enumerate() {
+        for (k, (at, _, reach)) in written.iter().enumerate() {
+            let away = p.dist(*at);
+            if away <= *reach {
+                pairs.push((away, i, k));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut spots: Vec<Option<Measured>> = vec![None; points.len()];
+    let mut taken = vec![false; written.len()];
+    for (away, i, k) in pairs {
+        if spots.get(i).is_some_and(Option::is_none) && !taken[k] {
+            spots[i] = Some(Measured { at: points[i], height: written[k].1, away });
+            taken[k] = true;
+        }
+    }
+    let without = spots.iter().filter(|s| s.is_none()).count();
+    Survey { spots: spots.into_iter().flatten().collect(), without, spare: taken.iter().filter(|t| !**t).count() }
 }
 
 /// The heights the drawing writes inside `region`, held against one another. An elevation marks the heights it is

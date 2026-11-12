@@ -67,6 +67,9 @@ pub enum Shape {
     Path { points: Vec<P2>, closed: bool },
     /// A centre, a radius, and the angles it runs between, degrees counter-clockwise from east. A circle runs 0 to 360.
     Arc { at: P2, radius: f64, from: f64, to: f64 },
+    /// One point a survey measured, where it measured it. A marker and no line of the building: a plan draws it as a
+    /// small cross, and the height it stands at is not in it — a surveyor's plan writes that beside it, as `Words`.
+    Point { at: P2 },
     /// What a survey writes on its drawing, where it writes it: the left of the line it stands on, how tall its
     /// capitals are, and how far it is turned, degrees counter-clockwise from east. It is what the drawing says and
     /// no line of the building, so a plan draws it and the walls are not read from it.
@@ -682,6 +685,7 @@ fn from_base(shape: Shape, base: P2) -> Shape {
         Shape::Line([a, b]) => Shape::Line([off(a), off(b)]),
         Shape::Path { points, closed } => Shape::Path { points: points.into_iter().map(off).collect(), closed },
         Shape::Arc { at, radius, from, to } => Shape::Arc { at: off(at), radius, from, to },
+        Shape::Point { at } => Shape::Point { at: off(at) },
         Shape::Words { at, text, height, angle } => Shape::Words { at: off(at), text, height, angle },
         Shape::Measure { from, to, line, text, height } => {
             Shape::Measure { from: off(from), to: off(to), line: [off(line[0]), off(line[1])], text, height }
@@ -797,6 +801,10 @@ fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
         Shape::Path { points, closed } => {
             let points: Vec<P2> = points.iter().map(|p| placed.point(*p)).collect();
             points.iter().all(sane).then_some(Shape::Path { points, closed: *closed }).ok_or(far)
+        }
+        Shape::Point { at } => {
+            let at = placed.point(*at);
+            sane(&at).then_some(Shape::Point { at }).ok_or(far)
         }
         Shape::Arc { at, radius, from, to } => {
             // Scaled evenly a circle is a circle, and scaled unevenly it is an ellipse, which this does not draw.
@@ -1193,6 +1201,10 @@ fn finish(kind: &str, e: &mut Entity, scale: f64) -> Option<Shape> {
             }
             Some(Shape::Words { at, text, height, angle })
         }
+        "POINT" => {
+            let at = mm(*e.points.first()?);
+            sane(&at).then_some(Shape::Point { at })
+        }
         "ARC" | "CIRCLE" => {
             let at = mm(*e.points.first()?);
             let radius = e.radius? * scale;
@@ -1254,6 +1266,7 @@ fn extent(layers: &[Layer]) -> Option<[P2; 2]> {
     for shape in layers.iter().flat_map(|l| &l.shapes) {
         match shape {
             Shape::Line(line) => line.iter().for_each(|p| grow(*p)),
+            Shape::Point { at } => grow(*at),
             Shape::Path { points, .. } => points.iter().for_each(|p| grow(*p)),
             Shape::Arc { at, radius, .. } => {
                 grow(P2(at.0 - radius, at.1 - radius));

@@ -1506,6 +1506,12 @@ impl BimApp {
                 Some("column") => Tool::Column,
                 Some("footing") => Tool::Stand("footing"),
                 Some("mass") => Tool::Mass(Vec::new()),
+                // A ground is not clicked out: its points were measured, not drawn, so Toposurface opens Trace
+                // Walls on the Ground tab, where the survey a drawing carries is read and the land built from it.
+                Some("ground") => {
+                    self.open_ground();
+                    return true;
+                }
                 Some("show_mass") => {
                     self.show_mass();
                     return true;

@@ -58,6 +58,7 @@ const COST_SCHEDULE: u64 = 50;
 const COST_ITEM: u64 = 51;
 const COST_PRICES: u64 = 52;
 const COST_LISTED: u64 = 53;
+const SITE_HOLDS: u64 = 54;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
@@ -589,6 +590,8 @@ pub fn export(m: &Model) -> String {
     }
 
     let mut contained: BTreeMap<Guid, Vec<u64>> = BTreeMap::new();
+    // What stands in the site itself and in no storey: the ground.
+    let mut on_site: Vec<u64> = Vec::new();
     let mut spaces: BTreeMap<Guid, Vec<u64>> = BTreeMap::new();
     // Each element's own entity, for what it holds of the project's parameters.
     let mut products: BTreeMap<Id, u64> = BTreeMap::new();
@@ -708,6 +711,20 @@ pub fn export(m: &Model) -> String {
                     s(&r.name)
                 ));
                 spaces.entry(r.level).or_default().push(ent);
+                products.insert(id, ent);
+            }
+            // The ground: an IfcGeographicElement of type TERRAIN, the surface of its triangles, standing in the site
+            // and not in a storey, because the land is under all of them.
+            Element::Ground(g) => {
+                let set = w.faceset(&crate::ground::mesh(&g.spots));
+                let shape = w.tessellated(&[set]);
+                let at = w.place(Some(site_at), (0.0, 0.0, 0.0), None);
+                let ent = w.add(format!(
+                    "IFCGEOGRAPHICELEMENT({},$,{},$,'Ground',#{at},#{shape},'{id}',.TERRAIN.)",
+                    w.guid(ELEMENT, id),
+                    s(&g.name)
+                ));
+                on_site.push(ent);
                 products.insert(id, ent);
             }
             // A mass: a proxy of object type `Mass`, as Revit writes them, its footprint swept up from its base to its top; lofted,
@@ -1140,6 +1157,9 @@ pub fn export(m: &Model) -> String {
         let key = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
         let system = w.add(format!("IFCSYSTEM({},$,{},$,$)", w.guid(SYSTEMS, key), s(name)));
         w.add(format!("IFCRELASSIGNSTOGROUP({},$,$,$,({}),$,#{system})", w.guid(SYSTEM_MEMBERS, key), refs(members)));
+    }
+    if !on_site.is_empty() {
+        w.add(format!("IFCRELCONTAINEDINSPATIALSTRUCTURE({},$,$,$,({}),#{site})", w.guid(SITE_HOLDS, 0), refs(&on_site)));
     }
     for (level, (storey, _)) in &storeys {
         if let Some(items) = contained.get(level) {

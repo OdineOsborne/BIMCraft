@@ -25,6 +25,7 @@ pub(super) fn category(category: &str, several: bool) -> Option<&'static str> {
         "roof" => ("Tetto", "Tetti"),
         "ceiling" => ("Controsoffitto", "Controsoffitti"),
         "mass" => ("Massa", "Masse"),
+        "ground" => ("Terreno", "Terreni"),
         "massfloor" => ("Piano di massa", "Piani di massa"),
         "ramp" => ("Rampa", "Rampe"),
         "railing" => ("Ringhiera", "Ringhiere"),
@@ -1911,6 +1912,34 @@ pub(super) const WORDS: &[[&str; 2]] = &[
     ["Building information modelling, open and free.", "Building information modelling, aperto e gratuito."],
     ["Home", "Home"],
     ["Legends are coming in a later version.", "Le legende arriveranno in una versione successiva."],
+    ["Ground", "Terreno"],
+    ["The survey", "Il rilievo"],
+    ["Contours every", "Curve di livello ogni"],
+    ["Read the Survey", "Leggi il rilievo"],
+    ["Build the Ground", "Costruisci il terreno"],
+    [
+        "A survey marks each point it measured and writes its height beside it. The ground is the surface between those points, and the heights are written above the sea, so it needs to know where the project's own zero stands.",
+        "Un rilievo segna ogni punto che ha misurato e scrive accanto la sua quota. Il terreno è la superficie fra quei punti, e le quote sono sul livello del mare: bisogna dire dove sta lo zero del progetto.",
+    ],
+    [
+        "It needs a plan among its parts, and the Parts tab is where they are said.",
+        "Serve una pianta fra le sue parti, e la scheda Parti è dove si dichiarano.",
+    ],
+    [
+        "Fewer than three points of this survey have a height written beside them, so there is no surface to build.",
+        "Meno di tre punti di questo rilievo hanno una quota scritta accanto: non c'è nessuna superficie da costruire.",
+    ],
+    [
+        "{} points measured, from {} m to {} m: the land falls {} m across them.",
+        "{} punti misurati, da {} m a {} m: il terreno scende di {} m fra loro.",
+    ],
+    [
+        "{} markers have no height written near them, and {} heights belong to no marker.",
+        "{} segni non hanno nessuna quota scritta vicino, e {} quote non appartengono a nessun segno.",
+    ],
+    ["Each height is written {} to {} mm from its marker.", "Ogni quota è scritta da {} a {} mm dal suo segno."],
+    ["It covers {} m², and the land itself, which slopes, is {} m².", "Copre {} m², e il terreno stesso, che è in pendenza, ne fa {}."],
+    ["Toposurface", "Terreno"],
     ["Trace Walls", "Ricava i muri"],
     [
         "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in",

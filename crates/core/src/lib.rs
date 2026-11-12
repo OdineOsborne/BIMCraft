@@ -20,6 +20,9 @@ mod fixtures;
 mod font;
 pub mod geom;
 pub mod graphics;
+pub mod ground;
+#[cfg(test)]
+mod ground_tests;
 pub mod ids;
 pub mod ifc;
 pub mod import;

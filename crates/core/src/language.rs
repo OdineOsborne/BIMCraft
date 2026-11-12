@@ -95,6 +95,7 @@ const WORDS: &[[&str; 4]] = &[
     ["Unnamed", "Sem nome", "Sin nombre", "Senza nome"],
     ["Room", "Ambiente", "Habitación", "Locale"],
     ["Mass", "Massa", "Masa", "Massa"],
+    ["Ground", "Terreno", "Terreno", "Terreno"],
     ["Room Schedule", "Tabela de ambientes", "Tabla de habitaciones", "Abaco dei locali"],
     ["Door Schedule", "Tabela de portas", "Tabla de puertas", "Abaco delle porte"],
     ["Window Schedule", "Tabela de janelas", "Tabla de ventanas", "Abaco delle finestre"],

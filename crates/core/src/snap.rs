@@ -309,6 +309,13 @@ fn underlay(s: &mut Scene, m: &Model, u: &crate::model::Underlay, near: &dyn Fn(
                 return;
             }
             match shape {
+                // A point a survey measured is a place of its own to snap to, as the centre of a circle is.
+                crate::dxf::Shape::Point { at } => {
+                    if reaches(&[*at, *at]) {
+                        s.points.push((place(*at), Kind::Endpoint));
+                        taken += 1;
+                    }
+                }
                 crate::dxf::Shape::Arc { at, radius, .. } => {
                     if reaches(&[*at - P2(*radius, *radius), *at + P2(*radius, *radius)]) {
                         s.points.push((place(*at), Kind::Centre));

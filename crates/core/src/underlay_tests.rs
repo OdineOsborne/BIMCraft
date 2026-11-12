@@ -1683,3 +1683,98 @@ fn it_refuses_a_layer_the_drawing_hasnt_a_phase_the_project_hasnt_and_a_field_it
     );
     assert!(under(&s).hidden.is_empty());
 }
+
+/// A survey of the land: a marker at each point it read and the height written beside it in metres, the way a
+/// surveyor's plan is drawn — with one marker nothing is written beside, one height written beside no marker, and a
+/// marker on `DEFPOINTS`, which is AutoCAD's own layer and no survey.
+fn a_surveyed_slope() -> Session {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-survey-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rilievo.dxf");
+    let mut text = String::from("0\nSECTION\n2\nENTITIES\n");
+    let point = |text: &mut String, layer: &str, x: f64, y: f64| {
+        text.push_str(&format!("0\nPOINT\n8\n{layer}\n10\n{x}\n20\n{y}\n30\n0.0\n"));
+    };
+    // The four corners of a square 10 m across, the land falling 600 mm from west to east, each height written
+    // 300 mm from its marker in lettering 200 mm tall.
+    let corners = [(0.0, 0.0, "70.00"), (10_000.0, 0.0, "69.40"), (10_000.0, 10_000.0, "69.40"), (0.0, 10_000.0, "70.00")];
+    let mut words: Vec<(String, f64, f64, f64, String)> = Vec::new();
+    for (x, y, says) in corners {
+        point(&mut text, "PT_CENTRO", x, y);
+        words.push(("PT_QUOTA".into(), x + 300.0, y, 200.0, says.into()));
+        // The number the surveyor gives the point, which is no height: it has no decimals.
+        words.push(("PT_NOME".into(), x - 300.0, y, 200.0, format!("{}", (x + y) as i64)));
+    }
+    // A marker in the middle with nothing written near it, and a height written near nothing.
+    point(&mut text, "PT_CENTRO", 5000.0, 5000.0);
+    words.push(("PT_QUOTA".into(), 2000.0, 8000.0, 200.0, "69.80".into()));
+    // And a marker on the layer AutoCAD never plots, with a height right beside it: neither is read.
+    point(&mut text, "DEFPOINTS", 8000.0, 2000.0);
+    words.push(("PT_QUOTA".into(), 8100.0, 2000.0, 200.0, "66.00".into()));
+    for (layer, x, y, height, said) in &words {
+        text.push_str(&format!("0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n40\n{height}\n1\n{said}\n"));
+    }
+    text.push_str("0\nENDSEC\n0\nEOF\n");
+    std::fs::write(&path, text).unwrap();
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": path.to_string_lossy()})).expect("it comes in");
+    let parts = json!([{"name": "RILIEVO", "kind": "plan", "region": [[-2000, -2000], [12_000, 12_000]]}]);
+    run(&mut s, "cad_parts", json!({"parts": parts})).expect("it takes them");
+    s
+}
+
+#[test]
+fn the_ground_is_read_off_the_markers_of_a_survey_and_the_heights_written_beside_them() {
+    let mut s = a_surveyed_slope();
+    let read = run(&mut s, "cad_ground", json!({"part": "RILIEVO"})).expect("it reads");
+    // Four markers took the height written beside them; the one in the middle had none written near it and is
+    // left out, and the height written out on its own belonged to no marker. The one on DEFPOINTS is not there
+    // at all, so the height beside it is spare too.
+    assert_eq!((read["points"].as_u64(), read["without"].as_u64(), read["spare"].as_u64()), (Some(4), Some(1), Some(2)), "{read}");
+    // Every pair stood the same 300 mm apart, which is what the drawing was drawn with.
+    assert_eq!((read["nearest"].as_f64(), read["furthest"].as_f64()), (Some(300.0), Some(300.0)), "{read}");
+    // The heights as the drawing writes them, in millimetres: 60 cm of fall over the ten metres.
+    assert_eq!(
+        (read["lowest"].as_f64(), read["highest"].as_f64(), read["fall"].as_f64()),
+        (Some(69_400.0), Some(70_000.0), Some(600.0)),
+        "{read}"
+    );
+    assert!(s.model.elements.values().all(|e| !matches!(e, Element::Ground(_))), "it read and built nothing");
+
+    // Building it needs to know where the project's own zero stands in the drawing's heights: without that, the
+    // reading is a set of heights above the sea and no ground.
+    let e = s.execute("cad_ground", &json!({"part": "RILIEVO", "apply": true})).unwrap_err();
+    assert!(e.contains("needs `floor`"), "{e}");
+    let told = json!({"part": "RILIEVO", "floor": 69_850, "interval": 200, "apply": true});
+    let built = run(&mut s, "cad_ground", told.clone()).expect("it builds");
+    let id = built["id"].as_u64().expect("the ground it built");
+    assert_eq!(built["triangles"].as_u64(), Some(2), "{built}");
+    assert_eq!(built["area_m2"].as_f64(), Some(100.0), "{built}");
+    let Some(Element::Ground(g)) = s.model.elements.get(id) else { panic!("the ground") };
+    // The floor the drawing writes at 69.85 is the project's zero, so the land stands below it: 150 mm down at the
+    // west side and 450 at the east.
+    assert_eq!(g.spots.len(), 4);
+    assert_eq!(g.spots[0], [0.0, 0.0, 150.0]);
+    assert_eq!(g.spots[1], [10_000.0, 0.0, -450.0]);
+    assert_eq!(g.interval, 200.0);
+    // Read again, it is the same ground read again and not another piece of land.
+    let again = run(&mut s, "cad_ground", told).expect("it reads again");
+    assert_eq!(again["id"].as_u64(), Some(id));
+    assert_eq!(s.model.elements.values().filter(|e| matches!(e, Element::Ground(_))).count(), 1);
+}
+
+#[test]
+fn a_height_written_too_far_from_a_marker_is_no_height_of_that_marker() {
+    let mut s = a_surveyed_slope();
+    // The reach is eight times the lettering the height is written in, so the marker in the middle, whose nearest
+    // height is written 3.6 m away in 200 mm lettering, takes none of it. Hidden layers are left out with their
+    // shapes, so hiding the heights leaves every marker without one and the reading with nothing to build.
+    run(&mut s, "cad_layers", json!({"layers": [{"layer": "PT_QUOTA", "drawn": false}]})).expect("it hides them");
+    let read = run(&mut s, "cad_ground", json!({"part": "RILIEVO"})).expect("it reads");
+    assert_eq!((read["points"].as_u64(), read["without"].as_u64()), (Some(0), Some(5)), "{read}");
+    assert_eq!(read["lowest"], Value::Null, "nothing was read, so it says nothing of the heights");
+    let e = s.execute("cad_ground", &json!({"part": "RILIEVO", "floor": 69_850, "apply": true})).unwrap_err();
+    assert!(e.contains("three"), "{e}");
+}
