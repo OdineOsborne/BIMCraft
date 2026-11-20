@@ -5,58 +5,119 @@
 //! selection, the Options Bar, Properties over the Project Browser on the left, views in tabs
 //! (plans, the 3D view, schedules), and the tool's prompt in the status bar.
 
+use crate::popup::Modal;
+
+use bimcraft_i18n::msg;
+
+mod adaptive_editor;
+mod adaptive_place;
+mod adaptive_view;
+mod assistant;
+mod background_grid;
 mod browser;
+mod cad;
+mod camera;
 mod canvas;
+mod clouds;
 mod context;
 pub mod control;
+mod coordinates;
+pub mod cowork;
 mod dialog;
+mod dimtypes;
+mod display;
 mod dock;
+mod draw;
 mod editor;
+mod electrical;
+mod export;
 mod favorites;
+mod fillpatterns;
+mod filter;
+mod find;
+mod finishes;
 mod footer;
 mod gpu;
+mod printsets;
+mod publisher;
+pub use gpu::limits_for;
 mod graphics;
+mod groups;
 pub mod icons;
 mod inquiry;
 pub mod lang;
+mod linestyles;
 mod lineweights;
 mod links;
 mod mep;
+mod mesh;
+mod minimap;
+mod notes;
 mod objectstyles;
 mod orbit;
+mod panelsched;
 mod paper;
+mod parameters;
 mod phasing;
+mod plugins;
+mod popup;
+mod presets;
 mod prices;
+mod projectinfo;
 mod properties;
 mod purge;
 pub mod recent;
+mod reinforce;
+mod renames;
+mod retained;
 pub mod revit;
+mod ribbon;
+mod script;
 mod section;
+mod section_box;
+mod section_worker;
 pub mod settings;
+mod shape;
+pub mod shortcuts;
+mod sketch;
+mod sketch3d;
+pub mod spacemouse;
+mod spots;
+mod standards;
 mod start;
 mod structure;
 mod style;
+mod templates;
 #[cfg(test)]
 mod tests;
+mod titlebar;
+mod titleblocks;
 mod trace;
+mod triad;
+mod typeprops;
 mod updates;
+mod view_worker;
 pub mod window;
+mod workplane;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
+use bimcraft_core::dims::Placing as DimMode;
 use bimcraft_core::engine::{self, Session};
+use bimcraft_core::files;
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Justify, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
+use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Justify, Location, Model, RAMP_WIDTH, Reference, RoomArea, STAIR_WIDTH};
 use bimcraft_core::snap::{Kind as Snap, Snaps};
 use bimcraft_core::units::Units;
 use bimcraft_core::{element_json, render, schedule, stairs};
 use egui::containers::menu::{MenuButton, SubMenuButton};
 use egui::{
     Align, Align2, Area, CentralPanel, Color32, ComboBox, Context, CornerRadius, Event, FontId, Frame, Grid, Id as UiId, Key,
-    KeyboardShortcut, Layout, Margin, Modal, Modifiers, Order, Panel, Popup, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, TextEdit, Ui, ViewportCommand, WidgetInfo, WidgetType, pos2, vec2,
+    KeyboardShortcut, Layout, Margin, Modifiers, Order, Panel, Popup, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke,
+    StrokeKind, TextEdit, Ui, UiBuilder, ViewportCommand, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -64,6 +125,7 @@ use bimcraft_core::language::Language;
 mod autosave;
 use icons::Icon;
 use lang::{Lang, t, tf};
+use ribbon::panel;
 use style::pal;
 
 /// A view: what the middle of the window shows.
@@ -84,6 +146,8 @@ pub enum Sheet {
     Schedule(&'static str),
     /// Another schedule of the project's, by id.
     Table(Id),
+    /// A view of an open family document: its {3D} (none), or a plan or an elevation (`editor/tabs.rs`).
+    Family(editor::tabs::DocId, Option<bimcraft_core::family::views::Which>),
 }
 
 /// What clicks on the plan do.
@@ -96,10 +160,14 @@ pub enum Tool {
     Door,
     Window,
     Room,
+    /// Room separation lines, one a click from the point before: the last point clicked, while the chain goes on.
+    RoomSeparator(Option<P2>),
     /// The Options Bar asks for the new level's elevation.
     Level,
     /// The grid's start, once clicked.
     Grid(Option<P2>),
+    /// A reference plane's start, once clicked: two clicks draw an upright plane through them.
+    ReferencePlane(Option<P2>),
     /// Move the selection: its base point, once clicked.
     Move(Option<P2>),
     /// Copy the selection: its base point, once clicked.
@@ -111,6 +179,21 @@ pub enum Tool {
         start: Option<P2>,
         place: bool,
     },
+    /// Rotate Project North: the whole model about `centre` (the Project Base Point at first), as Rotate turns a
+    /// selection, and every location's angle back by as much, so nothing moves in the world.
+    RotateNorth {
+        centre: P2,
+        start: Option<P2>,
+        place: bool,
+    },
+    /// Specify Coordinates at a Point: the point the shared coordinates typed in the Location window are at, picked in the
+    /// view (snapped) while the window steps aside.
+    SpecifyPoint,
+    /// The rectangle an export is cut to, drawn in the view while the Export dialog steps aside: its first corner, once
+    /// clicked, in the view's own coordinates.
+    ExportRegion(Option<P2>),
+    /// Acquire Coordinates: the link or CAD drawing clicked gives the project its shared coordinates.
+    Acquire,
     /// Mirror the selection across a line picked, or with `draw`, a line drawn from `start`.
     Mirror {
         draw: bool,
@@ -120,26 +203,48 @@ pub enum Tool {
     Align(Option<(P2, P2)>),
     /// Trim or extend two walls to a corner: the first wall, and where it was picked.
     Trim(Option<(Id, P2)>),
+    /// Trim/Extend Single or Multiple Elements: the boundary, once picked; then each line clicked goes to it (with `many`,
+    /// until Esc; else one, and the boundary is picked again).
+    TrimTo {
+        boundary: Option<Id>,
+        many: bool,
+    },
+    /// Add Vertex, or with `delete` Delete Vertex: on each line clicked, where it was clicked.
+    Vertex {
+        delete: bool,
+    },
     /// Split the wall picked.
     Split,
     /// Copy (or move) the wall picked to the cursor's side, by the Options Bar's distance.
     Offset,
     /// Take the element picked down in the phase of the view on screen, or, if it comes down in it already, back up.
     Demolish,
+    /// Draw the edge clicked in the Options Bar's line style, in this view only, as Revit's Linework does.
+    Linework,
+    /// Place Detail Group: the Options Bar's group type where clicked.
+    DetailGroup,
+    /// Repeating Detail: the Options Bar's group along a line, its start once clicked.
+    RepeatingDetail(Option<P2>),
     /// Lay the material in the Options Bar over the face clicked in the 3D view, as Revit's Paint does.
     Paint,
     /// Take the paint off the face clicked in the 3D view.
     Unpaint,
-    /// An aligned dimension: the references picked so far. A click away from any places it.
-    Dimension(Vec<Reference>),
+    /// An aligned or linear dimension, laid as its mode says: the references and points picked so far. A click away from
+    /// any places it.
+    Dimension(DimMode, Vec<Reference>),
     /// An angular dimension: the lines picked so far, two that meet; then a click where its arc goes.
     Angular(Vec<Reference>),
-    /// A radial dimension: the round column picked, then a click toward where its radius goes.
-    Radial(Option<Reference>),
+    /// A radial, diameter or arc length dimension: what round was picked (an arc length's, then two points on its arc, if
+    /// it measures part of it), then a click toward where it goes.
+    Round(DimKind, Vec<Reference>),
     /// A text note where clicked, saying what the Options Bar says.
     Text,
     /// A spot elevation where clicked.
     Spot,
+    /// A spot slope where clicked: how steeply the floor's or roof's top falls there.
+    SpotSlope,
+    /// A spot coordinate: the point it reads, once clicked; the next click ends its leader.
+    SpotCoordinate(Option<P2>),
     /// A ruler laid between two points: the first, once clicked.
     Measure(Option<P2>),
     /// Tag the door or window clicked.
@@ -148,6 +253,9 @@ pub enum Tool {
     Section(Option<P2>),
     /// An elevation, looking at the side of the building clicked beside.
     Elevation,
+    /// A camera: the point its eye stands at, once clicked; then its target. The eye and target heights
+    /// are the Options Bar's over the plan's level (Revit's Camera tool).
+    Camera(Option<P2>),
     /// A column where clicked.
     Column,
     /// A run (a beam, a pipe, a conduit…, by category, as `beam` and `pipe` name them): its first point, once clicked.
@@ -188,8 +296,23 @@ pub enum Tool {
     Shaft(Option<P2>),
     /// A mass: the corners of its footprint, as clicked so far.
     Mass(Vec<P2>),
+    /// A detail line in the Options Bar's line style: its points, as clicked so far.
+    DetailLine(Vec<P2>),
     /// The selected floor's slope arrow: its tail, once clicked.
     SlopeArrow(Option<P2>),
+    /// Shape Editing's Modify Sub Elements: a point of the selected floor's shape, a corner, or both ends of an edge picked,
+    /// to the Options Bar's elevation.
+    ModifySubElements,
+    /// Shape Editing's Add Point: a point on the selected floor's top at the Options Bar's elevation.
+    AddPoint,
+    /// Shape Editing's Add Split Line: a crease across the selected floor's top; its first end, once clicked.
+    AddSplitLine(Option<P2>),
+    /// Sketch mode's Draw panel: the points clicked so far of the shape it draws (Line: since the last loop closed).
+    SketchLine(Vec<P2>),
+    /// Sketch mode's Pick Walls: a line along each wall clicked.
+    SketchPick,
+    /// Fill Patterns' New Pattern > Custom: the tile's corners, the first once clicked (the lines are picked already).
+    PatternCorner(Option<P2>),
 }
 
 /// Why the last command failed, shown in a box over the view.
@@ -216,12 +339,37 @@ enum Tab {
     Electrical,
     Lightning,
     Data,
+    Insert,
     Annotate,
     Massing,
+    Collaborate,
     View,
     Manage,
     Modify,
     Context,
+    /// A tab a plugin declared, by its place in [`BimApp::plugin_tabs`].
+    Plugin(usize),
+}
+
+/// A key for the tab, for the frame data egui keeps between frames: a plain sort in reading order.
+fn tab_key(tab: Tab) -> u64 {
+    match tab {
+        Tab::Architecture => 0,
+        Tab::Structure => 1,
+        Tab::Plumbing => 2,
+        Tab::Electrical => 3,
+        Tab::Lightning => 4,
+        Tab::Data => 5,
+        Tab::Insert => 6,
+        Tab::Annotate => 7,
+        Tab::Massing => 8,
+        Tab::View => 9,
+        Tab::Manage => 10,
+        Tab::Modify => 11,
+        Tab::Context => 12,
+        Tab::Collaborate => 13,
+        Tab::Plugin(i) => 100 + i as u64,
+    }
 }
 
 /// A step that would drop unsaved changes, waiting on the user.
@@ -230,6 +378,8 @@ enum Pending {
     Recover(bimcraft_core::autosave::Backup),
     New,
     Open,
+    /// The sample house, as a project nobody has saved ([`bimcraft_core::sample::SAMPLE`]).
+    Sample,
     /// A file the system asked to open ([`OsEvent::Open`]).
     OpenPath(PathBuf),
     Close,
@@ -247,7 +397,7 @@ pub enum OsEvent {
 }
 
 /// The schedules: the category `schedule` takes, and the view's name.
-pub(crate) const SCHEDULES: [(&str, &str); 6] = schedule::VIEWS;
+pub(crate) const SCHEDULES: [(&str, &str); 7] = schedule::VIEWS;
 
 /// Ribbon buttons that pick tools: icon, label, tooltip, tool.
 type Tools<'a> = &'a [(Icon, &'a str, &'a str, Tool)];
@@ -257,42 +407,51 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 45] = [
+const SHORTCUTS: [(&str, &str); 60] = [
+    ("3D", "3D View"),
     ("MD", "Modify"),
     ("SB", "Floor: Structural"),
-    ("MM", "Mirror Pick Axis"),
-    ("DM", "Mirror Draw Axis"),
-    ("AL", "Align"),
+    ("RF", "Reinforce"),
+    ("MM", msg!("Mirror Pick Axis")),
+    ("DM", msg!("Mirror Draw Axis")),
+    ("AL", msg!("Align")),
     ("OF", "Offset"),
     ("DW", "Demolish"),
     ("ZF", "Zoom to Fit"),
     ("ZE", "Zoom to Fit"),
     ("ZA", "Zoom to Fit"),
     ("TL", "Thin Lines"),
-    ("CS", "Create Similar"),
+    ("CS", msg!("Create Similar")),
     ("PP", "Properties"),
+    ("VP", "Properties"),
+    ("NP", "Project Browser"),
     ("SA", "Select All Instances"),
-    ("SE", "Snap to Endpoints"),
-    ("SM", "Snap to Midpoints"),
-    ("SI", "Snap to Intersections"),
-    ("SC", "Snap to Centres"),
-    ("SP", "Snap to Perpendiculars"),
-    ("SN", "Snap to Nearest"),
-    ("SO", "Snaps Off"),
-    ("SS", "Turn Snap Override Off"),
+    ("AG", msg!("Alignment Guides")),
+    ("OG", msg!("Orthogonal Guides")),
+    ("SE", msg!("Snap to Endpoints")),
+    ("SM", msg!("Snap to Midpoints")),
+    ("SI", msg!("Snap to Intersections")),
+    ("SC", msg!("Snap to Centres")),
+    ("SP", msg!("Snap to Perpendiculars")),
+    ("SQ", msg!("Snap to Quadrants")),
+    ("ST", msg!("Snap to Tangents")),
+    ("SN", msg!("Snap to Nearest")),
+    ("SO", msg!("Snaps Off")),
+    ("SS", msg!("Turn Snap Override Off")),
     ("VV", "Visibility/Graphics"),
     ("VG", "Visibility/Graphics"),
     ("EH", "Hide Element"),
     ("VH", "Hide Category"),
-    ("HH", "Temporary Hide Element"),
-    ("HC", "Temporary Hide Category"),
-    ("HI", "Temporary Isolate Element"),
-    ("IC", "Temporary Isolate Category"),
-    ("HR", "Reset Temporary Hide/Isolate"),
+    ("HH", msg!("Temporary Hide Element")),
+    ("HC", msg!("Temporary Hide Category")),
+    ("HI", msg!("Temporary Isolate Element")),
+    ("IC", msg!("Temporary Isolate Category")),
+    ("HR", msg!("Reset Temporary Hide/Isolate")),
     ("RH", "Reveal Hidden Elements"),
-    ("EU", "Unhide Elements"),
+    ("EU", msg!("Unhide Elements")),
+    ("UE", "Unhide Elements"),
     ("VU", "Unhide Category"),
-    ("EO", "Override Graphics by Element"),
+    ("EO", msg!("Override Graphics by Element")),
     ("FT", "Filters"),
     ("VT", "View Templates"),
     ("PH", "Phasing"),
@@ -303,9 +462,43 @@ const SHORTCUTS: [(&str, &str); 45] = [
     ("LC", "Link CAD"),
     ("TW", "Trace Walls"),
     ("KS", "Keyboard Shortcuts"),
+    // Revit has none for Manage > Location; BIMCraft's window of it.
+    ("LO", msg!("Location")),
+    ("AI", msg!("Assistant")),
+    ("CW", msg!("Co-Work")),
+    ("BX", "Section Box"),
+    ("GD", "Graphic Display Options"),
+    // Revit has none for its title blocks; no command or tool takes TB.
+    ("TB", "Title Blocks"),
 ];
 
 /// Every two-letter shortcut and what it does: the desktop's own, then the commands' aliases.
+/// How long a letter typed with Ctrl held waits for a second one before it does its own job as a Ctrl key (S saves, Z
+/// undoes): a second letter in time makes the two a shortcut (Ctrl held, S then A: Select All Instances). Letting Ctrl go
+/// ends the wait at once.
+pub(crate) const CTRL_WAIT: f64 = 0.5;
+
+/// The letters and digits typed this frame with Ctrl held (Cmd on a Mac) and no other modifier, taken out of the frame's
+/// events, upper case: BIMCraft's shortcuts are two of them, as Revit's are two letters.
+pub(crate) fn ctrl_letters(ctx: &Context) -> Vec<char> {
+    ctx.input_mut(|i| {
+        let mut out = Vec::new();
+        i.events.retain(|e| {
+            let Event::Key { key, pressed: true, modifiers, .. } = e else { return true };
+            let name = key.name();
+            let mut chars = name.chars();
+            match (modifiers.command && !modifiers.shift && !modifiers.alt, chars.next(), chars.next()) {
+                (true, Some(c), None) if c.is_ascii_alphanumeric() => {
+                    out.push(c.to_ascii_uppercase());
+                    false
+                }
+                _ => true,
+            }
+        });
+        out
+    })
+}
+
 fn shortcuts() -> Vec<(&'static str, &'static str)> {
     let aliases = engine::commands().iter().flat_map(|c| c.aliases.iter().map(move |a| (*a, c.label)));
     SHORTCUTS
@@ -342,10 +535,17 @@ fn import_note(file: &str, reply: &Value) -> String {
     text
 }
 
+/// Elements' JSON (`element_json`) by id, and the model it was found in.
+type KeptJson = (Weak<Model>, HashMap<Id, Arc<Value>>);
+
 pub struct BimApp {
     pub session: Session,
     /// The system's requests since the last frame, read once a frame. None where it sends none.
     pub os_events: Option<Box<dyn FnMut() -> Vec<OsEvent>>>,
+    /// The window draws its own title bar (`titlebar.rs`): the desktop's `main` says so where the system lets it (Windows and
+    /// Linux), unless `system_title_bar`, the user's ask for the system's (Settings > User Interface, kept in `settings.json`).
+    pub own_title_bar: bool,
+    pub system_title_bar: bool,
     /// The active view, which takes the tools: a tab of `views`, or one of `floating`.
     pub sheet: Sheet,
     pub tool: Tool,
@@ -371,6 +571,9 @@ pub struct BimApp {
     /// seen.
     drop_headers: Vec<(dock::Palette, Rect, bool)>,
     tab_bar: Rect,
+    /// How far down the view the tabs reach where they float over it (else the view's top): what floats over the view
+    /// (the Options Bar) and what docks along it start below.
+    tabs_foot: f32,
     tab_rects: Vec<(Sheet, Rect)>,
     work: Rect,
     pointer: Pos2,
@@ -380,15 +583,56 @@ pub struct BimApp {
     /// while folded); where its tabs end.
     ribbon_min: bool,
     ribbon_peek: bool,
+    /// What High Contrast Point Clouds fills a view's scans with: the user's (Settings > Graphics), crimson at first.
+    scan_contrast: [u8; 3],
+    background_grid_dialog: Option<background_grid::GridDialog>,
+    /// Global grid snapping preference, independent of view graphics and templates.
+    grid_snapping: bool,
+    /// Whether the 3D view's section box shows what it cuts filled (Settings > Performance): off, its faces are left hollow,
+    /// which spares cutting the model each time the box moves.
+    pub(crate) cut_fills_3d: bool,
+    /// The origin marker on a plan, and the view's name in its corner (File > Settings): working aids, drawn on the screen and
+    /// never in a drawing that is printed or exported.
+    show_origin: bool,
+    show_view_name: bool,
     ribbon_bottom: Pos2,
+    /// The Compact layout (File > Settings): the bars and palettes flush to the edges, not floating cards.
+    compact: bool,
+    /// Which interface the window wears (File > Settings): BIMCraft's own, or Rev.
+    profile: style::Profile,
+    /// A preset's colours when dark, and the user's accent (Settings > User Interface > Theme).
+    scheme: style::Scheme,
+    accent: Option<[u8; 3]>,
+    /// The user's own panel, canvas and text colours over any scheme (the same page).
+    panel_colour: Option<[u8; 3]>,
+    canvas_colour: Option<[u8; 3]>,
+    text_colour: Option<[u8; 3]>,
+    /// The category the Properties palette's filter narrows a selection of several to, and the selection it was picked for: a new
+    /// selection drops it (`BimApp::palette_ids`).
+    palette_filter: Option<(&'static str, Vec<Id>)>,
+    /// What `element_json` says of the elements the palette has shown, of the model it was found in (`BimApp::elements_json`):
+    /// the palette reads it every frame, and a component's room costs its level's room boundaries.
+    palette_json: RefCell<Option<KeptJson>>,
     /// File > Settings, while open, at its page; the settings file, when the app was given one, and what it holds; the
     /// theme it asks for, put in force on the next frame.
     settings_page: Option<settings::Page>,
+    /// Find (Ctrl+K), while it's open: what is typed in it.
+    find: Option<String>,
+    /// The project's scale, the tools the user took out, whether Edit Tools is on, and the kept presets (`presets.rs`); with what
+    /// Settings' preset name field holds and why the last save was refused.
+    scale: presets::Scale,
+    tools_hidden: BTreeSet<String>,
+    editing_tools: bool,
+    presets: Vec<presets::Preset>,
+    preset_name: String,
+    preset_note: Option<String>,
     settings_path: Option<PathBuf>,
     settings_kept: Option<settings::Settings>,
     /// The window's size, kept and brought within its screen (`window.rs`).
     window: window::Tracker,
     theme_wanted: Option<egui::ThemePreference>,
+    /// Keep drawing backgrounds light even when the interface is dark.
+    light_canvas: bool,
     tab: Tab,
     /// Where the ribbon goes back to when the contextual tab goes.
     back: Tab,
@@ -438,15 +682,37 @@ pub struct BimApp {
     /// How high the Ceiling tool's ceilings are; the Slope Arrow's slope; the Shaft tool's top.
     ceiling_height: String,
     floor_slope: String,
+    /// Add Point's elevation: above the floor's top as it would be without its shape, or with `shape_absolute`, above its
+    /// level; empty, the top's height where it's clicked.
+    shape_z: String,
+    /// What the Options Bar's elevations count from.
+    pub(crate) shape_base: crate::shape::Base,
+    /// Add Point's mode, as Revit's: along the surface as it is, `shape_offset` over it; else Absolute, at `shape_z` above
+    /// the floor's level.
+    pub(crate) shape_along: bool,
+    pub(crate) shape_offset: String,
+    /// The selected floor's shape point a drag under Modify Sub Elements holds, where it was.
+    shape_grip: Option<P2>,
+    /// The selected floor as a grip's drag would leave it, plan or 3D, while it's dragged: its creases drawn over it.
+    pub(crate) shape_preview: Option<bimcraft_core::model::Floor>,
+    /// What Modify Sub Elements has selected of the shaped floor's shape.
+    pub(crate) shape_picked: Vec<crate::shape::Sub>,
+    /// A shape point's height label clicked into a field: the point, and what's typed.
+    pub(crate) shape_label_edit: Option<(P2, String)>,
+    /// Where the plan drew the shape's height labels, last frame: a click there is the label's, not the tool's.
+    pub(crate) shape_label_rects: Vec<egui::Rect>,
     shaft_top: Option<Option<Id>>,
     shaft_height: String,
     /// The Mass tool's top, as the Shaft tool's.
     mass_top: Option<Option<Id>>,
     mass_height: String,
+    /// The Camera tool's eye and target heights over the plan's level, and its lens, as typed.
+    camera_eye_height: String,
+    camera_target_height: String,
+    camera_lens: String,
     /// Each click ends a wall and starts the next; off, two clicks make one wall.
     chain: bool,
-    /// The Wall tool draws arcs, by their ends and a point on them; the line its walls stand on.
-    wall_arc: bool,
+    /// The line the Wall tool's walls stand on.
     wall_location: Location,
     /// Attach Top/Base attaches bases.
     attach_base: bool,
@@ -468,22 +734,72 @@ pub struct BimApp {
     tag_label: String,
     /// What the Text tool writes.
     note_text: String,
+    /// Notes written with a leader: the Text tool's first click is the point it reaches, kept here with its view.
+    pub(crate) note_leader: bool,
+    pub(crate) note_arrow: Option<(Id, P2)>,
+    /// The note being written on the canvas.
+    note_edit: Option<notes::NoteEdit>,
+    /// Text Type Properties, while it's open.
+    text_type_dialog: Option<notes::TextTypeDialog>,
+    dimension_type_dialog: Option<dimtypes::DimensionTypeDialog>,
+    /// Spot Coordinate Type Properties, while it's open.
+    spot_type_dialog: Option<spots::SpotTypeDialog>,
+    /// The spot coordinate whose leader's end is being dragged.
+    spot_grip: Option<Id>,
+    dimension_text_dialog: Option<dimtypes::DimensionTextDialog>,
+    /// The line style the Detail Line tool draws in; blank for the project's Thin Lines.
+    line_style: String,
+    /// The Linework tool's line style: a style's name, or `<Invisible lines>` or `<By Category>` (in English).
+    linework_style: String,
+    /// The detail group type Place Detail Group places.
+    group_type: String,
+    /// The Repeating Detail tool's spacing, as typed.
+    repeat_spacing: String,
+    /// The Detail Line tool's Chain: each click ends a line and starts the next; off, two clicks make one line.
+    line_chain: bool,
+    /// The shape each Draw panel draws, and the Options Bar's Sides, Radius and Offset.
+    pub(crate) drawing: draw::Drawing,
     /// The project units the Options Bar's lengths were last written in.
     units: Units,
     /// A length typed while picking points: the listening dimension.
-    typed_length: String,
+    pub(crate) typed_length: String,
     /// What each view hides or reveals for now (not the project's), and the model it is drawn from.
     temporary: HashMap<Sheet, footer::Temp>,
     shadow: Option<footer::Shadow>,
+    /// Linked 3D View, while it's on: where the 3D view was before it floated beside the plan.
+    linked_3d: Option<section_box::Was>,
     /// The project, and what the views draw of it with its links built in: see [`BimApp::view_model`].
     seen: Option<(Arc<Model>, Arc<Model>)>,
     /// Link Model was asked for: its file dialog opens on the next frame, so a shortcut typed alone never waits on one.
     link_dialog: bool,
-    /// Link CAD was asked for: its file dialog opens on the next frame, as Link Model's does.
-    cad_dialog: bool,
+    /// Manage > Link CAD (the drawing put under a plan to trace over) was asked for: its file dialog opens on the next
+    /// frame, as Link Model's does. Insert > Link CAD, which brings a drawing in as an import, is `cad_dialog`.
+    underlay_dialog: bool,
+    /// Insert > Point Cloud was pressed: its file dialog opens this frame.
+    cloud_dialog: bool,
+    /// Bringing scan files in: the box, while it's open.
+    cloud_box: Option<clouds::CloudBox>,
+    /// Insert > Import CAD (false) or Link CAD (true) was pressed: its file dialog opens this frame.
+    cad_dialog: Option<bool>,
+    /// Bringing a CAD drawing in: the box, while it's open.
+    cad_box: Option<cad::CadBox>,
+    /// Link Model's box (its positioning), while it's open.
+    pub(crate) link_box: Option<links::LinkBox>,
     /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
     /// door or window two: from its wall's start, from its end), the length so far.
     dim_edit: Option<(Id, usize, String)>,
+    /// The pointer is over a dimension's number, padlock, EQ or text button: the canvas leaves the click to it.
+    over_dimension_control: bool,
+    /// A number field was left by Esc: the key's own Esc handling must not clear the selection then.
+    dim_edit_escaped: bool,
+    /// Edit Dimension References, while it's on: the dimension, its references being picked, and where its line goes.
+    dimension_refs_edit: Option<canvas::DimensionRefsEdit>,
+    /// The dimension segment picked out of a chain, by Tab and a click: the dimension and which segment.
+    dimension_segment: Option<(Id, usize)>,
+    /// The segment Tab is stepping over now, highlighted until a click picks it.
+    dimension_segment_hover: Option<(Id, usize)>,
+    /// The reference of an element Tab is stepping over while a dimension is picked or its references are edited.
+    dimension_reference_hover: Option<(Id, Reference)>,
     /// A selected wall's angle being typed: the wall, whether it turns about its start (else its
     /// end), the angle so far.
     angle_edit: Option<(Id, bool, String)>,
@@ -501,12 +817,20 @@ pub struct BimApp {
     /// The Keyboard Shortcuts dialog is open (KS); the Manage tab drops its Project Units menu open
     /// the next time it shows (UN).
     show_shortcuts: bool,
+    pub custom_shortcuts: BTreeMap<String, String>,
+    pub shortcuts_dialog: shortcuts::ShortcutsDialog,
     open_units: bool,
+    /// Where the Options Bar was drawn last frame, for a view's navigation bar to keep clear of it (nothing when it isn't there).
+    options_rect: Rect,
     canvas: canvas::Canvas,
     orbit: orbit::Orbit,
+    /// Which 3D view the 3D tab shows: a view's id, or none for the default `{3D}` (made when it is first changed). Set by
+    /// opening a camera view (`open_3d`), as Revit's 3D views each have their own tab.
+    active_3d: Option<Id>,
     /// The graphics card the 3D view may be drawn on (Settings > Performance).
     card: gpu::Card,
     cut: section::Cut,
+    minimap: minimap::Minimap,
     paper: paper::Papers,
     /// The model as last opened or saved: any other is unsaved.
     saved: Arc<Model>,
@@ -515,35 +839,93 @@ pub struct BimApp {
     edit: Option<(Id, String, String)>,
     /// The Level tool's elevation and name, as typed in the Options Bar.
     new_level: (String, String),
-    /// The last letters typed over the plan, for two-letter shortcuts.
+    /// The letters typed with Ctrl held, for two-letter shortcuts: one waits for a second ([`CTRL_WAIT`]).
     typed: String,
+    /// When the one letter in `typed` was typed, by the window's clock.
+    typed_at: f64,
     pending: Option<Pending>,
+    /// What Delete was asked to take while it asks whether rooms' floors and ceilings go with them.
+    deleting_rooms: Option<Vec<Id>>,
     type_dialog: Option<properties::TypeDialog>,
     materials_dialog: Option<properties::MaterialsDialog>,
     family_dialog: Option<properties::FamilyDialog>,
     /// The Favorites window, while it's open; where the favorites file is, when the app was told (else the usual place).
     favorites_dialog: Option<favorites::FavoritesDialog>,
-    /// The Family Editor, while it's open.
-    family_editor: Option<editor::FamilyEditor>,
+    /// The family documents open, each a tab or more beside the project's (`editor/tabs.rs`), and the next one's id.
+    families: Vec<editor::tabs::FamilyDoc>,
+    next_doc: u32,
+    /// A family document being closed, asked about first while it has unsaved changes.
+    doc_closing: Option<editor::tabs::Closing>,
+    /// File > New, Open, Close or quitting, its family documents closed: the project's question next.
+    after_documents: Option<Pending>,
+    /// File > New > Family…'s dialog, while it is open: the category picked.
+    pub(crate) new_family_dialog: Option<bimcraft_core::family::Category>,
+    /// The family document was opened from the start page with no project behind it: closed, the start page comes back.
+    pub(crate) family_from_home: bool,
+    /// A family being loaded into the project, waiting on "Family Already Exists" (`editor::exists`).
+    family_loading: Option<editor::exists::Loading>,
+    /// What the last family load decided: how the project's family was overwritten, and its shared nested families.
+    pub(crate) family_decided: Option<editor::exists::Decided>,
     favorites_path: Option<std::path::PathBuf>,
     /// The files File > Open Recent lists, and where they are kept (see [`BimApp::keep_recent_in`]; none until the app is told).
     recent: recent::Recent,
     recent_path: Option<std::path::PathBuf>,
     /// The start page: up when the window opens on no project, and from the quick access bar's Home.
     home: start::Home,
-    parameters_dialog: Option<properties::ParametersDialog>,
+    parameter_manager: Option<parameters::ParameterManager>,
     schedule_dialog: Option<properties::ScheduleDialog>,
     /// Visibility/Graphics, Filters and View Templates, while they're open.
     vg_dialog: Option<graphics::VgDialog>,
     filters_dialog: Option<graphics::FiltersDialog>,
-    templates_dialog: Option<graphics::TemplatesDialog>,
+    templates_dialog: Option<templates::TemplatesDialog>,
     /// Phasing and Design Options, while they're open, and the design option (`set: option`) new
     /// elements are made in: none is the main model.
     phasing_dialog: Option<phasing::PhasingDialog>,
+    /// Graphic Display Options (GD), while open.
+    display_dialog: Option<display::DisplayDialog>,
+    project_info_dialog: Option<projectinfo::ProjectInfoDialog>,
+    /// Structure > Reinforce, while open, and what was typed in it for each kind of host.
+    reinforce_dialog: Option<reinforce::ReinforceDialog>,
+    reinforce_kept: BTreeMap<reinforce::Form, BTreeMap<&'static str, String>>,
+    /// The slot picked in the panel schedule on screen.
+    panel_slot: Option<u32>,
     /// Manage > Line Weights, while open.
     line_weights_dialog: Option<lineweights::LineWeightsDialog>,
     /// Manage > Object Styles, while open.
     object_styles_dialog: Option<objectstyles::ObjectStylesDialog>,
+    /// Manage > Line Styles, while open.
+    line_styles_dialog: Option<linestyles::LineStylesDialog>,
+    /// View > Title Blocks, while open.
+    title_blocks_dialog: Option<titleblocks::TitleBlocksDialog>,
+    fill_patterns_dialog: Option<fillpatterns::FillPatternsDialog>,
+    /// Sketch mode: the lines of an outline being drawn, until Finish or Cancel.
+    pub sketch: Option<sketch::Sketch>,
+    /// The project the window is on (its `uid`, which a project keeps for life): one put in the session's place meanwhile is
+    /// another, and everything held of the first (a sketch, a dialog's draft, the views open) is of nothing.
+    project: u64,
+    /// How wide the ribbon's Mode panel was last drawn, to stand it at the ribbon's right end.
+    mode_width: f32,
+    /// Manage > Technical Standards, while open.
+    standards_dialog: Option<standards::StandardsDialog>,
+    /// The plugins of the user's folder, the tabs they put on the ribbon, and the Plugins window while it is open.
+    pub(crate) plugins: bimcraft_plugin::Plugins,
+    pub(crate) plugin_tabs: Vec<bimcraft_plugin::RibbonTab>,
+    pub(crate) plugins_dialog: bool,
+    /// A report a plugin's function asked the window to show, while it is open.
+    pub(crate) plugin_report: Option<plugins::PluginReport>,
+    /// A plugin's function whose path the user is choosing in the system's dialog: its command, and the parameters with
+    /// the path left to set. Running a function is one click on the ribbon, and a function that needs a file asks for
+    /// it there.
+    pub(crate) plugin_pick: Option<(String, serde_json::Map<String, serde_json::Value>)>,
+    /// The folder being read on a thread of its own, so the first frame isn't kept waiting by it.
+    plugins_job: Option<std::sync::mpsc::Receiver<bimcraft_plugin::Plugins>>,
+    /// Manage > Electrical Settings, while open.
+    electrical_dialog: Option<electrical::ElectricalDialog>,
+    /// Manage > Coordinates, while it is open.
+    coordinates_dialog: Option<coordinates::CoordinatesDialog>,
+    /// How the Survey Point goes when it's dragged, moved or typed in Properties: clipped (the point alone, the world staying)
+    /// or unclipped (the shared coordinates with it), as Revit's clip says.
+    pub(crate) survey_moves: bimcraft_core::coordinates::Move,
     options_dialog: Option<phasing::OptionsDialog>,
     /// Manage > Price List, while open.
     price_dialog: Option<prices::PriceDialog>,
@@ -554,7 +936,14 @@ pub struct BimApp {
     cad_scale: Option<links::CadScale>,
     /// Manage > Select by ID and IDs of Selection, while open.
     select_by_id: Option<inquiry::SelectById>,
+    /// Manage > Run Script, while open.
+    run_script: Option<script::RunScript>,
+    /// The Work Plane dialog's draft, while it's open or picking its points in the 3D view.
+    work_plane: Option<workplane::Draft>,
+    /// The Work Plane dialog's Show (T12): the 3D view's work plane drawn as a grid whether or not it is being set.
+    pub(crate) show_work_plane: bool,
     ids_of_selection: Option<inquiry::IdsOfSelection>,
+    selection_filter: Option<filter::SelectionFilter>,
     /// What was last put on the clipboard.
     pub copied: Option<String>,
     active_option: Option<String>,
@@ -564,8 +953,24 @@ pub struct BimApp {
     /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
     component: Option<(String, String)>,
     component_angle: f64,
+    /// Hinge hand for this run of the Door tool. Facing follows the pointer.
+    door_flip_hand: bool,
+    /// An adaptive component's points clicked so far, in the project, before the last one places it.
+    pub(crate) adaptive_clicks: Vec<[f64; 3]>,
+    /// An adaptive instance's grip being dragged in a plan: the instance, and its point's number.
+    pub(crate) adaptive_grip: Option<(Id, u32)>,
+    /// The Component tool's Placement Plane for a work plane-based family: a reference plane of the project, by GUID; none,
+    /// the view's level.
+    placement_plane: Option<bimcraft_core::ids::Guid>,
+    /// The Component tool's Place on Face for a work plane-based family: a click places it on the face under it (in plan a
+    /// floor's or a roof's top, in a ceiling plan a ceiling's underside, in the 3D view any face that hosts).
+    pub(crate) place_on_face: bool,
+    /// The Component tool's Rotate after placement: each component placed is selected and Rotate starts about its point.
+    rotate_after: bool,
     /// The Properties palette's folded groups.
     collapsed: BTreeSet<&'static str>,
+    /// The names of Properties' groups a project's parameters make, kept for `collapsed`.
+    collapse_keys: Vec<&'static str>,
     /// Where views show, last frame.
     view_rect: Rect,
     /// Where the last view drawn showed, whether it was the active view or not.
@@ -579,11 +984,27 @@ pub struct BimApp {
     styled: bool,
     /// The updater, which the desktop app attaches: a window starts without one, and so never phones home.
     pub updates: Option<bimcraft_update::Updater>,
+    /// The Assistant palette's: the user's provider, model and key, and the chat, which the desktop app gives a network (`assistant::State::attach`): a window starts without one.
+    pub assistant: assistant::State,
+    /// The 3D mouse's reader, which the desktop app attaches: a window starts without one, so a test never opens a device.
+    pub space_mouse: Option<spacemouse::SpaceMouse>,
     /// The reader of Revit files, which the desktop app attaches (`bimcraft-rvt` is Apache-2.0 only, so this crate never depends on
     /// it): a window starts without one, so it offers no `.rvt` and a test never reads a real one.
     pub revit: Option<revit::Importer>,
-    /// The control port, when the window was started with one: agents work on this project through it.
+    /// The control port, when the window was started with one or Settings opened it: agents work on this project through it.
     control: Option<control::Control>,
+    /// File > Settings > Agents: whether the window opens the port, on which, and whether agents may edit or only read.
+    agents: control::Agents,
+    /// Co-Work: the session the window is in, what Settings keeps of it, and its dialog while open.
+    cowork: Option<cowork::Live>,
+    pub(crate) cowork_prefs: cowork::Prefs,
+    cowork_dialog: Option<cowork::Dialog>,
+    /// What the window keeps of the others in the session and of where it is itself.
+    cowork_seen: cowork::Seen,
+    /// The session's shared AI chat, as this window takes part in it.
+    cowork_ai: cowork::Ai,
+    /// A host with guests in that was asked to close: asking whether to end the session (false), or told to (true).
+    cowork_quit: Option<bool>,
     /// The Revit file being read, on a thread of its own.
     revit_job: Option<revit::Job>,
     /// Files to open at the next frame: the command line's, and what the system asked for while a Revit file was being read.
@@ -592,6 +1013,26 @@ pub struct BimApp {
     dialog: Option<dialog::Dialog>,
     /// What the last Revit import left out and brought in, for as long as its project is the one open.
     revit_report: Option<revit::Report>,
+    /// File > Export…, while it is open.
+    export_dialog: Option<export::Dialog>,
+    /// Print Sets, while it is open.
+    print_sets: Option<printsets::Dialog>,
+    /// The Publisher, while it is open.
+    publisher: Option<publisher::Dialog>,
+    /// The name asked for a print set of the views picked in the Project Browser.
+    name_set: Option<printsets::NameSet>,
+    /// The views and sheets picked in the Project Browser (Ctrl and Shift pick more than one), and the one a Shift-click runs from.
+    browser_picked: Vec<browser::Pick>,
+    browser_anchor: Option<browser::Pick>,
+    /// Expand All or Collapse All, for the next frame's groups.
+    browser_fold: Option<bool>,
+    /// The export being written, on a thread of its own.
+    export_job: Option<export::worker::Running>,
+    /// The format the last export was to, and each format's settings, for the next export while the window is open.
+    export_format: Option<String>,
+    export_last: std::collections::BTreeMap<String, bimcraft_core::export::Options>,
+    /// What prints: the system's spooler, or in a test one that only remembers.
+    spooler: std::sync::Arc<dyn export::print::Spooler>,
 }
 
 /// The Options Bar's Height: up to a level above the plan's `level` (by default the next one up),
@@ -627,143 +1068,386 @@ fn top_params(m: &Model, level: Id, top: Option<Option<Id>>, height: &str) -> Re
     }
 }
 
-/// A ribbon button: an icon over its label, tinted while its tool is on; as wide as its label.
+/// A ribbon button: an icon over its label, tinted while its tool is on; as wide as its label, which breaks over two lines
+/// when one would make it wider than `WIDE`.
 fn big_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
-    let (label, tip) = (t(label), t(tip));
+    ribbon_button(ui, icon, label, active, tip, true, None)
+}
+
+/// A big ribbon button, or its row in a list, whose icon and name are in `own` rather than the theme's ink: Finish Edit Mode's
+/// green and Cancel Edit Mode's red.
+fn inked_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str, own: Option<Color32>) -> Response {
+    ribbon_button(ui, icon, label, active, tip, true, own)
+}
+
+/// A ribbon button whose label is a plugin's data: it isn't translated, as its manifest wrote it, and it has no icon
+/// (icons come later, from a limited set of glyphs in the manifest).
+fn plugin_button(ui: &mut Ui, label: &str, tip: &str) -> Response {
+    const WIDE: f32 = 78.0;
+    if ribbon::left_out(label) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
+    if ribbon::listing() {
+        return plugin_row(ui, label, tip);
+    }
+    if let Some(r) = ribbon::handed_over(ui) {
+        return r;
+    }
+    let (label, tip) = (label.to_string(), t(tip));
     let font = FontId::proportional(12.0);
-    let width = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal().text).size().x + 14.0;
-    let (rect, r) = ui.allocate_exact_size(vec2(width.max(58.0), 52.0), Sense::click());
+    let wide = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), pal().text).size().x;
+    let one = wide(&label);
+    let lines: Vec<String> = match label.char_indices().filter(|(_, c)| *c == ' ').min_by_key(|(i, _)| i.abs_diff(label.len() / 2)) {
+        Some((at, _)) if one + 12.0 > WIDE => vec![label[..at].to_string(), label[at + 1..].to_string()],
+        _ => vec![label.clone()],
+    };
+    let width = lines.iter().map(|l| wide(l)).fold(0.0, f32::max) + 12.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(width.max(54.0), 60.0), Sense::click());
     let enabled = ui.is_enabled();
-    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, label));
-    let (fill, stroke, ink) = match (active, r.hovered() && enabled) {
-        (true, _) => (pal().select_fill, Stroke::new(1.0, pal().accent), pal().accent),
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, false, &label));
+    let (fill, stroke, ink) = match r.hovered() && enabled {
+        true => (pal().hover_fill, Stroke::new(1.0, pal().hover), pal().text),
+        false => (Color32::TRANSPARENT, Stroke::NONE, if enabled { pal().text } else { pal().muted.gamma_multiply(0.6) }),
+    };
+    let stroke = if r.has_focus() { style::focus_ring() } else { stroke };
+    ui.painter().rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
+    let top = rect.center_top() + vec2(0.0, 30.0 - 6.5 * (lines.len().saturating_sub(1)) as f32);
+    for (i, line) in lines.iter().enumerate() {
+        ui.painter().text(top + vec2(0.0, 13.0 * i as f32), Align2::CENTER_CENTER, line, font.clone(), ink);
+    }
+    r.on_hover_text(tip)
+}
+
+/// A plugin's button in its panel's list: its row is text alone, as its ribbon button has no icon.
+fn plugin_row(ui: &mut Ui, label: &str, tip: &str) -> Response {
+    let width = if ribbon::in_palette() { ui.available_width() } else { ui.available_width().max(200.0) };
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let enabled = ui.is_enabled();
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, false, label));
+    let (fill, ink) = match r.hovered() && enabled {
+        true => (pal().hover_fill, pal().text),
+        false => (Color32::TRANSPARENT, if enabled { pal().text } else { pal().muted.gamma_multiply(0.6) }),
+    };
+    let stroke = if r.has_focus() { style::focus_ring() } else { Stroke::NONE };
+    let p = ui.painter();
+    p.rect(rect, 4.0, fill, stroke, StrokeKind::Inside);
+    p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(12.5), ink);
+    r.on_hover_text(t(tip))
+}
+
+fn ribbon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str, translate: bool, own: Option<Color32>) -> Response {
+    const WIDE: f32 = 78.0;
+    if ribbon::left_out(label) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
+    let name = label;
+    if ribbon::listing() {
+        return list_row_in(ui, icon, label, active, tip, translate, own);
+    }
+    if let Some(r) = ribbon::handed_over(ui) {
+        return r;
+    }
+    let (label, tip) = if translate { (t(label).to_string(), t(tip)) } else { (label.to_string(), t(tip)) };
+    let font = FontId::proportional(12.0);
+    let wide = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), pal().text).size().x;
+    let one = wide(&label);
+    // The space nearest the middle, for a label too wide for one line.
+    let lines: Vec<String> = match label.char_indices().filter(|(_, c)| *c == ' ').min_by_key(|(i, _)| i.abs_diff(label.len() / 2)) {
+        Some((at, _)) if one + 12.0 > WIDE => vec![label[..at].to_string(), label[at + 1..].to_string()],
+        _ => vec![label.to_string()],
+    };
+    let width = lines.iter().map(|l| wide(l)).fold(0.0, f32::max) + 12.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(width.max(54.0), 60.0), Sense::click());
+    let enabled = ui.is_enabled();
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, &label));
+    let (fill, stroke, mut ink) = match (active, r.hovered() && enabled) {
+        (true, _) => (pal().select_fill, Stroke::new(1.0, pal().accent), pal().accent_ink),
         (false, true) => (pal().hover_fill, Stroke::new(1.0, pal().hover), pal().icon),
         (false, false) => (Color32::TRANSPARENT, Stroke::NONE, if enabled { pal().icon } else { pal().icon.gamma_multiply(0.35) }),
     };
+    if let Some(own) = own.filter(|_| enabled) {
+        ink = own;
+    }
     // Keyboard focus shows as a ring, whatever else the button shows.
-    let stroke = if r.has_focus() { Stroke::new(2.0, pal().accent) } else { stroke };
+    let stroke = if r.has_focus() { style::focus_ring() } else { stroke };
     let p = ui.painter();
-    p.rect(rect, 4.0, fill, stroke, StrokeKind::Inside);
-    icons::paint(p, icon, Rect::from_center_size(rect.center_top() + vec2(0.0, 19.0), vec2(24.0, 24.0)), ink);
+    p.rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
+    icons::paint(p, icon, Rect::from_center_size(rect.center_top() + vec2(0.0, 18.0), vec2(26.0, 26.0)), ink);
     let text = match (active, enabled) {
-        (true, _) => pal().accent,
+        (true, _) => pal().accent_ink,
         (false, true) => pal().text,
         (false, false) => pal().muted.gamma_multiply(0.6),
     };
-    p.text(rect.center_bottom() - vec2(0.0, 10.0), Align2::CENTER_CENTER, label, font, text);
+    let text = own.filter(|_| enabled).unwrap_or(text);
+    for (i, line) in lines.iter().enumerate() {
+        p.text(rect.center_top() + vec2(0.0, 40.0 + 13.0 * i as f32), Align2::CENTER_CENTER, line, font.clone(), text);
+    }
+    if ribbon::editing_tools() {
+        return edit_tool(ui, r, rect, name);
+    }
     r.on_hover_text(tip)
 }
 
 /// A small ribbon button: an icon alone, as in Revit's Modify panel; its name in its tooltip.
-fn small_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+pub(crate) fn small_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+    if ribbon::left_out(label) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
+    let name = label;
+    if ribbon::listing() {
+        return list_row(ui, icon, label, active, tip);
+    }
+    if let Some(r) = ribbon::handed_over(ui) {
+        return r;
+    }
     let (label, tip) = (t(label), t(tip));
     let (rect, r) = ui.allocate_exact_size(vec2(30.0, 25.0), Sense::click());
     let enabled = ui.is_enabled();
     r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, label));
     let (fill, stroke, ink) = match (active, r.hovered() && enabled) {
-        (true, _) => (pal().select_fill, Stroke::new(1.0, pal().accent), pal().accent),
+        (true, _) => (pal().select_fill, Stroke::new(1.0, pal().accent), pal().accent_ink),
         (false, true) => (pal().hover_fill, Stroke::new(1.0, pal().hover), pal().icon),
         (false, false) => (Color32::TRANSPARENT, Stroke::NONE, if enabled { pal().icon } else { pal().icon.gamma_multiply(0.35) }),
     };
-    let stroke = if r.has_focus() { Stroke::new(2.0, pal().accent) } else { stroke };
-    ui.painter().rect(rect, 4.0, fill, stroke, StrokeKind::Inside);
+    let stroke = if r.has_focus() { style::focus_ring() } else { stroke };
+    ui.painter().rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
     icons::paint(ui.painter(), icon, Rect::from_center_size(rect.center(), vec2(19.0, 19.0)), ink);
+    if ribbon::editing_tools() {
+        return edit_tool(ui, r, rect, name);
+    }
+    r.on_hover_text(tip)
+}
+
+/// A ribbon button in its panel's list: a row of its icon and its name.
+fn list_row(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+    list_row_in(ui, icon, label, active, tip, true, None)
+}
+
+/// [`list_row`], its icon and name in `own` where it has an ink of its own ([`inked_button`]).
+fn list_row_in(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str, translate: bool, own: Option<Color32>) -> Response {
+    if ribbon::left_out(label) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
+    let name = label;
+    let (label, tip) = if translate { (t(label).to_string(), t(tip)) } else { (label.to_string(), t(tip)) };
+    // A panel's list is at least a menu wide; the Tools palette's rows are as wide as its column.
+    let width = if ribbon::in_palette() { ui.available_width() } else { ui.available_width().max(200.0) };
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+    let enabled = ui.is_enabled();
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, &label));
+    let fill = match (active, r.hovered() && enabled) {
+        (true, _) => pal().select_fill,
+        (false, true) => pal().hover_fill,
+        (false, false) => Color32::TRANSPARENT,
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 6.0, fill);
+    if r.has_focus() {
+        p.rect_stroke(rect, 6.0, style::focus_ring(), StrokeKind::Inside);
+    }
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.4) };
+    let ink = own.unwrap_or(if active { pal().accent_ink } else { pal().icon });
+    icons::paint(p, icon, Rect::from_center_size(rect.left_center() + vec2(18.0, 0.0), vec2(20.0, 20.0)), dim(ink));
+    let text = own.unwrap_or(if active { pal().accent_ink } else { pal().text });
+    p.text(rect.left_center() + vec2(38.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.0), dim(text));
+    if ribbon::editing_tools() {
+        return edit_tool(ui, r, rect, name);
+    }
+    r.on_hover_text(tip)
+}
+
+/// In Edit Tools a tool's button or row is a box to tick, what the ribbon or the Tools palette shows: a click ticks or clears it and
+/// takes no tool. `name` is its English name, which the settings file keeps.
+fn edit_tool(ui: &Ui, r: Response, rect: Rect, name: &str) -> Response {
+    let shown = !ribbon::tool_hidden(name);
+    let label = t(name);
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, shown, label));
+    let p = ui.painter();
+    if !shown {
+        p.rect_filled(rect, 6.0, pal().panel.gamma_multiply(0.7));
+    }
+    let tick = Rect::from_min_size(pos2(rect.right() - 15.0, rect.top() + 3.0), vec2(12.0, 12.0));
+    p.rect(tick, 2.0, if shown { pal().accent } else { pal().surface }, Stroke::new(1.0, pal().accent_ink), StrokeKind::Inside);
+    if shown {
+        let ends = vec![tick.left_center() + vec2(2.5, 0.0), tick.center_bottom() - vec2(1.0, 3.0), tick.right_top() + vec2(-2.5, 3.0)];
+        p.line(ends, Stroke::new(1.5, Color32::WHITE));
+    }
+    if r.clicked() {
+        ribbon::toggle(name);
+    }
+    ui.interact(rect, r.id.with("edit-tool"), Sense::hover()).on_hover_text(label)
+}
+
+/// Buttons stacked three high in a panel, as Revit's Settings panel stacks them; in the panel's list they are rows like any other.
+pub(crate) fn stacked(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        if !ribbon::listing() {
+            ui.spacing_mut().item_spacing.y = 2.0;
+        }
+        add(ui);
+    });
+}
+
+/// A button stacked three high in a panel (see [`stacked`]): its icon and its name in a row.
+pub(crate) fn stacked_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+    if ribbon::left_out(label) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
+    let name = label;
+    if ribbon::listing() {
+        return list_row(ui, icon, label, active, tip);
+    }
+    if let Some(r) = ribbon::handed_over(ui) {
+        return r;
+    }
+    let (label, tip) = (t(label), t(tip));
+    let font = FontId::proportional(12.0);
+    let width = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal().text).size().x + 28.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click());
+    let enabled = ui.is_enabled();
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, label));
+    let fill = match (active, r.hovered() && enabled) {
+        (true, _) => pal().select_fill,
+        (false, true) => pal().hover_fill,
+        (false, false) => Color32::TRANSPARENT,
+    };
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.4) };
+    let (ink, text) = if active { (pal().accent_ink, pal().accent_ink) } else { (pal().icon, pal().text) };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    if r.has_focus() {
+        ui.painter().rect_stroke(rect, 3.0, style::focus_ring(), StrokeKind::Inside);
+    }
+    icons::paint(ui.painter(), icon, Rect::from_center_size(rect.left_center() + vec2(10.0, 0.0), vec2(14.0, 14.0)), dim(ink));
+    ui.painter().text(rect.left_center() + vec2(22.0, 0.0), Align2::LEFT_CENTER, label, font, dim(text));
+    if ribbon::editing_tools() {
+        return edit_tool(ui, r, rect, name);
+    }
     r.on_hover_text(tip)
 }
 
 /// A small icon button, named for screen readers and tests.
 fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     let label = t(label);
-    let (rect, r) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
+    let (ink, hover) = style::icon_inks();
     if r.hovered() {
-        ui.painter().rect_filled(rect, 4.0, pal().hover_fill);
+        ui.painter().rect_filled(rect, 6.0, hover);
     }
     if r.has_focus() {
-        ui.painter().rect_stroke(rect, 4.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, 6.0, style::focus_ring(), StrokeKind::Inside);
     }
-    icons::paint(ui.painter(), icon, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), pal().icon);
+    icons::paint(ui.painter(), icon, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), ink);
     r.on_hover_text(label)
+}
+
+/// The app bar's AI button: lit while it is `on`, a checkbox to a screen reader, what a click turns on or off.
+fn toggle_button(ui: &mut Ui, icon: Icon, label: &str, on: bool, tip: &str) -> Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
+    let (ink, hover) = style::icon_inks();
+    if on {
+        ui.painter().rect_filled(rect, 6.0, pal().accent);
+    } else if r.hovered() {
+        ui.painter().rect_filled(rect, 6.0, hover);
+    }
+    if r.has_focus() {
+        ui.painter().rect_stroke(rect, 6.0, style::focus_ring(), StrokeKind::Inside);
+    }
+    icons::paint(ui.painter(), icon, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), if on { Color32::WHITE } else { ink });
+    r.on_hover_text(tip)
 }
 
 /// An undo step as Undo's list names it: what it made (Create Walls) or took away (Delete Door), or else its command.
 fn step_name(st: &engine::Step) -> String {
-    let one = |list: &[(&str, usize)]| match list {
-        [(c, n)] => Some(lang::category(c, *n > 1)),
+    named(&st.label, &st.made, &st.removed)
+}
+
+/// A step named by its label and what it made and took away: Create Walls, Delete Door, or its command.
+fn named<C: AsRef<str>>(label: &str, made: &[(C, usize)], removed: &[(C, usize)]) -> String {
+    let one = |list: &[(C, usize)]| match list {
+        [(c, n)] => Some(lang::category(c.as_ref(), *n > 1)),
         _ => None,
     };
-    let named = match (st.made.as_slice(), st.removed.as_slice()) {
+    if let Some(asked) = assistant::step_label(label) {
+        return asked;
+    }
+    let named = match (made, removed) {
         (made, []) if !made.is_empty() => one(made).map(|c| tf("Create {}", &[&c])),
         ([], removed) if !removed.is_empty() => one(removed).map(|c| tf("Delete {}", &[&c])),
         _ => None,
     };
-    named.unwrap_or_else(|| t(st.label).to_string())
+    named.unwrap_or_else(|| t(label).to_string())
 }
 
 /// A tab, of the ribbon or of a view. Contextual tabs are green, as Revit's are.
 fn tab_button(ui: &mut Ui, label: &str, active: bool, contextual: bool) -> Response {
-    tab_button_with(ui, label, active, contextual, Sense::click(), 0.0)
+    tab_button_with(ui, label, active, contextual, Sense::click(), (0.0, 0.0))
 }
 
 /// A tab that senses what `sense` says (a view's drags too), `room` px wider on its right for what's drawn in it (a view's ×).
-fn tab_button_with(ui: &mut Ui, label: &str, active: bool, contextual: bool, sense: Sense, room: f32) -> Response {
+/// `room`: points kept clear left of the label (an icon's) and right of it (a close button's).
+fn tab_button_with(ui: &mut Ui, label: &str, active: bool, contextual: bool, sense: Sense, (lead, room): (f32, f32)) -> Response {
     let label = t(label);
-    let font = FontId::proportional(13.0);
+    let font = if active { style::semibold(13.0) } else { FontId::proportional(13.0) };
     let size = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal().text).size();
-    let (rect, r) = ui.allocate_exact_size(size + vec2(24.0 + room, 10.0), sense);
+    let (rect, r) = ui.allocate_exact_size(vec2(size.x + 24.0 + lead + room, 24.0), sense);
     r.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, active, label));
-    let (fill, ink) = match (contextual, active, r.hovered()) {
-        (true, true, _) => (pal().surface, pal().context),
-        (true, false, _) => (pal().context_fill, pal().context),
-        (false, true, _) => (pal().surface, pal().text),
-        (false, false, true) => (pal().hover_fill, pal().text),
-        (false, false, false) => (Color32::TRANSPARENT, pal().muted),
+    // A pill: the open tab in the accent's soft tint, a contextual one solid green when open and tinted green when not.
+    let (fill, stroke, ink) = match (contextual, active, r.hovered()) {
+        (true, true, _) => (pal().context, Stroke::NONE, pal().on_context),
+        (true, false, _) => (pal().context_fill, Stroke::new(1.0, pal().context.gamma_multiply(0.5)), pal().context),
+        (false, true, _) => (pal().select_fill, Stroke::NONE, pal().accent_ink),
+        (false, false, true) => (pal().hover_fill, Stroke::NONE, pal().text),
+        (false, false, false) => (Color32::TRANSPARENT, Stroke::NONE, pal().text),
     };
     let p = ui.painter();
-    let radius = CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 };
-    p.rect(rect, radius, fill, if active { Stroke::new(1.0, pal().border) } else { Stroke::NONE }, StrokeKind::Inside);
-    if contextual {
-        p.line_segment([rect.left_top() + vec2(2.0, 1.0), rect.right_top() + vec2(-2.0, 1.0)], Stroke::new(3.0, pal().context));
-    }
+    let radius = CornerRadius::same(6);
+    p.rect(rect, radius, fill, stroke, StrokeKind::Inside);
     if r.has_focus() {
-        p.rect_stroke(rect, radius, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        p.rect_stroke(rect, radius, style::focus_ring(), StrokeKind::Inside);
     }
-    p.text(rect.center() - vec2(room / 2.0, 0.0), Align2::CENTER_CENTER, label, font, ink);
+    p.text(rect.center() + vec2((lead - room) / 2.0, 0.0), Align2::CENTER_CENTER, label, font, ink);
     r
 }
 
-/// The rule under a row of tabs, from `x` at `y`, but for the open tab, which moulds out of what it opens below: its sides run
-/// down into it and nothing parts them.
-fn rule_under_tabs(p: &egui::Painter, x: egui::Rangef, y: f32, open: Option<Rect>) {
-    let stroke = Stroke::new(1.0, pal().border);
-    let Some(tab) = open else {
-        p.hline(x, y, stroke);
-        return;
-    };
-    p.hline(x.min..=tab.left(), y, stroke);
-    p.hline(tab.right()..=x.max, y, stroke);
-    let top = tab.bottom() - 2.0;
-    p.rect_filled(Rect::from_x_y_ranges(tab.left() + 1.0..=tab.right() - 1.0, top..=y + 1.0), 0.0, pal().surface);
-    for side in [tab.left() + 0.5, tab.right() - 0.5] {
-        p.vline(side, top..=y, stroke);
-    }
-}
+/// How tall a card floating over a view is (its tabs, its view control bar), points.
+const FLOATING_CARD: f32 = 30.0;
 
-/// A ribbon panel: its buttons over its name, as Revit groups tools.
-fn panel(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    let title = t(title);
-    ui.vertical(|ui| {
-        let row = ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            add(ui);
-        });
-        let font = FontId::proportional(11.0);
-        let width = ui.painter().layout_no_wrap(title.to_string(), font.clone(), pal().muted).size().x + 16.0;
-        let (r, _) = ui.allocate_exact_size(vec2(row.response.rect.width().max(width), 16.0), Sense::hover());
-        ui.painter().rect_filled(r, 2.0, pal().bar);
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, title, font, pal().muted);
-    });
-    ui.separator();
+/// The ribbon's tabs, in order, with the icon the Tools palette's rail gives each (the contextual tab comes after them).
+const TABS: [(Tab, &str, Icon); 13] = [
+    (Tab::Architecture, msg!("Architecture"), Icon::Wall),
+    (Tab::Structure, msg!("Structure"), Icon::Beam),
+    (Tab::Plumbing, msg!("Plumbing"), Icon::Pipe),
+    (Tab::Electrical, msg!("Electrical"), Icon::Luminaire),
+    (Tab::Lightning, msg!("Lightning Protection"), Icon::DownConductor),
+    (Tab::Data, msg!("Data"), Icon::DataOutlet),
+    (Tab::Insert, msg!("Insert"), Icon::ImportCad),
+    (Tab::Annotate, msg!("Annotate"), Icon::Dimension),
+    (Tab::Massing, msg!("Massing"), Icon::Mass),
+    (Tab::Collaborate, msg!("Collaborate"), Icon::Cowork),
+    (Tab::View, msg!("View"), Icon::View3D),
+    (Tab::Manage, msg!("Manage"), Icon::Settings),
+    (Tab::Modify, "Modify", Icon::Modify),
+];
+
+/// A tab on the Tools palette's rail: its icon, lit while it is open; its name for screen readers and in its tooltip.
+fn rail_button(ui: &mut Ui, icon: Icon, label: &str, open: bool) -> Response {
+    let label = t(label);
+    let (rect, r) = ui.allocate_exact_size(vec2(32.0, 30.0), Sense::click());
+    r.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, open, label));
+    let (fill, ink) = match (open, r.hovered()) {
+        (true, _) => (pal().select_fill, pal().accent_ink),
+        (false, true) => (pal().hover_fill, pal().icon),
+        (false, false) => (Color32::TRANSPARENT, pal().icon),
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 6.0, fill);
+    if r.has_focus() {
+        p.rect_stroke(rect, 6.0, style::focus_ring(), StrokeKind::Inside);
+    }
+    icons::paint(p, icon, Rect::from_center_size(rect.center(), vec2(19.0, 19.0)), ink);
+    r.on_hover_text(label)
 }
 
 impl BimApp {
@@ -772,9 +1456,12 @@ impl BimApp {
         let units = session.model.units;
         BimApp {
             saved: Arc::clone(&session.model),
+            project: session.model.uid,
             autosave: autosave::State::default(),
             session,
             os_events: None,
+            own_title_bar: false,
+            system_title_bar: false,
             sheet: first,
             tool: Tool::Modify,
             selection: Vec::new(),
@@ -787,18 +1474,42 @@ impl BimApp {
             dragging: None,
             drop_headers: Vec::new(),
             tab_bar: Rect::NOTHING,
+            tabs_foot: f32::NEG_INFINITY,
             tab_rects: Vec::new(),
             work: Rect::ZERO,
             pointer: Pos2::ZERO,
             grab: egui::Vec2::ZERO,
             ribbon_min: false,
+            compact: false,
+            profile: style::Profile::default(),
+            scheme: style::Scheme::default(),
+            accent: None,
+            panel_colour: None,
+            canvas_colour: None,
+            text_colour: None,
+            palette_filter: None,
+            palette_json: RefCell::new(None),
             ribbon_peek: false,
+            scan_contrast: footer::HIGH_CONTRAST,
+            background_grid_dialog: None,
+            grid_snapping: false,
+            cut_fills_3d: true,
+            show_origin: true,
+            show_view_name: true,
             ribbon_bottom: Pos2::ZERO,
             settings_page: None,
+            find: None,
+            scale: presets::Scale::default(),
+            tools_hidden: BTreeSet::new(),
+            editing_tools: false,
+            presets: Vec::new(),
+            preset_name: String::new(),
+            preset_note: None,
             settings_path: None,
             settings_kept: None,
             window: window::Tracker::default(),
             theme_wanted: None,
+            light_canvas: false,
             tab: Tab::Architecture,
             back: Tab::Architecture,
             types: BTreeMap::new(),
@@ -831,12 +1542,23 @@ impl BimApp {
             spiral_radius: String::new(),
             ceiling_height: units.length(CEILING_HEIGHT),
             floor_slope: "5".into(),
+            shape_z: String::new(),
+            shape_base: crate::shape::Base::default(),
+            shape_along: true,
+            shape_offset: "0".into(),
+            shape_grip: None,
+            shape_preview: None,
+            shape_label_edit: None,
+            shape_picked: Vec::new(),
+            shape_label_rects: Vec::new(),
             shaft_top: None,
             shaft_height: units.length(3000.0),
             mass_top: None,
             mass_height: units.length(3000.0),
+            camera_eye_height: units.length(1600.0),
+            camera_target_height: units.length(1200.0),
+            camera_lens: "35".into(),
             chain: true,
-            wall_arc: false,
             wall_location: Location::Centre,
             attach_base: false,
             thin: false,
@@ -850,65 +1572,136 @@ impl BimApp {
             tag_leader: false,
             tag_label: String::new(),
             note_text: String::new(),
+            note_leader: false,
+            note_arrow: None,
+            note_edit: None,
+            text_type_dialog: None,
+            dimension_type_dialog: None,
+            spot_type_dialog: None,
+            spot_grip: None,
+            dimension_text_dialog: None,
+            line_style: String::new(),
+            linework_style: String::new(),
+            group_type: String::new(),
+            repeat_spacing: "200".into(),
+            line_chain: true,
+            drawing: draw::Drawing::default(),
             units,
             lang: Lang::English,
-            font_finder: lang::chinese_font,
+            font_finder: lang::cjk_fonts,
             typed_length: String::new(),
             dim_edit: None,
+            over_dimension_control: false,
+            dim_edit_escaped: false,
+            dimension_refs_edit: None,
+            dimension_segment: None,
+            dimension_segment_hover: None,
+            dimension_reference_hover: None,
             temporary: HashMap::new(),
             shadow: None,
+            linked_3d: None,
             seen: None,
             link_dialog: false,
-            cad_dialog: false,
+            underlay_dialog: false,
+            cloud_dialog: false,
+            cloud_box: None,
+            cad_dialog: None,
+            cad_box: None,
+            link_box: None,
             tab_cycle: false,
             held: Vec::new(),
             show_shortcuts: false,
+            custom_shortcuts: BTreeMap::new(),
+            shortcuts_dialog: shortcuts::ShortcutsDialog::default(),
             angle_edit: None,
             snaps: Snaps::default(),
             show_snaps: false,
             snap_once: None,
             measured: None,
             open_units: false,
+            options_rect: Rect::NOTHING,
             canvas: canvas::Canvas::default(),
             orbit: orbit::Orbit::default(),
+            active_3d: None,
             card: gpu::Card::default(),
             cut: section::Cut::default(),
+            minimap: minimap::Minimap::default(),
             paper: paper::Papers::default(),
             edit: None,
             new_level: (String::new(), String::new()),
             typed: String::new(),
+            typed_at: 0.0,
             pending: None,
+            deleting_rooms: None,
             type_dialog: None,
             materials_dialog: None,
             family_dialog: None,
             favorites_dialog: None,
-            family_editor: None,
+            families: Vec::new(),
+            next_doc: 1,
+            doc_closing: None,
+            after_documents: None,
+            new_family_dialog: None,
+            family_from_home: false,
+            family_loading: None,
+            family_decided: None,
             favorites_path: None,
             recent: recent::Recent::default(),
             recent_path: None,
             home: start::Home::default(),
             paint_material: String::new(),
-            parameters_dialog: None,
+            parameter_manager: None,
             schedule_dialog: None,
             vg_dialog: None,
             filters_dialog: None,
             templates_dialog: None,
             phasing_dialog: None,
+            display_dialog: None,
+            project_info_dialog: None,
+            reinforce_dialog: None,
+            reinforce_kept: BTreeMap::new(),
+            panel_slot: None,
             line_weights_dialog: None,
             object_styles_dialog: None,
+            line_styles_dialog: None,
+            title_blocks_dialog: None,
+            fill_patterns_dialog: None,
+            sketch: None,
+            mode_width: 0.0,
+            standards_dialog: None,
+            plugins: bimcraft_plugin::Plugins::empty(),
+            plugin_tabs: Vec::new(),
+            plugins_dialog: false,
+            plugin_report: None,
+            plugin_pick: None,
+            plugins_job: None,
+            electrical_dialog: None,
+            coordinates_dialog: None,
+            survey_moves: bimcraft_core::coordinates::Move::Point,
             options_dialog: None,
             price_dialog: None,
             purge_dialog: None,
             trace_dialog: None,
             cad_scale: None,
             select_by_id: None,
+            run_script: None,
+            work_plane: None,
+            show_work_plane: false,
             ids_of_selection: None,
+            selection_filter: None,
             copied: None,
             active_option: None,
             new_schedule: None,
             component: None,
             component_angle: 0.0,
+            door_flip_hand: false,
+            adaptive_clicks: Vec::new(),
+            adaptive_grip: None,
+            placement_plane: None,
+            place_on_face: false,
+            rotate_after: false,
             collapsed: BTreeSet::new(),
+            collapse_keys: Vec::new(),
             view_rect: Rect::ZERO,
             pane: Rect::ZERO,
             browser_tab: browser::Tab::All,
@@ -917,9 +1710,29 @@ impl BimApp {
             title: String::new(),
             styled: false,
             updates: None,
+            assistant: assistant::State::default(),
+            space_mouse: None,
             revit: None,
             control: None,
+            agents: control::Agents::default(),
+            cowork: None,
+            cowork_prefs: cowork::Prefs::default(),
+            cowork_dialog: None,
+            cowork_seen: cowork::Seen::default(),
+            cowork_ai: cowork::Ai::default(),
+            cowork_quit: None,
             revit_job: None,
+            export_dialog: None,
+            print_sets: None,
+            publisher: None,
+            name_set: None,
+            browser_picked: Vec::new(),
+            browser_anchor: None,
+            browser_fold: None,
+            export_job: None,
+            export_format: None,
+            export_last: Default::default(),
+            spooler: std::sync::Arc::new(export::print::System),
             opens: Vec::new(),
             dialog: None,
             revit_report: None,
@@ -936,14 +1749,30 @@ impl BimApp {
         self.canvas.screen(p)
     }
 
+    /// What comes from outside the window, done once a pass: agents' requests, the Co-Work session's, the assistant's replies.
+    /// `logic` calls it, which runs while the window is minimised too, so a host keeps answering its guests; `show` calls it as
+    /// well, for the tests that drive `show` alone (in the window it finds nothing left by then).
+    pub(crate) fn pump(&mut self, ctx: &Context) {
+        // What agents asked of the project comes before the tidying, which puts right what a command left stale.
+        self.answer_agents(ctx);
+        self.pump_cowork(ctx);
+        // A project put in the session's place under the window (the control port turns an agent's New and Open away, but a
+        // script or an embedder may do them, and joining a Co-Work session puts the host's there) starts it over, as File > New
+        // does: its sketch and dialogs were of the old one, and it gets a recovery copy of its own. (The old one's stays until
+        // that is written: nobody was asked about its changes.)
+        if self.session.model.uid != self.project {
+            self.reopened();
+            self.autosave_document();
+        }
+        // After that check: a reply that came as the project was replaced is not for the new one (`State::project_replaced`).
+        self.poll_assistant(ctx);
+    }
+
     /// Run a command; when it fails, say why.
     fn run(&mut self, id: &str, params: Value) -> Option<Value> {
-        self.made_in();
-        match self.session.execute(id, &params) {
+        match self.exec(id, &params) {
             Ok(v) => {
                 self.status = Status::default();
-                // The core renames and drops the option with its set.
-                self.active_option = self.session.option.clone();
                 Some(v)
             }
             Err(e) => {
@@ -953,60 +1782,136 @@ impl BimApp {
         }
     }
 
+    /// Run a command on the project, in the view's phase and option: the one way the interface changes it, so that a Co-Work
+    /// guest's commands can go to the host (COWORK-PLAN.md). A test reads the sources for any other.
+    pub(crate) fn exec(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        self.made_in();
+        let result = match &mut self.cowork {
+            Some(cowork::Live::Guest(joined)) => joined.exec(&mut self.session, id, params),
+            _ => self.session.execute(id, params),
+        };
+        if let (Err(e), true) = (&result, matches!(id, "undo" | "redo")) {
+            self.light_refused(e);
+        }
+        // The core renames and drops the option with its set.
+        self.active_option = self.session.option.clone();
+        result
+    }
+
+    /// Several commands as one undo step named `label`, all or nothing: what each gave, or the error.
+    pub(crate) fn exec_batch(&mut self, label: &str, commands: &[(&str, Value)]) -> Result<Vec<Value>, String> {
+        self.made_in();
+        let result = match &mut self.cowork {
+            Some(cowork::Live::Guest(joined)) => joined.batch(&mut self.session, label, commands),
+            _ => self.session.transaction(label, |s| commands.iter().map(|(c, p)| s.execute(c, p)).collect()),
+        };
+        self.active_option = self.session.option.clone();
+        result
+    }
+
+    /// A script as one undo step, `Script`: on a guest's window the host runs it.
+    pub(crate) fn exec_script(&mut self, text: &str) -> Result<Vec<Value>, String> {
+        self.made_in();
+        let result = match &mut self.cowork {
+            Some(cowork::Live::Guest(joined)) => joined.script(&mut self.session, text),
+            _ => self.session.script_atomic(text),
+        };
+        self.active_option = self.session.option.clone();
+        result
+    }
+
     /// The contextual tab's name while a tool is on or something is selected.
     fn context(&self) -> Option<String> {
+        if let Some(sk) = &self.sketch {
+            return Some(format!("{} | {}", t("Modify"), t(sk.title())));
+        }
         let place = match self.tool {
             Tool::Modify
             | Tool::Move(_)
             | Tool::Copy(_)
             | Tool::Rotate { .. }
+            | Tool::RotateNorth { .. }
             | Tool::Mirror { .. }
             | Tool::Align(_)
             | Tool::Trim(_)
+            | Tool::TrimTo { .. }
+            | Tool::Vertex { .. }
             | Tool::Split
             | Tool::Offset
             | Tool::Demolish
+            | Tool::Linework
             | Tool::Attach
             | Tool::GableEdge
-            | Tool::SlopeArrow(_) => None,
-            Tool::Wall(_) => Some("Place Wall"),
+            | Tool::SlopeArrow(_)
+            | Tool::ModifySubElements
+            | Tool::AddPoint
+            | Tool::AddSplitLine(_)
+            | Tool::SketchLine(_)
+            | Tool::SketchPick
+            | Tool::PatternCorner(_)
+            | Tool::SpecifyPoint
+            | Tool::ExportRegion(_)
+            | Tool::Acquire => None,
+            Tool::Wall(_) => Some(msg!("Place Wall")),
             Tool::Paint => Some("Paint"),
             Tool::Unpaint => Some("Remove Paint"),
-            Tool::Door => Some("Place Door"),
-            Tool::Window => Some("Place Window"),
-            Tool::Room => Some("Place Room"),
-            Tool::Level => Some("Place Level"),
-            Tool::Grid(_) => Some("Place Grid"),
-            Tool::Dimension(_) | Tool::Angular(_) | Tool::Radial(_) => Some("Place Dimensions"),
-            Tool::Text => Some("Place Text"),
+            Tool::Door => Some(msg!("Place Door")),
+            Tool::Window => Some(msg!("Place Window")),
+            Tool::Room => Some(msg!("Place Room")),
+            Tool::RoomSeparator(_) => Some(msg!("Place Room Separation")),
+            Tool::Level => Some(msg!("Place Level")),
+            Tool::Grid(_) => Some(msg!("Place Grid")),
+            Tool::ReferencePlane(_) => Some(msg!("Place Reference Plane")),
+            Tool::Dimension(..) | Tool::Angular(_) | Tool::Round(..) => Some(msg!("Place Dimensions")),
+            Tool::Text => Some(msg!("Place Text")),
+            Tool::DetailGroup => Some(msg!("Place Detail Group")),
+            Tool::RepeatingDetail(_) => Some(msg!("Place Repeating Detail")),
+            Tool::DetailLine(_) if self.drawing.insulation.is_some() => Some(msg!("Place Insulation")),
+            Tool::DetailLine(_) if self.drawing.cloud.is_some() => Some(msg!("Place Revision Cloud")),
+            Tool::DetailLine(_) => Some(msg!("Place Detail Lines")),
             Tool::Spot => Some("Spot Elevation"),
+            Tool::SpotSlope => Some(msg!("Spot Slope")),
+            Tool::SpotCoordinate(_) => Some("Spot Coordinate"),
             Tool::Measure(_) => Some("Measure"),
             Tool::Tag => Some("Tag"),
             Tool::Section(_) => Some("Section"),
             Tool::Elevation => Some("Elevation"),
-            Tool::Column => Some("Place Column"),
+            Tool::Camera(_) => Some("Camera"),
+            Tool::Column => Some(msg!("Place Column")),
             Tool::Run(..) | Tool::Stand(_) => structure::title(&self.tool),
-            Tool::Component => Some("Place Component"),
+            Tool::Component => Some(msg!("Place Component")),
             Tool::Fixture(key) => mep::fixture(key).map(|f| f.title),
-            Tool::Stair(_) => Some("Create Stair"),
-            Tool::Ramp(_) => Some("Create Ramp"),
-            Tool::Railing(_) => Some("Create Railing Path"),
-            Tool::Roof => Some("Create Roof Footprint"),
-            Tool::ExtrusionRoof(_) => Some("Create Extrusion Roof"),
+            Tool::Stair(_) => Some(msg!("Create Stair")),
+            Tool::Ramp(_) => Some(msg!("Create Ramp")),
+            Tool::Railing(_) => Some(msg!("Create Railing Path")),
+            Tool::Roof => Some(msg!("Create Roof Footprint")),
+            Tool::ExtrusionRoof(_) => Some(msg!("Create Extrusion Roof")),
             Tool::Dormer => Some("Dormer"),
-            Tool::Floor => Some("Create Floor"),
-            Tool::Ceiling => Some("Place Ceiling"),
-            Tool::Shaft(_) => Some("Create Shaft Opening"),
-            Tool::Mass(_) => Some("Create Mass"),
+            Tool::Floor => Some(msg!("Create Floor")),
+            Tool::Ceiling => Some(msg!("Place Ceiling")),
+            Tool::Shaft(_) => Some(msg!("Create Shaft Opening")),
+            Tool::Mass(_) => Some(msg!("Create Mass")),
         };
         if let Some(what) = place {
             return Some(format!("{} | {}", t("Modify"), t(what)));
         }
         let m = &self.session.model;
-        let categories: BTreeSet<&str> = self.selection.iter().filter_map(|id| m.elements.get(id)).map(|e| e.category()).collect();
+        // A component goes by its family's category, as Revit's Modify | Furniture.
+        let categories: BTreeSet<String> = self
+            .selection
+            .iter()
+            .filter_map(|id| m.elements.get(id))
+            .map(|e| {
+                match e {
+                    Element::Component(c) => m.families.get(&c.family).map(|f| editor::category_label(f.category)),
+                    _ => None,
+                }
+                .unwrap_or_else(|| lang::category(e.category(), true))
+            })
+            .collect();
         match categories.len() {
             0 => None,
-            1 => categories.first().map(|c| format!("{} | {}", t("Modify"), lang::category(c, true))),
+            1 => categories.first().map(|c| format!("{} | {}", t("Modify"), c)),
             _ => Some(format!("{} | {}", t("Modify"), t("Multi-Select"))),
         }
     }
@@ -1022,7 +1927,9 @@ impl BimApp {
     fn view_name(&self, sheet: Sheet) -> String {
         match sheet {
             Sheet::Plan(key) | Sheet::Ceiling(key) => self.session.model.view_name(key).map_or_else(|| "Floor Plan".into(), String::from),
-            Sheet::View3D => "{3D}".into(),
+            Sheet::View3D => {
+                self.active_3d().and_then(|id| self.session.model.view_name(id).map(String::from)).unwrap_or_else(|| "{3D}".into())
+            }
             Sheet::Section(id) => self.session.model.section(id).map_or_else(|| "Section".into(), |v| v.name.clone()),
             Sheet::Paper(id) => self.session.model.sheet(id).map_or_else(|| "Sheet".into(), |s| format!("{} - {}", s.number, s.name)),
             Sheet::Schedule(cat) => match schedule::standard(&self.session.model, cat) {
@@ -1031,8 +1938,10 @@ impl BimApp {
             },
             Sheet::Table(id) => match self.session.model.elements.get(id) {
                 Some(Element::Schedule(sc)) => sc.name.clone(),
+                Some(Element::PanelSchedule(ps)) => ps.name.clone(),
                 _ => "Schedule".into(),
             },
+            Sheet::Family(..) => self.family_tab_name(sheet),
         }
     }
 
@@ -1045,7 +1954,11 @@ impl BimApp {
             Sheet::Section(id) if matches!(self.session.model.elements.get(id), Some(Element::Elevation(_))) => "Elevation",
             Sheet::Section(_) => "Section",
             Sheet::Paper(_) => "Sheet",
+            Sheet::Table(id) if matches!(self.session.model.elements.get(id), Some(Element::PanelSchedule(_))) => "Panel Schedule",
             Sheet::Schedule(_) | Sheet::Table(_) => "Schedule",
+            Sheet::Family(id, view) => {
+                return self.family_of(id).map(|ed| format!("{} - {}", ed.title(), editor::views::view_title(view))).unwrap_or_default();
+            }
         };
         format!("{}: {}", t(kind), self.view_name(sheet))
     }
@@ -1064,67 +1977,154 @@ impl BimApp {
         if let Some(theme) = self.theme_wanted.take() {
             ctx.set_theme(theme);
         }
-        style::follow(&ctx);
-        // Chinese needs a font with its glyphs, which the system may not have: then the window stays in English and says why.
-        if self.lang == Lang::Chinese && !lang::use_chinese_font(&ctx, self.font_finder) {
+        let look = style::Look {
+            light_canvas: self.light_canvas,
+            compact: self.compact,
+            profile: self.profile,
+            scheme: self.scheme,
+            accent: self.accent,
+            panel_colour: self.panel_colour,
+            canvas_colour: self.canvas_colour,
+            text_colour: self.text_colour,
+        };
+        style::follow(&ctx, look);
+        ribbon::tool_rules(self.tools_hidden.clone(), self.scale, self.editing_tools);
+        // The fonts with the hanzi and the Hangul go behind the window's own whatever language it speaks: content — a floor's
+        // name from a Korean file — is not the interface's. Chinese needs its glyphs, which the system may not have: then the
+        // window stays in English and says why.
+        let hanzi = lang::use_cjk_font(&ctx, self.font_finder);
+        if self.lang.is_chinese() && !hanzi {
             self.lang = Lang::English;
             self.status = updates::failed(t(lang::NO_CHINESE_FONT).to_string());
         }
         lang::set(self.lang);
-        // What agents asked of the project comes before the tidying, which puts right what a command left stale.
-        self.answer_agents(&ctx);
+        self.pump(&ctx);
         self.tidy();
         self.poll_updates(&ctx);
         self.poll_revit(&ctx);
+        self.poll_export(&ctx);
+        self.poll_plugins(&ctx);
         self.poll_autosave(&ctx);
         self.keys(&ctx);
+        self.family_keys(&ctx);
         self.os_requests(&ctx);
         self.dialog_answered();
         self.watch_window(&ctx);
         let view = self.view_title(self.sheet);
-        let title = format!("{}{} · {view} · BIMCraft", self.session.model.name, if self.dirty() { "*" } else { "" });
+        let title = match self.family_title() {
+            Some(family) => format!("{family} · BIMCraft"),
+            None => {
+                format!("{}{} · {view} · {}BIMCraft", self.session.model.name, if self.dirty() { "*" } else { "" }, self.cowork_title())
+            }
+        };
         if title != self.title {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.title = title;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && (self.installing() || self.dirty()) {
+        let documents = self.families.iter().any(|d| d.ed.as_ref().is_some_and(editor::FamilyEditor::unsaved));
+        // A host whose guests are in is asked first: closing ends the session for them.
+        let others_in = matches!(&self.cowork, Some(cowork::Live::Host(h)) if !h.people().is_empty());
+        let held = others_in && self.cowork_quit != Some(true);
+        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && held {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            // An update being put in place holds the window: it closes it when it's in.
+            self.cowork_quit = Some(false);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && !held && (self.installing() || self.dirty() || documents) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            // An update being put in place holds the window: it closes it when it's in. The family documents are asked about
+            // first.
             if !self.installing() {
-                self.pending = Some(Pending::Close);
+                if documents {
+                    self.pending_after_documents(Pending::Close);
+                } else {
+                    self.pending = Some(Pending::Close);
+                }
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.dirty() && !self.installing() {
+        if ctx.input(|i| i.viewport().close_requested()) && !held && !self.dirty() && !self.installing() && !documents {
             self.retire_autosave();
         }
         if self.home.shown {
+            if self.own_bar() {
+                self.start_title_bar(ui);
+            }
             self.start_page(ui);
             self.drag_and_drop(&ctx);
             self.warning(&ctx);
             self.dialogs(&ctx);
+            self.find_window(&ctx);
             self.keep_settings(&ctx);
+            if self.own_bar() {
+                titlebar::frame(ui);
+            }
             return;
         }
-        let bar = Frame::new().fill(pal().bar).inner_margin(vec2(8.0, 4.0)).stroke(Stroke::new(1.0, pal().border));
-        Panel::top("quick-access").frame(bar).show(ui, |ui| self.quick_access(ui, &view));
-        Panel::top("ribbon").frame(Frame::new().fill(pal().surface)).show(ui, |ui| self.ribbon(ui));
-        Panel::top("options").frame(bar).show(ui, |ui| self.options(ui));
-        if self.has_update_banner() {
-            Panel::top("update").frame(Frame::NONE).show(ui, |ui| self.update_banner(ui));
+        // The view's ground under the cards: what shows in the gaps round them is the view going on beneath.
+        ui.painter().rect_filled(ui.max_rect(), 0.0, self.backdrop());
+        let app_bar = Frame::new().fill(pal().app_bar).inner_margin(Margin::symmetric(8, 5));
+        Panel::top("quick-access").frame(app_bar).show_separator_line(false).show(ui, |ui| {
+            // Where the window draws its own title bar, this is it: its ground moves the window, its corner closes it.
+            let bar = ui.max_rect().expand2(vec2(8.0, 5.0));
+            let own = self.own_bar();
+            if own {
+                titlebar::drag_area(ui, bar);
+            }
+            style::on_app_bar(|| self.quick_access(ui, &view));
+            if own {
+                titlebar::caption_buttons(ui, bar);
+            }
+        });
+        // The ribbon is Rev's: BIMCraft's tools are a palette (`Palette::Tools`), which Rev never shows. A family document (an
+        // adaptive family open) has a ribbon, palettes and a view of its own, as Revit's family editor, in either profile.
+        let family = self.family_doc();
+        if style::rev() {
+            self.docking.show(dock::Palette::Tools, false);
         }
-        Panel::bottom("status").frame(bar).show(ui, |ui| self.status_bar(ui));
+        if style::rev() || family {
+            let card = style::card([true, true, true, false]);
+            Panel::top("ribbon")
+                .frame(card)
+                .show_separator_line(false)
+                .show(ui, |ui| if family { self.family_ribbon(ui) } else { self.ribbon(ui) });
+        }
+        if self.has_update_banner() {
+            Panel::top("update").frame(Frame::NONE).show_separator_line(false).show(ui, |ui| self.update_banner(ui));
+        }
+        let status = style::card([true, true, false, true]).inner_margin(Margin::symmetric(10, 2));
+        Panel::bottom("status").frame(status).show_separator_line(false).show(ui, |ui| self.status_bar(ui));
         self.docks(ui);
         CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-            Panel::top("view-tabs")
-                .frame(Frame::new().fill(pal().bar).inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 0 }))
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    self.view_tabs(ui);
-                });
+            if family {
+                self.family_central(ui);
+                return;
+            }
+            let g = style::gap().max(4);
             let front = self.front;
-            self.view_pane(ui, front);
-            self.work = self.pane;
+            // A schedule's table keeps its rows clear of the tabs.
+            let table = matches!(self.sheet, Sheet::Schedule(_) | Sheet::Table(_));
+            if style::compact() || table {
+                Panel::top("view-tabs")
+                    .frame(Frame::new().inner_margin(Margin { left: g, right: g, top: g, bottom: 4 }))
+                    .show_separator_line(false)
+                    .show(ui, |ui| {
+                        self.view_tabs(ui);
+                    });
+                self.view_pane(ui, front);
+                self.tabs_foot = f32::NEG_INFINITY;
+            } else {
+                // A drawn view fills the pane, and its tabs float over its top left corner on a card of their own: drawn after
+                // it, so they are over it for the hand too.
+                let pane = ui.available_rect_before_wrap();
+                ui.scope_builder(UiBuilder::new().max_rect(pane), |ui| self.view_pane(ui, front));
+                let card = style::card([true, false, true, false]).inner_margin(Margin::same(2));
+                // A child that takes no room of the pane's: over the view, not after it.
+                let mut over = ui.new_child(UiBuilder::new().id_salt("view-tabs").max_rect(pane));
+                self.tabs_foot = card.show(&mut over, |ui| self.view_tabs(ui)).response.rect.bottom();
+            }
+            self.work = self.pane.with_min_y(self.pane.top().max(self.tabs_foot));
         });
+        self.options_bar(&ctx);
+        self.edge_palette(&ctx);
         if self.ribbon_min && self.ribbon_peek {
             self.ribbon_peek(&ctx);
         }
@@ -1133,12 +2133,53 @@ impl BimApp {
         self.drag_and_drop(&ctx);
         self.warning(&ctx);
         self.dialogs(&ctx);
+        self.find_window(&ctx);
+        // What Edit Tools ticked or cleared, on the ribbon or in the Tools palette.
+        for name in ribbon::take_toggled() {
+            if !self.tools_hidden.remove(&name) {
+                self.tools_hidden.insert(name);
+            }
+        }
         self.keep_settings(&ctx);
+        self.track_sketch();
+        if self.own_bar() {
+            titlebar::frame(ui);
+        }
     }
 
-    /// A view under its view control bar, as the active view draws it.
+    /// The start page's title bar, where the window draws its own: the app bar's colour, the app's name, and the caption buttons.
+    fn start_title_bar(&mut self, ui: &mut Ui) {
+        Panel::top("start-title-bar").frame(Frame::new().fill(pal().app_bar)).exact_size(34.0).show_separator_line(false).show(ui, |ui| {
+            let bar = ui.max_rect();
+            titlebar::drag_area(ui, bar);
+            ui.painter().text(
+                bar.left_center() + vec2(14.0, 0.0),
+                Align2::LEFT_CENTER,
+                "BIMCraft",
+                FontId::proportional(12.5),
+                pal().app_bar_muted,
+            );
+            titlebar::caption_buttons(ui, bar);
+        });
+    }
+
+    /// What the active view is drawn on: paper for a drawing, the desk round a sheet, a schedule's ground.
+    fn backdrop(&self) -> Color32 {
+        match self.sheet {
+            Sheet::Paper(_) => pal().desk,
+            Sheet::Schedule(_) | Sheet::Table(_) => pal().surface,
+            _ => canvas::color(render::PAPER),
+        }
+    }
+
+    /// A view and its view control bar, as the active view draws it: the bar floating over its foot, or (Compact) under it.
     fn view_body(&mut self, ui: &mut Ui) {
-        self.view_control_bar(ui);
+        let floating = !style::compact();
+        if !floating {
+            self.view_control_bar(ui);
+        }
+        // What the floating tabs and view control bar take of the view's height: a tab and a bar each, and a gap round each.
+        self.canvas.room = if floating { 2.0 * (FLOATING_CARD + f32::from(style::gap())) } else { 0.0 };
         self.view_rect = ui.available_rect_before_wrap();
         self.pane = self.view_rect;
         // The plan sets the cursor each frame it shows.
@@ -1152,6 +2193,11 @@ impl BimApp {
             Sheet::Section(id) => self.section_view(ui, id),
             Sheet::Paper(id) => self.paper_view(ui, id),
             Sheet::Schedule(_) | Sheet::Table(_) => self.schedule(ui),
+            // A family document's views are its own (`family_central`).
+            Sheet::Family(..) => {}
+        }
+        if floating {
+            self.view_control_bar(ui);
         }
         self.temp_frame(ui);
     }
@@ -1160,6 +2206,13 @@ impl BimApp {
     fn toggle_properties(&mut self) {
         let p = dock::Palette::Properties;
         self.show_palette(p, !self.docking.shown(p));
+    }
+
+    /// Toggle temporary alignment guides (smart snapping) on or off.
+    pub(crate) fn toggle_alignment_guides(&mut self) {
+        self.snaps.alignment_guides = !self.snaps.alignment_guides;
+        let text = if self.snaps.alignment_guides { t("Alignment guides on") } else { t("Alignment guides off") };
+        self.status = Status { text: text.to_string(), error: false };
     }
 
     /// Follow what the last command removed: the selection, views of levels that are gone, and
@@ -1189,14 +2242,17 @@ impl BimApp {
             self.units = to;
         }
         let m = &self.session.model;
-        self.selection.retain(|id| m.elements.contains_key(id));
+        // What's selected is the model's elements, and Site's points (by their library ids).
+        self.selection.retain(|id| m.elements.contains_key(id) || bimcraft_core::coordinates::Point::of(m, *id).is_some());
         self.active_option = self.active_option.take().filter(|o| bimcraft_core::phasing::option_exists(m, o));
+        let docs: Vec<editor::tabs::DocId> = self.families.iter().map(|d| d.id).collect();
         let exists = |s: &Sheet| match s {
+            Sheet::Family(id, _) => docs.contains(id),
             Sheet::Plan(key) | Sheet::Ceiling(key) => m.plan_level(*key).is_some(),
             Sheet::Section(id) => m.section(*id).is_some(),
             Sheet::Paper(id) => m.sheet(*id).is_some(),
             Sheet::View3D | Sheet::Schedule(_) => true,
-            Sheet::Table(id) => matches!(m.elements.get(id), Some(Element::Schedule(_))),
+            Sheet::Table(id) => matches!(m.elements.get(id), Some(Element::Schedule(_) | Element::PanelSchedule(_))),
         };
         self.views.retain(exists);
         self.floating.retain(|f| exists(&f.sheet));
@@ -1223,27 +2279,42 @@ impl BimApp {
         }
     }
 
-    fn keys(&mut self, ctx: &Context) {
-        // A dialog takes the keys while it's open.
-        if self.type_dialog.is_some()
+    /// Whether a dialog, Find or a menu has the keys: the window's shortcuts wait.
+    pub(crate) fn keys_taken(&self, ctx: &Context) -> bool {
+        self.type_dialog.is_some()
+            || self.text_type_dialog.is_some()
+            || self.dimension_type_dialog.is_some()
+            || self.spot_type_dialog.is_some()
+            || self.dimension_text_dialog.is_some()
             || self.materials_dialog.is_some()
             || self.family_dialog.is_some()
             || self.favorites_dialog.is_some()
-            || self.family_editor.is_some()
-            || self.parameters_dialog.is_some()
+            || self.parameter_manager.is_some()
             || self.schedule_dialog.is_some()
             || self.vg_dialog.is_some()
             || self.filters_dialog.is_some()
             || self.templates_dialog.is_some()
             || self.phasing_dialog.is_some()
+            || self.display_dialog.is_some()
+            || self.project_info_dialog.is_some()
+            || self.reinforce_dialog.is_some()
             || self.line_weights_dialog.is_some()
+            || self.electrical_dialog.is_some()
+            || self.coordinates_dialog.as_ref().is_some_and(|d| !d.picking())
             || self.object_styles_dialog.is_some()
+            || self.line_styles_dialog.is_some()
+            || self.fill_patterns_dialog.as_ref().is_some_and(|d| d.picking.is_none())
             || self.options_dialog.is_some()
             || self.price_dialog.is_some()
             || self.purge_dialog.is_some()
             || self.select_by_id.is_some()
+            || self.run_script.is_some()
+            || self.work_plane.as_ref().is_some_and(|d| d.picking.is_none())
             || self.ids_of_selection.is_some()
+            || self.selection_filter.is_some()
             || self.settings_page.is_some()
+            || self.plugins_dialog
+            || self.find.is_some()
             || self.new_schedule.is_some()
             || self.show_shortcuts
             || self.show_snaps
@@ -1252,48 +2323,84 @@ impl BimApp {
             || self.installing()
             || self.importing()
             || self.report_open()
+            || self.export_dialog.as_ref().is_some_and(|d| !d.picking)
             // An open menu takes the keys: Esc closes it, not the tool.
             || egui::Popup::is_any_open(ctx)
-        {
+    }
+
+    fn keys(&mut self, ctx: &Context) {
+        // A note being written takes the keys, but for a field's that has them; another tool finishes it.
+        if self.note_edit.is_some() {
+            if !matches!(self.tool, Tool::Text | Tool::Modify) {
+                self.finish_note();
+            } else if !ctx.egui_wants_keyboard_input() && self.text_type_dialog.is_none() {
+                self.note_keys(ctx);
+                return;
+            }
+        }
+        // A dialog takes the keys while it's open, and a family document's tab has its own (`family_keys`).
+        if self.keys_taken(ctx) || self.active_family().is_some() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
             self.save_as(ctx, None);
-        } else if pressed(Modifiers::COMMAND, Key::S) {
-            self.save(ctx, None);
-        }
-        if pressed(Modifiers::COMMAND, Key::O) {
-            self.guard(Pending::Open, ctx);
-        }
-        if pressed(Modifiers::COMMAND, Key::N) {
-            self.guard(Pending::New, ctx);
         }
         if pressed(Modifiers::COMMAND, Key::Comma) {
             self.settings_page = Some(settings::Page::Interface);
         }
-        // The rest belongs to a text field while one has the keyboard.
+        // A text field has the letters: there Ctrl's own keys that aren't a field's act at once, and no shortcut is typed.
         if ctx.egui_wants_keyboard_input() {
+            for (key, letter) in [(Key::S, 'S'), (Key::O, 'O'), (Key::N, 'N'), (Key::K, 'K'), (Key::P, 'P'), (Key::Num1, '1')] {
+                if pressed(Modifiers::COMMAND, key) {
+                    self.ctrl_key(ctx, letter);
+                }
+            }
+            self.typed.clear();
             return;
         }
-        if pressed(Modifiers::COMMAND, Key::D) {
-            self.toggle_home();
-        }
-        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || pressed(Modifiers::COMMAND, Key::Y) {
+        if self.sketch.is_none() && pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
             self.run("redo", json!({}));
-        } else if pressed(Modifiers::COMMAND, Key::Z) {
-            self.run("undo", json!({}));
         }
-        if pressed(Modifiers::NONE, Key::Escape) {
+        // Shortcuts are two letters typed with Ctrl held; a letter that is a Ctrl key of its own waits for a second.
+        for letter in ctrl_letters(ctx) {
+            self.ctrl_letter(ctx, letter);
+        }
+        self.ctrl_waited(ctx);
+        // Esc while a custom fill pattern is picked brings its dialog back.
+        if pressed(Modifiers::NONE, Key::Escape) && !self.cancel_pattern_pick() {
             self.escape();
         }
-        // Enter places a typed length, else builds the wall chain.
-        if pressed(Modifiers::NONE, Key::Enter)
-            && let Some(level) = self.plan_level()
+        // Enter ends the 3D view's measured chain where it is.
+        if self.sheet == Sheet::View3D
+            && matches!(self.tool, Tool::Measure(_))
+            && self.orbit.chain.len() >= 2
+            && self.orbit.chain_done.is_none()
+            && pressed(Modifiers::NONE, Key::Enter)
         {
-            match (&self.tool, self.typed_length.is_empty()) {
+            self.orbit.chain_done = Some(false);
+        }
+        // Enter confirms Edit Dimension References; else it places a typed length, else builds the wall chain.
+        let mut enter = pressed(Modifiers::NONE, Key::Enter);
+        if enter && self.dimension_refs_edit.is_some() {
+            self.commit_dimension_refs();
+            enter = false;
+        }
+        if enter && let Some(level) = self.plan_level() {
+            match (&self.tool, self.typed_length.is_empty() && self.drawing.other.is_empty()) {
+                (&Tool::Rotate { centre, .. }, false) if let Some(angle) = self.typed_angle() => {
+                    self.typed_length.clear();
+                    self.turn(centre, angle);
+                }
+                (&Tool::RotateNorth { centre, .. }, false) if let Some(angle) = self.typed_angle() => {
+                    self.typed_length.clear();
+                    self.rotate_project_north(Some(angle), Some(centre));
+                }
+                _ if self.picking_pattern_lines() => self.finish_pattern_lines(),
                 (Tool::Railing(_), true) => self.finish_railing(level),
                 (Tool::Mass(_), true) => self.finish_mass(level),
+                (Tool::DetailLine(_), true) => self.finish_detail_line(level),
+                (Tool::SketchLine(_), true) if self.shape().open_ended() => self.finish_open_shape(),
                 (_, true) => self.finish_wall(),
                 (_, false) => self.place_typed(level),
             }
@@ -1303,14 +2410,47 @@ impl BimApp {
         if !self.typed_length.is_empty() && pressed(Modifiers::NONE, Key::Backspace) {
             self.typed_length.pop();
         }
+        // Backspace while a dimension is being picked takes its last reference out.
+        if pressed(Modifiers::NONE, Key::Backspace)
+            && self.typed_length.is_empty()
+            && self.dim_edit.is_none()
+            && self.dimension_refs_edit.is_none()
+            && let Tool::Dimension(_, refs) = &mut self.tool
+        {
+            refs.pop();
+        }
         if pressed(Modifiers::NONE, Key::Delete) {
             self.delete();
+        }
+        // consume_key also matches Alt/Shift and key repeats. Only an unmodified downstroke
+        // changes a door, so holding Space cannot fill the Undo history.
+        let plain_space =
+            |e: &Event| matches!(e, Event::Key { key: Key::Space, pressed: true, repeat: false, modifiers: Modifiers::NONE, .. });
+        if matches!(self.tool, Tool::Door | Tool::Modify) && ctx.input(|i| i.events.iter().any(plain_space)) && self.door_space() {
+            pressed(Modifiers::NONE, Key::Space);
         }
         if self.tool == Tool::Modify && pressed(Modifiers::NONE, Key::Space) {
             self.flip();
         }
+        // Space while rotating: the next click places the centre, as Revit's Space does.
+        if let Tool::Rotate { place, start, .. } | Tool::RotateNorth { place, start, .. } = &mut self.tool
+            && pressed(Modifiers::NONE, Key::Space)
+        {
+            *place = true;
+            *start = None;
+        }
+        // Space steps the Dimension tool's lay: Auto, Aligned, Horizontal, Vertical.
+        if let Tool::Dimension(mode, _) = &mut self.tool
+            && pressed(Modifiers::NONE, Key::Space)
+        {
+            *mode = mode.next();
+        }
         if matches!(self.tool, Tool::Component | Tool::Fixture(_)) && pressed(Modifiers::NONE, Key::Space) {
             self.component_angle = (self.component_angle + 90.0) % 360.0;
+        }
+        // F8 is the one function key for the guides. F11 is free: the system may use it for full screen.
+        if pressed(Modifiers::NONE, Key::F8) {
+            self.toggle_alignment_guides();
         }
         let typed: String = ctx.input(|i| {
             i.events
@@ -1322,37 +2462,91 @@ impl BimApp {
                 .collect()
         });
         // A digit starts a length while a tool is picking its next point, and everything typed
-        // after it (feet, inches, fractions, a unit) is the length's until Enter; letters before
-        // one are shortcuts.
-        let mut shortcut = String::new();
+        // after it (feet, inches, fractions, a unit) is the length's until Enter. Letters typed
+        // without Ctrl are no shortcut.
         for ch in typed.chars() {
-            if self.base().is_some() && (ch.is_ascii_digit() || ch == '.' || !self.typed_length.is_empty()) {
+            let listening = self.base().is_some() || self.filleting() || self.rotating();
+            let sign = ch == '-' && self.rotating() && self.typed_length.is_empty();
+            if listening && (ch.is_ascii_digit() || ch == '.' || sign || !self.typed_length.is_empty()) {
                 self.typed_length.push(ch);
-            } else {
-                shortcut.push(ch);
             }
         }
-        for ch in shortcut.chars().filter(char::is_ascii_alphabetic) {
-            self.typed.push(ch.to_ascii_uppercase());
-            if self.typed.len() > 2 {
-                self.typed.remove(0);
+    }
+
+    /// A letter typed with Ctrl held: with the one before it, a shortcut; if the two aren't one, the first does its own job
+    /// as a Ctrl key ([`BimApp::ctrl_key`]) and the second waits in its place.
+    fn ctrl_letter(&mut self, ctx: &Context, letter: char) {
+        self.typed.push(letter);
+        self.typed_at = ctx.input(|i| i.time);
+        if self.typed.len() < 2 {
+            return;
+        }
+        if self.shortcut() {
+            self.typed.clear();
+            return;
+        }
+        let first = self.typed.remove(0);
+        self.ctrl_key(ctx, first);
+    }
+
+    /// A letter left waiting for a second does its own job once Ctrl is let go, or after [`CTRL_WAIT`] with Ctrl still held.
+    fn ctrl_waited(&mut self, ctx: &Context) {
+        if self.typed.len() != 1 {
+            return;
+        }
+        let (held, now) = ctx.input(|i| (i.modifiers.command, i.time));
+        let left = CTRL_WAIT - (now - self.typed_at);
+        if held && left > 0.0 {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+            return;
+        }
+        let letter = self.typed.remove(0);
+        self.ctrl_key(ctx, letter);
+    }
+
+    /// What a letter typed with Ctrl does on its own: S saves, O opens, N makes a new project, K finds a command, P prints
+    /// to PDF, D shows the start page, Z undoes (a sketch's last line while sketching), Y redoes, 1 shows Properties.
+    fn ctrl_key(&mut self, ctx: &Context, letter: char) {
+        match letter {
+            'S' => self.save(ctx, None),
+            'O' => self.guard(Pending::Open, ctx),
+            'N' => self.guard(Pending::New, ctx),
+            'K' => self.find = Some(String::new()),
+            'P' => self.open_export(Some("pdf")),
+            'D' => self.toggle_home(),
+            // While sketching, Ctrl+Z takes back a line; the model's steps wait until Finish or Cancel.
+            'Z' if self.sketch.is_some() => self.unsketch(),
+            'Z' => {
+                self.run("undo", json!({}));
             }
-            if self.typed.len() == 2 && self.shortcut() {
-                self.typed.clear();
+            'Y' if self.sketch.is_none() => {
+                self.run("redo", json!({}));
             }
+            '1' => self.toggle_properties(),
+            _ => {}
         }
     }
 
     /// Revit's two-letter shortcuts: the desktop's own ([`SHORTCUTS`]), then the commands' aliases
     /// (WA, DR, CR…). Whether `typed` is one.
     fn shortcut(&mut self) -> bool {
+        if let Some(action) = self.custom_shortcuts.get(&self.typed).cloned()
+            && self.execute_shortcut_action(&action)
+        {
+            return true;
+        }
         let tool = match self.typed.as_str() {
+            "3D" => {
+                self.open_3d(None);
+                return true;
+            }
             "MD" => Tool::Modify,
             "MM" => Tool::Mirror { draw: false, start: None },
             "DM" => Tool::Mirror { draw: true, start: None },
             "AL" => Tool::Align(None),
             "OF" => Tool::Offset,
             "DW" => Tool::Demolish,
+            "LW" => Tool::Linework,
             "ZF" | "ZE" | "ZA" => {
                 self.fit();
                 return true;
@@ -1365,12 +2559,28 @@ impl BimApp {
                 self.create_similar();
                 return true;
             }
-            "PP" => {
+            "PP" | "VP" => {
                 self.toggle_properties();
+                return true;
+            }
+            "NP" => {
+                self.toggle_browser();
+                return true;
+            }
+            "AI" => {
+                self.toggle_assistant();
+                return true;
+            }
+            "CW" => {
+                self.open_cowork();
                 return true;
             }
             "SA" => {
                 self.select_all_instances();
+                return true;
+            }
+            "AG" | "OG" => {
+                self.toggle_alignment_guides();
                 return true;
             }
             "KS" => {
@@ -1380,6 +2590,11 @@ impl BimApp {
             // Floor: Structural.
             "SB" => {
                 self.structural_floor();
+                return true;
+            }
+            // Reinforce the element selected.
+            "RF" => {
+                self.open_reinforce();
                 return true;
             }
             "VV" | "VG" => {
@@ -1424,20 +2639,36 @@ impl BimApp {
                 return true;
             }
             "LC" => {
-                self.cad_dialog = true;
+                self.underlay_dialog = true;
                 return true;
             }
             "TW" => {
                 self.open_trace();
                 return true;
             }
+            "LO" => {
+                self.open_location();
+                return true;
+            }
             "DP" => {
                 self.duplicate_plan("duplicate");
                 return true;
             }
-            "EU" => {
+            "BX" => {
+                self.toggle_section_box();
+                return true;
+            }
+            "GD" => {
+                self.open_display();
+                return true;
+            }
+            "TB" => {
+                self.open_title_blocks(None);
+                return true;
+            }
+            "EU" | "UE" => {
                 if self.hidden_selection().0.is_empty() {
-                    self.open_graphics(3);
+                    self.open_graphics(graphics::ELEMENTS_TAB);
                 } else {
                     self.unhide_selection(false);
                 }
@@ -1456,7 +2687,7 @@ impl BimApp {
                 return true;
             }
             "VT" => {
-                self.templates_dialog = Some(graphics::TemplatesDialog::default());
+                self.open_templates();
                 return true;
             }
             "PH" => {
@@ -1468,8 +2699,10 @@ impl BimApp {
                 return true;
             }
             // Revit's snap overrides: for the next point picked, that snap alone, or none.
-            "SE" | "SM" | "SI" | "SC" | "SP" | "SN" | "SO" | "SS" => {
+            "SE" | "SM" | "SI" | "SC" | "SP" | "SQ" | "ST" | "SN" | "SO" | "SS" => {
                 self.snap_once = match self.typed.as_str() {
+                    "SQ" => Some(Once::Only(Snap::Quadrant)),
+                    "ST" => Some(Once::Only(Snap::Tangent)),
                     "SE" => Some(Once::Only(Snap::Endpoint)),
                     "SM" => Some(Once::Only(Snap::Midpoint)),
                     "SI" => Some(Once::Only(Snap::Intersection)),
@@ -1488,16 +2721,39 @@ impl BimApp {
                 Some("door") => Tool::Door,
                 Some("window") => Tool::Window,
                 Some("room") => Tool::Room,
+                Some("room_separator") => Tool::RoomSeparator(None),
                 Some("level") => Tool::Level,
                 Some("grid") => Tool::Grid(None),
+                Some("reference_plane") => Tool::ReferencePlane(None),
                 Some("move") => Tool::Move(None),
                 Some("copy") => Tool::Copy(None),
                 Some("rotate") => Tool::Rotate { centre: P2(0.0, 0.0), start: None, place: false },
                 Some("corner") => Tool::Trim(None),
                 Some("split") => Tool::Split,
-                Some("dimension") => Tool::Dimension(Vec::new()),
+                Some("linework") => Tool::Linework,
+                Some("detail_group") => Tool::DetailGroup,
+                Some("repeating_detail") => Tool::RepeatingDetail(None),
+                Some("create_group") => {
+                    self.create_group();
+                    return true;
+                }
+                Some("ungroup") => {
+                    self.ungroup();
+                    return true;
+                }
+                Some("dimension") => Tool::Dimension(DimMode::Aligned, Vec::new()),
                 Some("text") => Tool::Text,
+                Some("detail_line") => {
+                    (self.drawing.insulation, self.drawing.cloud) = (None, None);
+                    Tool::DetailLine(Vec::new())
+                }
                 Some("spot") => Tool::Spot,
+                Some("spot_coordinate") => Tool::SpotCoordinate(None),
+                Some("rotate_project_north") => Tool::RotateNorth { centre: P2(0.0, 0.0), start: None, place: false },
+                Some("specify_coordinates") => {
+                    self.specify_coordinates_pick();
+                    return true;
+                }
                 Some("tag") => Tool::Tag,
                 // Revit's CL is the structural column on its Structure tab, the architectural one elsewhere.
                 Some("column") if self.tab == Tab::Structure || (self.tab == Tab::Context && self.back == Tab::Structure) => {
@@ -1516,6 +2772,12 @@ impl BimApp {
                     self.show_mass();
                     return true;
                 }
+                Some("filled_region") => {
+                    if let Some(view) = self.plan_key() {
+                        self.start_sketch(sketch::Of::Region { view, masking: false }, Vec::new());
+                    }
+                    return true;
+                }
                 Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face" | "update_by_face")) => {
                     self.by_mass(c);
                     return true;
@@ -1524,8 +2786,33 @@ impl BimApp {
                 Some("section") => Tool::Section(None),
                 Some("measure") => Tool::Measure(None),
                 Some("paint") => Tool::Paint,
+                Some("match_properties") => {
+                    self.match_properties();
+                    return true;
+                }
                 Some("delete") => {
                     self.delete();
+                    return true;
+                }
+                Some("pin") => {
+                    self.set_pinned(true);
+                    return true;
+                }
+                Some("unpin") => {
+                    self.set_pinned(false);
+                    return true;
+                }
+                Some("fillet") => {
+                    self.set_tool(Tool::DetailLine(Vec::new()));
+                    self.set_shape(draw::Target::Detail, draw::Shape::Fillet);
+                    return true;
+                }
+                Some("join_polyline") => {
+                    self.join_polyline();
+                    return true;
+                }
+                Some("explode") => {
+                    self.explode_polyline();
                     return true;
                 }
                 // Revit's opens the Project Units dialog; BIMCraft's is the Manage tab's menu.
@@ -1588,14 +2875,26 @@ impl BimApp {
             Some(Element::Ramp(_)) => Tool::Ramp(Vec::new()),
             Some(Element::Railing(_)) => Tool::Railing(Vec::new()),
             Some(Element::Room(_)) => Tool::Room,
+            Some(Element::RoomSeparator(_)) => Tool::RoomSeparator(None),
             Some(Element::Level(_)) => Tool::Level,
             Some(Element::Grid(_)) => Tool::Grid(None),
+            Some(Element::RefPlane(_)) => Tool::ReferencePlane(None),
             Some(Element::Dimension(d)) => match d.kind {
-                DimKind::Aligned => Tool::Dimension(Vec::new()),
+                DimKind::Aligned => Tool::Dimension(DimMode::Aligned, Vec::new()),
+                DimKind::Linear if d.orient == Some(bimcraft_core::model::Orient::Vertical) => {
+                    Tool::Dimension(DimMode::Vertical, Vec::new())
+                }
+                DimKind::Linear => Tool::Dimension(DimMode::Horizontal, Vec::new()),
                 DimKind::Angular => Tool::Angular(Vec::new()),
-                DimKind::Radial => Tool::Radial(None),
+                k @ (DimKind::Radial | DimKind::Diameter | DimKind::ArcLength) => Tool::Round(k, Vec::new()),
             },
             Some(Element::Text(_)) => Tool::Text,
+            Some(Element::DetailLine(l)) => {
+                self.line_style.clone_from(&l.style);
+                Tool::DetailLine(Vec::new())
+            }
+            Some(Element::Spot(sp)) if sp.slope => Tool::SpotSlope,
+            Some(Element::Spot(sp)) if sp.coordinate => Tool::SpotCoordinate(None),
             Some(Element::Spot(_)) => Tool::Spot,
             Some(Element::Tag(_)) => Tool::Tag,
             Some(Element::Section(_)) => Tool::Section(None),
@@ -1620,8 +2919,10 @@ impl BimApp {
     /// component's type being its family's.
     fn select_all_instances(&mut self) {
         let m = Arc::clone(&self.session.model);
+        // One look at every element the view shows: a component's room is found among its level's rooms once.
+        let rooms = bimcraft_core::rooms::Rooms::new(&m);
         let type_of = |id: &Id| {
-            let e = element_json(&m, *id);
+            let e = bimcraft_core::element_json_with(&m, *id, &rooms);
             e["type"].is_string().then(|| [e["category"].clone(), e["family"].clone(), e["type"].clone()])
         };
         let types: Vec<[Value; 3]> = self.selection.iter().filter_map(type_of).collect();
@@ -1631,6 +2932,37 @@ impl BimApp {
         }
         let found = self.shown().into_iter().filter(|id| type_of(id).is_some_and(|k| types.contains(&k))).collect();
         self.pick_up(found, Modifiers::NONE);
+    }
+
+    /// Match Properties (MA): with one element selected, its type is the one the next element drawn
+    /// of its category takes; with several, the `match_properties` command gives the first one's type
+    /// to the others of its category.
+    pub(crate) fn match_properties(&mut self) {
+        let Some(&first) = self.selection.first() else {
+            self.status = Status { text: t("Select an element first to match its properties").into(), error: true };
+            return;
+        };
+        let src = element_json(&self.session.model, first);
+        let Some(typ) = src["type"].as_str().filter(|t| !t.is_empty()) else {
+            self.status = Status { text: t("The selected element has no type to match").into(), error: true };
+            return;
+        };
+        if self.selection.len() == 1 {
+            if let Some(el) = self.session.model.elements.get(first) {
+                self.types.insert(el.category(), typ.to_string());
+            }
+            if let Some(f) = src["family"].as_str() {
+                self.component = Some((f.to_string(), typ.to_string()));
+            }
+            self.status = Status {
+                text: tf("Match Properties: source type '{}' selected. Select target elements and press MA again.", &[typ]),
+                error: false,
+            };
+        } else if let Some(r) = self.run("match_properties", json!({"from": first, "ids": &self.selection[1..]})) {
+            let n = r["modified"].as_array().map_or(0, Vec::len);
+            self.status =
+                Status { text: tf("Matched properties: applied type '{}' to {} element(s)", &[typ, &n.to_string()]), error: false };
+        }
     }
 
     /// What the open view shows: what a plan draws, in its view range and crop region; what a
@@ -1646,10 +2978,9 @@ impl BimApp {
             Sheet::Ceiling(level) => owners(render::ceiling_plan(&m, level, w, h)),
             Sheet::Section(id) => {
                 let view = render::section_fit(&m, id, w, h);
-                let scene = orbit::scene_of(&mut self.orbit.scene, &m);
                 // ponytail: the picture leaves out what's hidden behind something nearer; test the
                 // solids against the view's extent if SA should find those too.
-                let seen = render::section_image(&m, scene, id, view, &[]).map(|i| i.shows()).unwrap_or_default();
+                let seen = render::section_picture(&m, id, view, &[]).map(|i| i.shows()).unwrap_or_default();
                 owners(render::section(&m, id, view)).into_iter().chain(seen).collect()
             }
             // The whole model, but for what the default 3D view hides.
@@ -1657,7 +2988,7 @@ impl BimApp {
                 let look = bimcraft_core::graphics::Look::of_3d(&m);
                 m.elements.keys().copied().filter(|id| look.shows(*id)).collect()
             }
-            Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) => BTreeSet::new(),
+            Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..) => BTreeSet::new(),
         }
     }
 
@@ -1668,42 +2999,79 @@ impl BimApp {
     }
 
     fn set_tool(&mut self, mut tool: Tool) {
+        self.adaptive_clicks.clear();
+        self.note_arrow = None;
+        // Trim/Extend to Corner with two lines or walls selected (or picked, sketching) joins them at once, keeping the
+        // parts toward their middles; with any other selection it asks for the picks.
+        if tool == Tool::Trim(None) && self.corner_selected() {
+            return;
+        }
         // Paint works in the 3D view: open it, as the tool asks.
         if matches!(tool, Tool::Paint | Tool::Unpaint) && self.sheet != Sheet::View3D {
             self.open_sheet(Sheet::View3D);
         }
         // Move, Copy, Rotate and Mirror take the selection; Align, Trim, Split and Offset pick walls, Demolish anything.
         let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. });
-        let picks = matches!(tool, Tool::Align(_) | Tool::Trim(_) | Tool::Split | Tool::Offset | Tool::Demolish);
+        let picks = matches!(
+            tool,
+            Tool::Align(_)
+                | Tool::Trim(_)
+                | Tool::TrimTo { .. }
+                | Tool::Vertex { .. }
+                | Tool::Split
+                | Tool::Offset
+                | Tool::Demolish
+                | Tool::Linework
+        );
         if edits && self.selection.is_empty() {
             self.status = Status { text: t("select what to move, copy, rotate or mirror first").into(), error: true };
             return;
         }
-        if tool == Tool::Attach && self.selected_walls().is_empty() {
-            self.status = Status { text: t("select the walls to attach first").into(), error: true };
+        if tool == Tool::Attach && self.selected_attachable().is_empty() {
+            self.status = Status { text: t("select the walls or columns to attach first").into(), error: true };
             return;
         }
         if matches!(tool, Tool::SlopeArrow(_)) && self.selected_floor().is_none() {
             self.status = Status { text: t("select the floor to slope first").into(), error: true };
             return;
         }
+        if matches!(tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_)) && self.selected_shapeable().is_none() {
+            self.status = Status { text: t("select the floor or flat roof to shape first").into(), error: true };
+            return;
+        }
+        // Modify Sub Elements starts with nothing of the shape picked, its Elevation blank until something is.
+        if tool == Tool::ModifySubElements && self.tool != Tool::ModifySubElements {
+            self.shape_picked.clear();
+            self.shape_z.clear();
+        }
         if let Tool::Rotate { centre, .. } = &mut tool
             && let Some(middle) = self.middle()
         {
             *centre = middle;
         }
+        if let Tool::RotateNorth { centre, .. } = &mut tool {
+            let b = self.session.model.coordinates.base;
+            *centre = P2(b[0], b[1]);
+        }
         if tool == Tool::Level {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
             self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
-        if tool != Tool::Modify && tool != Tool::Attach && tool != Tool::GableEdge && !matches!(tool, Tool::SlopeArrow(_)) && !edits {
+        let shaping = matches!(tool, Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_));
+        if tool != Tool::Modify && tool != Tool::Attach && tool != Tool::GableEdge && !shaping && !edits {
             self.selection.clear();
         }
         if tool != Tool::Modify && !picks {
             self.raise_context();
         }
         self.typed.clear();
-        self.typed_length.clear();
+        self.clear_typed();
+        // Insulation and Revision Cloud are the Detail Line tool's; the lines Fillet Arc and Trim/Extend have picked were
+        // picked for them, and are not for the tool that comes next.
+        if !matches!(tool, Tool::DetailLine(_)) {
+            (self.drawing.insulation, self.drawing.cloud) = (None, None);
+        }
+        self.forget_picks();
         // The Floor tool makes structural floors only when the Structure tab asks (`structural_floor`).
         self.floor_structural = false;
         if let Tool::Run(category, _) = &tool {
@@ -1711,9 +3079,27 @@ impl BimApp {
         }
         if !matches!(tool, Tool::Measure(_)) {
             self.measured = None;
+            (self.orbit.chain, self.orbit.chain_done) = (Vec::new(), None);
         }
         self.snap_once = None;
+        self.door_flip_hand = false;
         self.tool = tool;
+        // Floor sketches its outline at once, as Revit's does (Walls' Outline puts the walls' in the sketch).
+        if self.tool == Tool::Floor
+            && self.sketch.is_none()
+            && matches!(self.sheet, Sheet::Plan(_) | Sheet::Ceiling(_))
+            && let Some(level) = self.plan_level()
+        {
+            self.start_sketch(crate::sketch::Of::Floor(level), Vec::new());
+            return;
+        }
+        // In the 3D view the tools that sketch an outline sketch it on the work plane at once.
+        if self.sheet == Sheet::View3D
+            && self.sketch.is_none()
+            && matches!(self.tool, Tool::Floor | Tool::Ceiling | Tool::Roof | Tool::Shaft(_))
+        {
+            self.sketch_on_work_plane();
+        }
     }
 
     /// The walls among the selection.
@@ -1721,10 +3107,112 @@ impl BimApp {
         self.selection.iter().copied().filter(|id| self.session.model.wall(*id).is_some()).collect()
     }
 
+    /// A click of Trim/Extend to Corner or Trim/Extend Single or Multiple Elements on `hovered`, at plan point `at` (the side kept),
+    /// in a plan or the 3D view alike.
+    pub(crate) fn trim_click(&mut self, hovered: Option<Id>, at: P2) {
+        match (self.tool.clone(), hovered) {
+            (Tool::Trim(None), Some(a)) => self.tool = Tool::Trim(Some((a, at))),
+            (Tool::Trim(Some((a, keep))), Some(b)) if b != a => {
+                self.run("corner", json!({"ids": [a, b], "keep": [[keep.0, keep.1], [at.0, at.1]]}));
+                self.tool = Tool::Trim(None);
+            }
+            (Tool::TrimTo { boundary: None, many }, Some(b)) => self.tool = Tool::TrimTo { boundary: Some(b), many },
+            (Tool::TrimTo { boundary: Some(b), many }, Some(id)) if id != b => {
+                self.run("trim_extend", json!({"boundary": b, "ids": [id], "keep": [[at.0, at.1]]}));
+                if !many {
+                    self.tool = Tool::TrimTo { boundary: None, many };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What's selected that Attach Top/Base takes: the walls and columns.
+    pub(crate) fn selected_attachable(&self) -> Vec<Id> {
+        let m = &self.session.model;
+        let can = |id: &Id| matches!(m.elements.get(*id), Some(Element::Wall(_) | Element::Column(_) | Element::StructuralColumn(_)));
+        self.selection.iter().copied().filter(can).collect()
+    }
+
+    /// Attach Top/Base's pick, in a plan or the 3D view: the selected walls and columns onto roof or floor `id`, then Modify, them
+    /// still selected.
+    pub(crate) fn attach_to(&mut self, id: Id) {
+        let field = if self.attach_base { "attach_base" } else { "attach_top" };
+        let mut p = json!({"ids": self.selected_attachable()});
+        p[field] = json!(id);
+        if self.run("modify", p).is_some() {
+            self.tool = Tool::Modify;
+        }
+    }
+
     /// The roof selected, when one roof is all that is.
     pub(crate) fn selected_roof(&self) -> Option<Id> {
         match self.selection.as_slice() {
             &[id] if matches!(self.session.model.elements.get(id), Some(Element::Roof(_))) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Shape Editing's own tools for floor or flat roof `id`: small, two by two as the Modify panel's are, so the panels
+    /// after them keep their room.
+    fn shape_tools(&mut self, ui: &mut egui::Ui, id: Id) {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                let tip =
+                    msg!("Modify Sub Elements: select a point, a corner or an edge of the top, then type its height on the Options Bar or its label");
+                let active = self.tool == Tool::ModifySubElements;
+                if small_button(ui, Icon::ModifySubElements, "Modify Sub Elements", active, tip).clicked() {
+                    self.set_tool(Tool::ModifySubElements);
+                }
+                let tip = msg!("Add Point: click on the top to raise or lower it there to the Options Bar's elevation");
+                if small_button(ui, Icon::AddPoint, "Add Point", self.tool == Tool::AddPoint, tip).clicked() {
+                    self.set_tool(Tool::AddPoint);
+                }
+                // Convert Lines, as Revit's: on while Modify Sub Elements has folding lines selected.
+                let tip = msg!("Convert Lines: make the selected folding lines split lines, so the top keeps folding along them");
+                let can = self.tool == Tool::ModifySubElements && !self.shape_picked_folds().is_empty();
+                if ui.add_enabled_ui(can, |ui| small_button(ui, Icon::ConvertLines, msg!("Convert Lines"), false, tip)).inner.clicked() {
+                    self.shape_convert_lines();
+                }
+            });
+            ui.horizontal(|ui| {
+                let tip = msg!("Add Split Line: click two points; the top folds along the line between them");
+                let active = matches!(self.tool, Tool::AddSplitLine(_));
+                if small_button(ui, Icon::AddSplitLine, "Add Split Line", active, tip).clicked() {
+                    self.set_tool(Tool::AddSplitLine(None));
+                }
+                let tip = msg!("Reset Shape: take the points and split lines off, the top flat again");
+                if small_button(ui, Icon::ResetShape, "Reset Shape", false, tip).clicked() {
+                    self.run("reset_shape", serde_json::json!({"id": id}));
+                    self.tool = Tool::Modify;
+                }
+            });
+        });
+    }
+
+    /// Shape Editing's Elevation Base on the Options Bar, as Revit's: what its elevations count from.
+    fn elevation_base(&mut self, ui: &mut Ui) {
+        let l = ui.label(t("Elevation Base:"));
+        let now = self.shape_base;
+        egui::ComboBox::from_id_salt("shape-elevation-base")
+            .selected_text(t(now.name()))
+            .show_ui(ui, |ui| {
+                for b in crate::shape::Base::ALL {
+                    ui.selectable_value(&mut self.shape_base, b, t(b.name()));
+                }
+            })
+            .response
+            .labelled_by(l.id);
+        if self.shape_base != now {
+            self.shape_refresh();
+        }
+    }
+
+    /// What Shape Editing works on, when it's all that's selected: a floor, or a flat roof by footprint.
+    pub(crate) fn selected_shapeable(&self) -> Option<Id> {
+        match self.selection.as_slice() {
+            &[id] if self.session.model.shapeable(id).is_ok() => Some(id),
             _ => None,
         }
     }
@@ -1737,28 +3225,37 @@ impl BimApp {
         }
     }
 
+    /// While placing a swinging door Space changes only its pending hand. With one selected,
+    /// step through the four Opens tiles in order with the same instance edit as a tile click.
+    fn door_space(&mut self) -> bool {
+        let m = &self.session.model;
+        match self.tool {
+            Tool::Door if self.plan_level().is_some() => {
+                let (family, ty) = self.opening_pick("door");
+                if !ty.as_deref().is_some_and(|t| m.single_swing_door(family.as_deref(), t)) {
+                    return false;
+                }
+                self.door_flip_hand = !self.door_flip_hand;
+            }
+            Tool::Modify if self.sketch.is_none() => {
+                let &[id] = self.selection.as_slice() else { return false };
+                let Some(Element::Door(o)) = m.elements.get(id) else { return false };
+                if !m.single_swing_door(o.family.as_deref(), &o.type_name) {
+                    return false;
+                }
+                // Hand alternates every step; facing changes when hand wraps back to as placed.
+                self.run("modify", json!({"id": id, "flip_hand": !o.flip_hand, "flip_facing": o.flip_facing ^ o.flip_hand}));
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// The selected walls turned round about their location lines: Revit's flip arrows, or Space.
     fn flip(&mut self) {
         let walls = self.selected_walls();
         if !walls.is_empty() {
             self.run("flip", json!({"ids": walls}));
-        }
-    }
-
-    /// The Wall tool's Draw panel: lines, or arcs. The next wall starts where the last one ended
-    /// (an arc not finished yet, where it started).
-    fn draw_arc(&mut self, arc: bool) {
-        if arc == self.wall_arc {
-            return;
-        }
-        let keep = match &self.tool {
-            Tool::Wall(chain) if self.wall_arc => chain.first().copied(),
-            Tool::Wall(chain) => chain.last().copied(),
-            _ => None,
-        };
-        self.wall_arc = arc;
-        if let Tool::Wall(chain) = &mut self.tool {
-            *chain = keep.into_iter().collect();
         }
     }
 
@@ -1783,6 +3280,8 @@ impl BimApp {
                 }
                 Some(Element::Railing(rl)) => pts.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
                 Some(Element::Roof(r)) => pts.extend(&r.boundary),
+                // A camera stands on the plan at its eye: turning it turns it about that point unless Place Centre says otherwise.
+                Some(Element::View3D(v)) => pts.extend(v.camera.map(|c| P2(c.eye[0], c.eye[1]))),
                 _ => {}
             }
         }
@@ -1792,12 +3291,32 @@ impl BimApp {
     }
 
     /// The point the tool measures its next one from, while it has one.
+    /// Rotate or Rotate Project North waiting for its angle (not its centre): digits typed over the view are the angle.
+    pub(crate) fn rotating(&self) -> bool {
+        matches!(self.tool, Tool::Rotate { place: false, .. } | Tool::RotateNorth { place: false, .. })
+    }
+
+    /// The angle typed over the view while rotating, degrees counter-clockwise, if it reads as one.
+    pub(crate) fn typed_angle(&self) -> Option<f64> {
+        let t = self.typed_length.trim().trim_end_matches('°');
+        self.rotating().then(|| t.parse::<f64>().ok()).flatten().filter(|a| a.is_finite() && a.abs() <= 360.0)
+    }
+
     fn base(&self) -> Option<P2> {
         match &self.tool {
             Tool::Wall(chain) => chain.last().copied(),
             Tool::Run(_, start) => *start,
-            Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::SlopeArrow(start) => *start,
-            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::Mass(pts) => pts.last().copied(),
+            Tool::Grid(start)
+            | Tool::ReferencePlane(start)
+            | Tool::RoomSeparator(start)
+            | Tool::Move(start)
+            | Tool::Copy(start)
+            | Tool::Section(start)
+            | Tool::SlopeArrow(start)
+            | Tool::AddSplitLine(start) => *start,
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::Mass(pts) | Tool::DetailLine(pts) | Tool::SketchLine(pts) => {
+                pts.last().copied()
+            }
             _ => None,
         }
     }
@@ -1818,37 +3337,101 @@ impl BimApp {
     /// Escape: dismiss the error, drop the chain being drawn, else leave the tool, else clear the
     /// selection.
     fn escape(&mut self) {
+        // A note's leader point clicked goes first, the Text tool staying on.
+        if self.note_arrow.take().is_some() {
+            self.status = Status::default();
+            return;
+        }
+        // A form selected in a family document goes first.
+        if let Some(ed) = self.active_family_mut()
+            && ed.let_form_go()
+        {
+            return;
+        }
+        // Edit Dimension References goes next: the dimension stays as it was.
+        if self.dimension_refs_edit.take().is_some() {
+            return;
+        }
+        // A dimension segment picked goes, leaving its dimension as it was.
+        if self.dimension_segment.take().is_some() || self.dimension_segment_hover.take().is_some() {
+            return;
+        }
+        self.dimension_reference_hover = None;
+        // A number field left by Esc keeps the selection it was typed for.
+        if std::mem::take(&mut self.dim_edit_escaped) || self.dim_edit.take().is_some() {
+            return;
+        }
+        // Pick in View goes back to its dialog, and so does Specify Coordinates' pick.
+        if self.stop_work_plane_pick() || self.stop_specify_pick() {
+            return;
+        }
         self.typed.clear();
         self.ribbon_peek = false;
         // A snap override waiting for its point goes first, leaving what's being drawn.
         if self.snap_once.take().is_some() {
             return;
         }
-        self.typed_length.clear();
+        // An adaptive instance's points clicked go next, leaving the tool.
+        if !self.adaptive_clicks.is_empty() {
+            self.adaptive_clicks.clear();
+            self.status = Status::default();
+            return;
+        }
+        self.clear_typed();
         self.status = Status::default();
         self.tool = match std::mem::replace(&mut self.tool, Tool::Modify) {
             Tool::Wall(chain) if !chain.is_empty() => Tool::Wall(Vec::new()),
             Tool::Grid(Some(_)) => Tool::Grid(None),
+            Tool::ReferencePlane(Some(_)) => Tool::ReferencePlane(None),
+            Tool::RoomSeparator(Some(_)) => Tool::RoomSeparator(None),
             Tool::Run(c, Some(_)) => Tool::Run(c, None),
             Tool::Mirror { draw, start: Some(_) } => Tool::Mirror { draw, start: None },
-            Tool::Align(Some(_)) => Tool::Align(None),
+            Tool::Align(Some(_)) => {
+                self.drawing.align_reference = None;
+                Tool::Align(None)
+            }
             Tool::Trim(Some(_)) => Tool::Trim(None),
-            Tool::Dimension(refs) if !refs.is_empty() => Tool::Dimension(Vec::new()),
+            Tool::TrimTo { boundary: Some(_), many } => Tool::TrimTo { boundary: None, many },
+            Tool::Dimension(mode, refs) if !refs.is_empty() => Tool::Dimension(mode, Vec::new()),
             Tool::Angular(refs) if !refs.is_empty() => Tool::Angular(Vec::new()),
-            Tool::Radial(Some(_)) => Tool::Radial(None),
+            Tool::Round(k, picked) if !picked.is_empty() => Tool::Round(k, Vec::new()),
             Tool::Section(Some(_)) => Tool::Section(None),
             Tool::Measure(Some(_)) => Tool::Measure(None),
-            // The ruler laid goes first, then the tool.
+            // The ruler begun or laid goes first, then the tool, in a plan and in the 3D view alike.
+            Tool::Measure(None) if !std::mem::take(&mut self.orbit.chain).is_empty() => {
+                self.orbit.chain_done = None;
+                Tool::Measure(None)
+            }
             Tool::Measure(None) if self.measured.take().is_some() => Tool::Measure(None),
             Tool::Stair(pts) if !pts.is_empty() => Tool::Stair(Vec::new()),
             Tool::Ramp(pts) if !pts.is_empty() => Tool::Ramp(Vec::new()),
             Tool::Railing(pts) if !pts.is_empty() => Tool::Railing(Vec::new()),
             Tool::Mass(pts) if !pts.is_empty() => Tool::Mass(Vec::new()),
+            Tool::DetailLine(pts) if !pts.is_empty() => Tool::DetailLine(Vec::new()),
             Tool::Shaft(Some(_)) => Tool::Shaft(None),
             Tool::SlopeArrow(Some(_)) => Tool::SlopeArrow(None),
+            Tool::AddSplitLine(Some(_)) => Tool::AddSplitLine(None),
             Tool::ExtrusionRoof(pts) if !pts.is_empty() => Tool::ExtrusionRoof(Vec::new()),
+            Tool::SketchLine(pts) if !pts.is_empty() => Tool::SketchLine(Vec::new()),
+            // Fillet Arc's lines picked so far go first, then the tool.
+            Tool::DetailLine(pts) if !self.drawing.fillet.is_empty() => {
+                self.drawing.fillet.clear();
+                Tool::DetailLine(pts)
+            }
+            Tool::SketchLine(pts) if !self.drawing.fillet.is_empty() => {
+                self.drawing.fillet.clear();
+                Tool::SketchLine(pts)
+            }
+            // While sketching, Trim/Extend's first pick likewise.
+            tool @ (Tool::Trim(_) | Tool::TrimTo { .. }) if self.drawing.trim.is_some() => {
+                self.drawing.trim = None;
+                tool
+            }
             Tool::Modify => {
-                self.selection.clear();
+                match &mut self.sketch {
+                    Some(sk) => sk.picked.clear(),
+                    None => self.selection.clear(),
+                }
                 Tool::Modify
             }
             _ => Tool::Modify,
@@ -1856,9 +3439,23 @@ impl BimApp {
     }
 
     fn delete(&mut self) {
-        if !self.selection.is_empty() {
-            self.run("delete", json!({"ids": self.selection}));
+        // A dimension segment picked out of a chain goes, not the whole dimension.
+        if let Some((id, segment)) = self.dimension_segment.take() {
+            self.dimension_segment_hover = None;
+            if self.run("dimension_segment", json!({"id": id, "segment": segment})).is_some() {
+                self.selection = if self.session.model.elements.get(id).is_some() { vec![id] } else { Vec::new() };
+            }
+            return;
         }
+        // Under Modify Sub Elements, what of the shape is selected.
+        if self.shape_delete() {
+            return;
+        }
+        if self.sketch.is_some() {
+            self.delete_sketch_lines();
+            return;
+        }
+        self.delete_elements(self.selection.clone());
     }
 
     /// Zoom the view on screen by `factor` about its middle.
@@ -1870,7 +3467,14 @@ impl BimApp {
                     self.orbit.camera = Some(c.zoom(factor, (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0)));
                 }
             }
-            Sheet::Schedule(_) | Sheet::Table(_) => {}
+            Sheet::Family(_, None) => {
+                if let Some(o) = self.active_family_mut().map(|ed| &mut ed.orbit)
+                    && let Some(c) = o.camera
+                {
+                    o.camera = Some(c.zoom(factor, (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0)));
+                }
+            }
+            Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..) => {}
         }
     }
 
@@ -1878,12 +3482,56 @@ impl BimApp {
         match self.sheet {
             Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.fit(id),
             Sheet::View3D => self.fit3d(),
-            Sheet::Schedule(_) | Sheet::Table(_) => {}
+            Sheet::Family(_, None) => {
+                if let Some(ed) = self.active_family_mut() {
+                    ed.orbit.fit();
+                }
+            }
+            Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..) => {}
         }
+    }
+
+    /// The 3D view the 3D tab shows: one opened on it (a camera view, or `{3D}` itself), else the default `{3D}` — none
+    /// while the project has neither.
+    pub(crate) fn active_3d(&self) -> Option<Id> {
+        let m = &self.session.model;
+        self.active_3d.filter(|id| matches!(m.elements.get(id), Some(Element::View3D(_)))).or_else(|| m.default_3d())
+    }
+
+    /// Open a 3D view in the 3D tab: the default `{3D}` (none), or a camera view by id. Its camera stands the view where
+    /// it looks from the next time it is drawn.
+    pub(crate) fn open_3d(&mut self, id: Option<Id>) {
+        self.active_3d = id;
+        self.orbit.camera = None;
+        self.orbit.built = None;
+        self.open_sheet(Sheet::View3D);
     }
 
     /// Open a view in a tab, or bring its tab forward.
     fn open_sheet(&mut self, sheet: Sheet) {
+        // A family document's view: its tab after the document's others (after the project's and the documents' before it),
+        // and the document showing it. The project's tool, selection and views are left as they are.
+        if let Sheet::Family(id, view) = sheet {
+            if !self.views.contains(&sheet) {
+                let at = self.views.iter().position(|s| matches!(s, Sheet::Family(d, _) if *d > id)).unwrap_or(self.views.len());
+                self.views.insert(at, sheet);
+            }
+            (self.sheet, self.front) = (sheet, sheet);
+            if let Some(ed) = self.family_of_mut(id) {
+                ed.views.shown = view;
+            }
+            return;
+        }
+        if !matches!(sheet, Sheet::Section(_)) {
+            self.cut.suspend();
+        }
+        if !matches!(sheet, Sheet::View3D) {
+            self.orbit.suspend();
+            if let Some(gpu) = &mut self.card.gpu {
+                gpu.suspend_upload();
+            }
+        }
+        self.canvas.drawing.suspend();
         if !self.views.contains(&sheet) && !self.floats(sheet) {
             self.views.push(sheet);
         }
@@ -1892,7 +3540,7 @@ impl BimApp {
             self.front = sheet;
         }
         // The selection is the model's, not the view's: it stays, whatever view comes up.
-        self.typed_length.clear();
+        self.clear_typed();
         self.snap_once = None;
         // A ruler belongs to the view it was laid in.
         self.measured = None;
@@ -1905,17 +3553,29 @@ impl BimApp {
             Sheet::Paper(_) => self.tool == Tool::Text,
             _ => false,
         };
-        if !works && self.tool != Tool::Level {
+        // (A sketch is held in its plan: it takes the window back, with its tool, [`BimApp::track_sketch`].)
+        if !works && self.tool != Tool::Level && self.sketch_plan().is_none() {
             self.tool = Tool::Modify;
         }
         match &mut self.tool {
             Tool::Wall(chain) => chain.clear(),
-            Tool::Grid(start) | Tool::Run(_, start) => *start = None,
-            Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
-            Tool::Radial(r) => *r = None,
-            Tool::Section(start) | Tool::Shaft(start) | Tool::Measure(start) => *start = None,
-            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::ExtrusionRoof(pts) | Tool::Mass(pts) => pts.clear(),
-            Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) | Tool::GableEdge => self.tool = Tool::Modify,
+            Tool::Grid(start) | Tool::ReferencePlane(start) | Tool::RoomSeparator(start) | Tool::Run(_, start) => *start = None,
+            Tool::Dimension(_, refs) | Tool::Angular(refs) => refs.clear(),
+            Tool::Round(_, picked) => picked.clear(),
+            Tool::Section(start) | Tool::Shaft(start) | Tool::Measure(start) | Tool::Camera(start) => *start = None,
+            Tool::Stair(pts)
+            | Tool::Ramp(pts)
+            | Tool::Railing(pts)
+            | Tool::ExtrusionRoof(pts)
+            | Tool::Mass(pts)
+            | Tool::DetailLine(pts) => pts.clear(),
+            Tool::Move(_)
+            | Tool::Copy(_)
+            | Tool::SlopeArrow(_)
+            | Tool::ModifySubElements
+            | Tool::AddPoint
+            | Tool::AddSplitLine(_)
+            | Tool::GableEdge => self.tool = Tool::Modify,
             _ => {}
         }
     }
@@ -1948,7 +3608,8 @@ impl BimApp {
             (None, _) => (json!(name), tf("Schedule: {}", &[t(name)]), *name),
         });
         let made = self.schedules().into_iter().map(|(id, name)| (json!(id), tf("Schedule: {}", &[name]), name));
-        let others = std::iter::once((json!("{3D}"), t("3D View: {3D}").to_string(), "{3D}")).chain(builtin).chain(made);
+        let boards = self.panel_schedules().into_iter().map(|(id, name)| (json!(id), tf("Panel Schedule: {}", &[name]), name));
+        let others = std::iter::once((json!("{3D}"), t("3D View: {3D}").to_string(), "{3D}")).chain(builtin).chain(made).chain(boards);
         plans.chain(cuts).chain(others).filter(|(_, _, name)| !placed.contains(name)).map(|(v, label, _)| (v, label)).collect()
     }
 
@@ -1956,10 +3617,10 @@ impl BimApp {
     pub(crate) fn schedules(&self) -> Vec<(Id, &str)> {
         let m = &self.session.model;
         let mut out: Vec<(Id, &str)> = m
-            .elements
-            .iter()
-            .filter_map(|(id, e)| match e {
-                Element::Schedule(sc) if schedule::builtin(Some(&sc.name), None).is_none() => Some((*id, sc.name.as_str())),
+            .rare("schedule")
+            .into_iter()
+            .filter_map(|id| match m.elements.get(id) {
+                Some(Element::Schedule(sc)) if schedule::builtin(Some(&sc.name), None).is_none() => Some((id, sc.name.as_str())),
                 _ => None,
             })
             .collect();
@@ -1969,6 +3630,10 @@ impl BimApp {
 
     /// Close a view's tab; the last one stays open.
     fn close_view(&mut self, sheet: Sheet) {
+        if matches!(sheet, Sheet::Family(..)) {
+            self.close_family_tab(sheet);
+            return;
+        }
         if self.floats(sheet) {
             self.floating.retain(|f| f.sheet != sheet);
             if self.sheet == sheet {
@@ -1976,7 +3641,8 @@ impl BimApp {
             }
             return;
         }
-        if self.views.len() < 2 {
+        // The project keeps a tab of its own.
+        if self.views.iter().filter(|v| !matches!(v, Sheet::Family(..))).count() < 2 {
             return;
         }
         self.views.retain(|v| *v != sheet);
@@ -1989,7 +3655,7 @@ impl BimApp {
 
     // ---------- files ----------
 
-    /// Save the project (`.bimcraft`, or any other name) or export by extension: `.ifc`, or the
+    /// Save the project (`.bimc`, or any other name) or export by extension: `.ifc`, the 3D scene as `.glb`, or the
     /// view on screen as `.png` (a plan or the 3D view) or `.svg` (a plan). Whether it worked; the
     /// warning box says why not.
     pub fn save_to(&mut self, path: &Path) -> bool {
@@ -2006,13 +3672,13 @@ impl BimApp {
                         (p["azimuth"], p["elevation"]) = (json!(c.azimuth), json!(c.elevation));
                     }
                 }
-                (Sheet::Schedule(_) | Sheet::Table(_), _) => {}
+                (Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..), _) => {}
             }
             return self.run("render", p).is_some();
         }
         let saved = self.run("save", json!({"path": file})).is_some();
-        // Exports (IFC, the sheets' PDF) leave the project unsaved.
-        if saved && !matches!(ext.as_str(), "ifc" | "pdf") {
+        // Exports (IFC, glTF, the sheets' PDF) leave the project unsaved.
+        if saved && !matches!(ext.as_str(), "ifc" | "glb" | "pdf") {
             self.saved = Arc::clone(&self.session.model);
             self.note_recent(path);
             self.autosave_saved();
@@ -2036,7 +3702,7 @@ impl BimApp {
 
     fn save_as(&mut self, ctx: &Context, then: Option<Pending>) {
         let later = ctx.clone();
-        self.ask_path(ctx, "BIMCraft project", "bimcraft", move |app, p| {
+        self.ask_path(ctx, msg!("BIMCraft project"), &files::SAVED, move |app, p| {
             if app.save_to(&p)
                 && let Some(then) = then
             {
@@ -2045,26 +3711,27 @@ impl BimApp {
         });
     }
 
-    fn export(&mut self, ctx: &Context, what: &str, ext: &str) {
-        self.ask_path(ctx, what, ext, |app, p| {
-            app.save_to(&p);
-        });
-    }
-
-    /// Asks, in the system's file dialog, where to save, and calls `then` with the path, ending in `.ext`, in a later frame.
-    fn ask_path(&mut self, ctx: &Context, what: &str, ext: &str, then: impl FnOnce(&mut BimApp, PathBuf) + 'static) {
-        let name = format!("{}.{ext}", self.session.model.name.replace(['/', '\\'], "-"));
-        let ext = ext.to_string();
-        let dialog = rfd::AsyncFileDialog::new().add_filter(t(what), &[&ext]).set_file_name(name);
-        self.ask_file(ctx, dialog, true, move |app, p| {
-            then(app, if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext)) { p } else { p.with_extension(&ext) });
-        });
+    /// Asks, in the system's file dialog, where to save, and calls `then` with the path in a later frame: the first of `exts` is
+    /// what it offers and what a path with none of them gets.
+    fn ask_path(&mut self, ctx: &Context, what: &str, exts: &[&str], then: impl FnOnce(&mut BimApp, PathBuf) + 'static) {
+        let name = files::file_name(&self.session.model.name, exts.first().copied().unwrap_or_default());
+        let exts: Vec<String> = exts.iter().map(|e| e.to_string()).collect();
+        let dialog = rfd::AsyncFileDialog::new().add_filter(t(what), &exts).set_file_name(name);
+        self.ask_file(ctx, dialog, true, move |app, p| then(app, files::named(p, &exts)));
     }
 
     /// Open a project, or import an IFC file and say what came in and what was left out.
     pub(crate) fn open_path(&mut self, path: &Path) -> bool {
         if revit::is_revit(path) {
             return self.open_revit(path);
+        }
+        // A family opens in its own document, the project left as it is.
+        if files::is_family(path) {
+            self.open_family_file(path);
+            if self.home.shown {
+                self.family_from_start_page();
+            }
+            return self.active_family().is_some();
         }
         let Some(reply) = self.run("open", json!({"path": path.to_string_lossy()})) else {
             self.forget_recent_if_gone(path);
@@ -2091,24 +3758,67 @@ impl BimApp {
         true
     }
 
+    /// The sample house, the model `bimcraft --sample` builds, as a project with no file: Save asks where to put it. Built
+    /// all or nothing (a line that fails leaves the project as it was), and its steps are not undo steps, as with `--sample`.
+    fn open_sample(&mut self) {
+        match self.session.script_atomic(bimcraft_core::sample::SAMPLE) {
+            Ok(_) => {
+                let model = (*self.session.model).clone();
+                self.session.reset(model, None);
+                self.retire_autosave();
+                self.reopened();
+                self.autosave_document();
+            }
+            Err(e) => self.status = Status { text: e, error: true },
+        }
+    }
+
     /// Start over on the model the session holds now (after New and Open), keeping how the
     /// window is set up.
     fn reopened(&mut self) {
         let mut fresh = BimApp::new(std::mem::take(&mut self.session));
         fresh.status = std::mem::take(&mut self.status);
         fresh.os_events = self.os_events.take();
+        (fresh.own_title_bar, fresh.system_title_bar) = (self.own_title_bar, self.system_title_bar);
         (fresh.thin, fresh.lang, fresh.snaps, fresh.ribbon_min) = (self.thin, self.lang, self.snaps, self.ribbon_min);
+        (fresh.compact, fresh.profile, fresh.scale) = (self.compact, self.profile, self.scale);
+        (fresh.tools_hidden, fresh.presets) = (std::mem::take(&mut self.tools_hidden), std::mem::take(&mut self.presets));
         fresh.font_finder = self.font_finder;
+        fresh.scan_contrast = self.scan_contrast;
+        fresh.grid_snapping = self.grid_snapping;
+        fresh.cut_fills_3d = self.cut_fills_3d;
+        (fresh.show_origin, fresh.show_view_name) = (self.show_origin, self.show_view_name);
+        fresh.custom_shortcuts = std::mem::take(&mut self.custom_shortcuts);
+        (fresh.light_canvas, fresh.scheme, fresh.accent) = (self.light_canvas, self.scheme, self.accent);
+        (fresh.panel_colour, fresh.canvas_colour, fresh.text_colour) = (self.panel_colour, self.canvas_colour, self.text_colour);
+        fresh.styled = self.styled;
+        fresh.theme_wanted = self.theme_wanted.take();
         fresh.docking = std::mem::take(&mut self.docking);
         (fresh.settings_path, fresh.settings_kept) = (self.settings_path.take(), self.settings_kept.take());
         fresh.window = std::mem::take(&mut self.window);
         (fresh.updates, fresh.revit) = (self.updates.take(), self.revit.take());
+        // The assistant's network and the user's choices are the window's, not the project's: its conversation ends with the project.
+        fresh.assistant = std::mem::take(&mut self.assistant);
+        fresh.assistant.project_replaced();
+        // The 3D mouse's reader runs for the window, not the project: without it the cap would move nothing once a project is open.
+        fresh.space_mouse = self.space_mouse.take();
         fresh.control = self.control.take();
+        fresh.agents = std::mem::take(&mut self.agents);
+        fresh.cowork_prefs = std::mem::take(&mut self.cowork_prefs);
+        fresh.cowork = fresh.cowork_kept(self.cowork.take());
+        fresh.cowork_ai = std::mem::take(&mut self.cowork_ai);
         fresh.opens = std::mem::take(&mut self.opens);
         (fresh.recent, fresh.recent_path) = (std::mem::take(&mut self.recent), self.recent_path.take());
         fresh.autosave = std::mem::take(&mut self.autosave);
         fresh.card = std::mem::take(&mut self.card);
         fresh.home = self.home.put_away();
+        // A new or opened project keeps the plugins and their tabs: they are the user's folder, not the project's, and the
+        // session's external commands were already registered. Re-registering puts them back if the project replaced them.
+        (fresh.plugins, fresh.plugin_tabs) = (std::mem::take(&mut self.plugins), std::mem::take(&mut self.plugin_tabs));
+        fresh.plugins_job = self.plugins_job.take();
+        fresh.plugins_dialog = self.plugins_dialog;
+        fresh.plugins.register(&mut fresh.session);
+        fresh.plugin_tabs = fresh.plugins.tabs();
         *self = fresh;
     }
 
@@ -2128,19 +3838,31 @@ impl BimApp {
             }
         }
         // A file dropped on the window opens as one the system asked for.
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        // Over the Assistant palette, a file is for the message.
+        self.drop_on_assistant(ctx, &mut dropped);
         self.opens.extend(dropped);
         // A Revit file being read holds the files that come meanwhile, which are opened in turn once it is over: the last one wins.
         if !self.importing()
             && let Some(path) = self.opens.pop()
         {
             self.opens.clear();
-            self.guard(Pending::OpenPath(path), ctx);
+            // A family replaces nothing, so there is nothing to ask about first.
+            if files::is_family(&path) {
+                self.open_path(&path);
+            } else {
+                self.guard(Pending::OpenPath(path), ctx);
+            }
         }
     }
 
     /// Do `p` now, or first ask about unsaved changes.
     fn guard(&mut self, p: Pending, ctx: &Context) {
+        // The family documents first, each asked about while it has unsaved changes; then the project.
+        if !self.families.is_empty() {
+            self.pending_after_documents(p);
+            return;
+        }
         if self.dirty() { self.pending = Some(p) } else { self.proceed(p, ctx) }
     }
 
@@ -2155,12 +3877,13 @@ impl BimApp {
                     self.autosave_document();
                 }
             }
+            Pending::Sample => self.open_sample(),
             Pending::OpenPath(path) => {
                 self.open_path(&path);
             }
             Pending::Open => {
                 let revit = self.revit.is_some();
-                let name = t(if revit { "BIMCraft project, IFC or Revit" } else { "BIMCraft project or IFC" });
+                let name = t(if revit { msg!("BIMCraft project, IFC or Revit") } else { "BIMCraft project or IFC" });
                 let dialog = rfd::AsyncFileDialog::new().add_filter(name, &revit::open_extensions(revit));
                 self.ask_file(ctx, dialog, false, |app, path| {
                     app.open_path(&path);
@@ -2187,58 +3910,108 @@ impl BimApp {
                 if icon_button(ui, Icon::Home, "Home").clicked() {
                     self.toggle_home();
                 }
+                let file = egui::Button::new(RichText::new(t("File")).color(pal().app_bar_text)).frame(false).min_size(vec2(44.0, 24.0));
+                MenuButton::from_button(file).ui(ui, |ui| self.file_menu(ui, &ctx));
                 if icon_button(ui, Icon::Open, "Open").clicked() {
                     self.guard(Pending::Open, &ctx);
                 }
+                // On a family tab, the family document's Save, as Revit saves the active document: never the project.
                 if icon_button(ui, Icon::Save, "Save").clicked() {
-                    self.save(&ctx, None);
+                    if self.active_family().is_some() {
+                        self.family_save(false);
+                    } else {
+                        self.save(&ctx, None);
+                    }
                 }
                 ui.separator();
                 ui.spacing_mut().item_spacing.x = 0.0;
+                // A family document's Undo and Redo are its own: the project's steps are not offered while it is open.
+                let family = self.family_doc();
                 if icon_button(ui, Icon::Undo, "Undo").clicked() {
-                    self.run("undo", json!({}));
+                    if family {
+                        self.family_undo();
+                    } else {
+                        self.run("undo", json!({}));
+                    }
                 }
-                self.steps_list(ui, false);
+                if !family {
+                    self.steps_list(ui, false);
+                }
                 ui.add_space(4.0);
                 if icon_button(ui, Icon::Redo, "Redo").clicked() {
-                    self.run("redo", json!({}));
+                    if family {
+                        self.family_redo();
+                    } else {
+                        self.run("redo", json!({}));
+                    }
                 }
-                self.steps_list(ui, true);
+                if !family {
+                    self.steps_list(ui, true);
+                }
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.separator();
                 if icon_button(ui, Icon::View3D, "Default 3D View").clicked() {
-                    self.open_sheet(Sheet::View3D);
+                    self.open_3d(None);
                 }
                 ui.separator();
                 if icon_button(ui, Icon::Settings, "Settings").clicked() {
                     self.settings_page = Some(settings::Page::Interface);
                 }
+                // Close beside the gear, and the Find field narrower for it: the title's room stays as it was.
+                ui.add_space(-6.0);
+                self.agents_toggle(ui);
+                // Find and the project's scale, in both profiles: BIMCraft's Find a field's width, Rev's an icon among the others.
+                ui.separator();
+                let find = if style::rev() { icon_button(ui, Icon::Search, "Find") } else { find::button(ui) };
+                if find.clicked() {
+                    self.find = Some(String::new());
+                }
+                self.scale_chip(ui);
             })
             .response
             .rect;
-        // The project and the view, centred, where Revit's title bar has them.
-        let at = pos2(ui.max_rect().center().x, row.center().y);
-        ui.painter().text(
-            at,
-            Align2::CENTER_CENTER,
-            format!("{} · {view}", self.session.model.name),
+        // The project and the view, centred where Revit's title bar has them: in the window's middle when they fit between the
+        // buttons on the left and, where the window draws its own title bar, the caption buttons on the right; else as near it
+        // as that room allows, and cut short where even it is too little.
+        let gap = 12.0;
+        // Which palettes show, in both profiles, at the bar's right end where an editor keeps its layout's buttons: a closed
+        // palette comes back from here, the Tools palette too, which has no shortcut. The title's middle stays the window's.
+        let end = ui.max_rect().right() + if self.own_bar() { 8.0 - 3.0 * titlebar::BUTTON_WIDTH } else { 0.0 } - 4.0;
+        let at = Rect::from_min_size(pos2(end - 26.0, row.center().y - 12.0), vec2(26.0, 24.0));
+        let palettes = ui.put(at, |ui: &mut Ui| icon_button(ui, Icon::Interface, msg!("Palettes")));
+        egui::Popup::menu(&palettes).show(|ui| self.palette_switches(ui));
+        let right = at.left() - gap;
+        let left = row.right() + gap;
+        let mut title = egui::text::LayoutJob::simple_singleline(
+            self.family_title().unwrap_or_else(|| format!("{} · {view}", self.session.model.name)),
             FontId::proportional(12.5),
-            pal().muted,
+            pal().app_bar_muted,
         );
+        title.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(0.0));
+        let galley = ui.painter().layout_job(title);
+        let width = galley.size().x;
+        let x = ui.max_rect().center().x.clamp(left + width / 2.0, (right - width / 2.0).max(left + width / 2.0));
+        ui.painter().galley(pos2(x - width / 2.0, row.center().y - galley.size().y / 2.0), galley, pal().app_bar_muted);
     }
 
     /// The arrow beside Undo (or with `redo`, Redo): a list of the steps, the next first, as Revit's. Hovering one marks it
     /// and every step before it, and a click undoes (or redoes) them all.
     fn steps_list(&mut self, ui: &mut Ui, redo: bool) {
         let what = if redo { "Redo" } else { "Undo" };
-        let names: Vec<String> = self.session.steps(redo).into_iter().map(step_name).collect();
+        // In a Co-Work session, what this person's undo takes back: their own steps (a guest has them from the host).
+        let names: Vec<String> = match &self.cowork {
+            Some(cowork::Live::Guest(j)) => j.history(redo).iter().map(|s| named(&s.label, &s.made, &s.removed)).collect(),
+            Some(cowork::Live::Host(h)) => self.session.own_steps(h.name(), redo).into_iter().map(step_name).collect(),
+            None => self.session.steps(redo).into_iter().map(step_name).collect(),
+        };
         let (rect, arrow) = ui.allocate_exact_size(vec2(12.0, 22.0), Sense::click());
-        let label = t(if redo { "Redo History" } else { "Undo History" });
+        let label = t(if redo { msg!("Redo History") } else { msg!("Undo History") });
         arrow.widget_info(|| WidgetInfo::labeled(WidgetType::Button, !names.is_empty(), label));
+        let (icon, hover) = style::icon_inks();
         if arrow.hovered() && !names.is_empty() {
-            ui.painter().rect_filled(rect, 3.0, pal().hover_fill);
+            ui.painter().rect_filled(rect, 3.0, hover);
         }
-        let ink = if names.is_empty() { pal().muted.gamma_multiply(0.5) } else { pal().icon };
+        let ink = if names.is_empty() { icon.gamma_multiply(0.4) } else { icon };
         let c = rect.center();
         ui.painter().add(egui::Shape::convex_polygon(
             vec![c + vec2(-3.0, -1.5), c + vec2(3.0, -1.5), c + vec2(0.0, 2.0)],
@@ -2279,8 +4052,8 @@ impl BimApp {
                 }
                 ui.separator();
                 let n = reach.map_or(1, |h| h + 1);
-                let foot = tf(if redo { "Redo {} steps" } else { "Undo {} steps" }, &[&n.to_string()]);
-                let foot = if n == 1 { tf(if redo { "Redo {}" } else { "Undo {}" }, &[&names[0]]) } else { foot };
+                let foot = tf(if redo { msg!("Redo {} steps") } else { msg!("Undo {} steps") }, &[&n.to_string()]);
+                let foot = if n == 1 { tf(if redo { msg!("Redo {}") } else { msg!("Undo {}") }, &[&names[0]]) } else { foot };
                 ui.label(RichText::new(foot).color(pal().muted));
             });
         });
@@ -2290,53 +4063,70 @@ impl BimApp {
     }
 
     fn ribbon(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        let open = std::cell::Cell::new(None);
-        Frame::new().fill(pal().bar).inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 0 }).show(ui, |ui| {
+        Frame::new().inner_margin(Margin::symmetric(6, 5)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let file = egui::Button::new(RichText::new(t("File")).color(Color32::WHITE).strong())
-                    .fill(pal().accent)
-                    .min_size(vec2(58.0, 26.0));
-                MenuButton::from_button(file).ui(ui, |ui| self.file_menu(ui, &ctx));
-                for (tab, label) in [
-                    (Tab::Architecture, "Architecture"),
-                    (Tab::Structure, "Structure"),
-                    (Tab::Plumbing, "Plumbing"),
-                    (Tab::Electrical, "Electrical"),
-                    (Tab::Lightning, "Lightning Protection"),
-                    (Tab::Data, "Data"),
-                    (Tab::Annotate, "Annotate"),
-                    (Tab::Massing, "Massing"),
-                    (Tab::View, "View"),
-                    (Tab::Manage, "Manage"),
-                    (Tab::Modify, "Modify"),
-                ] {
-                    let r = tab_button(ui, label, self.tab == tab, false);
-                    if self.tab == tab {
-                        open.set(Some(r.rect));
-                    }
-                    self.ribbon_tab(&r, tab);
-                }
-                if let Some(name) = self.context() {
-                    let r = tab_button(ui, &name, self.tab == Tab::Context, true);
-                    if self.tab == Tab::Context {
-                        open.set(Some(r.rect));
-                    }
-                    self.ribbon_tab(&r, Tab::Context);
-                }
+                // The tabs, scrolling sideways (with the wheel) in a window too narrow for them; the fold button at the end.
+                let room = ui.available_width() - 32.0;
+                // The tab that has just been picked (or a contextual tab that has just come) is brought into view: the row
+                // scrolls in a window too narrow for it, and its last tabs are out of sight.
+                let seen = UiId::new("ribbon-tab-seen");
+                let now = tab_key(self.tab);
+                let changed = ui.ctx().data(|d| d.get_temp::<u64>(seen)) != Some(now);
+                ui.ctx().data_mut(|d| d.insert_temp(seen, now));
+                let plugin_tabs: Vec<String> = self.plugin_tabs.iter().map(|p| self.plugin_tab_name(p)).collect();
+                ScrollArea::horizontal()
+                    .id_salt("ribbon-tabs")
+                    .max_width(room)
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (tab, label, _) in TABS {
+                                let r = tab_button(ui, label, self.tab == tab, false);
+                                if changed && self.tab == tab {
+                                    r.scroll_to_me(None);
+                                }
+                                self.ribbon_tab(&r, tab);
+                            }
+                            // The plugins' tabs come after BIMCraft's, each as its manifest declared it.
+                            for (i, label) in plugin_tabs.iter().enumerate() {
+                                let tab = Tab::Plugin(i);
+                                let r = tab_button(ui, label, self.tab == tab, false);
+                                if changed && self.tab == tab {
+                                    r.scroll_to_me(None);
+                                }
+                                self.ribbon_tab(&r, tab);
+                            }
+                            if let Some(name) = self.context() {
+                                let r = tab_button(ui, &name, self.tab == Tab::Context, true);
+                                if changed && self.tab == Tab::Context {
+                                    r.scroll_to_me(None);
+                                }
+                                self.ribbon_tab(&r, Tab::Context);
+                            }
+                        });
+                    });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (icon, label) =
-                        if self.ribbon_min { (Icon::Expand, "Expand the Ribbon") } else { (Icon::Minimize, "Minimize the Ribbon") };
+                    let (icon, label) = if self.ribbon_min {
+                        (Icon::Expand, msg!("Expand the Ribbon"))
+                    } else {
+                        (Icon::Minimize, msg!("Minimize the Ribbon"))
+                    };
                     if icon_button(ui, icon, label).clicked() {
                         self.fold_ribbon(!self.ribbon_min);
+                    }
+                    // Edit Tools on: the ribbon's buttons are boxes to tick until this.
+                    if self.editing_tools && ui.button(t("Done")).clicked() {
+                        self.editing_tools = false;
                     }
                 });
             });
         });
         let base = ui.min_rect();
-        rule_under_tabs(ui.painter(), base.x_range(), base.bottom(), open.get());
+        if !self.ribbon_min {
+            ui.painter().hline(base.x_range(), base.bottom(), Stroke::new(1.0, pal().border));
+        }
         self.ribbon_bottom = ui.min_rect().left_bottom();
         if !self.ribbon_min {
             self.ribbon_panels(ui);
@@ -2377,23 +4167,97 @@ impl BimApp {
         }
     }
 
+    /// The panels of `tab`: on the ribbon side by side, in the Tools palette as rows.
+    fn tab_content(&mut self, ui: &mut Ui, tab: Tab) {
+        match tab {
+            Tab::Architecture => self.architecture_tab(ui),
+            Tab::Structure => self.structure_tab(ui),
+            Tab::Plumbing => self.plumbing_tab(ui),
+            Tab::Electrical => self.electrical_tab(ui),
+            Tab::Lightning => self.lightning_tab(ui),
+            Tab::Data => self.data_tab(ui),
+            Tab::Insert => self.insert_tab(ui),
+            Tab::Annotate => self.annotate_tab(ui),
+            Tab::Massing => self.massing_tab(ui),
+            Tab::View => self.view_tab(ui),
+            Tab::Collaborate => self.collaborate_tab(ui),
+            Tab::Manage => self.manage_tab(ui),
+            Tab::Modify | Tab::Context => self.modify_tab(ui),
+            Tab::Plugin(i) => self.plugin_tab(ui, i),
+        }
+    }
+
+    /// BIMCraft's Tools palette, in place of the ribbon: a rail of the ribbon's tabs down its left, and beside it, as rows under their
+    /// panels' names, the Select panel, the tool in hand's or the selection's (the contextual tab's, named for it) and the open tab's.
+    pub(crate) fn tool_column(&mut self, ui: &mut Ui) {
+        let open = if self.tab == Tab::Context { self.back } else { self.tab };
+        // The rail and the rows side by side, each in a rect of its own: what is wider than the rows' is cut, never widens the column.
+        let all = ui.available_rect_before_wrap();
+        let rail = all.with_max_x(all.left() + 36.0).shrink2(vec2(2.0, 4.0));
+        let rows = all.with_min_x(all.left() + 40.0);
+        ui.painter().vline(rows.left() - 2.0, all.y_range().shrink(6.0), Stroke::new(1.0, pal().border));
+        ui.scope_builder(UiBuilder::new().max_rect(rail), |ui| {
+            // A palette too short for every tab scrolls them, as the rows beside them scroll theirs.
+            ScrollArea::vertical().id_salt("tool-rail").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (tab, label, icon) in TABS {
+                    if rail_button(ui, icon, label, tab == open).clicked() {
+                        self.tab = tab;
+                    }
+                }
+                // The plugins' tabs come after BIMCraft's, scrolling with them.
+                let plugin_tabs: Vec<String> = self.plugin_tabs.iter().map(|p| self.plugin_tab_name(p)).collect();
+                for (i, label) in plugin_tabs.iter().enumerate() {
+                    if rail_button(ui, Icon::Code, label, Tab::Plugin(i) == open).clicked() {
+                        self.tab = Tab::Plugin(i);
+                    }
+                }
+            });
+        });
+        ui.scope_builder(UiBuilder::new().max_rect(rows), |ui| {
+            ScrollArea::both().id_salt("tool-column").auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_max_width(rows.width() - 12.0);
+                let edit = if self.editing_tools { msg!("Done") } else { msg!("Edit Tools") };
+                let tip = msg!("Tick the tools this palette shows; Find still has the others");
+                if ui.button(t(edit)).on_hover_text(t(tip)).clicked() {
+                    self.editing_tools = !self.editing_tools;
+                }
+                ribbon::rows(ui, |ui| self.select_panel(ui));
+                ribbon::skip_select(true);
+                let context = self.context();
+                if let Some(name) = &context {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(name).color(pal().context).strong());
+                    ribbon::rows(ui, |ui| self.modify_tab(ui));
+                }
+                // The Modify tab is what the contextual rows already are.
+                if open != Tab::Modify || context.is_none() {
+                    ui.add_space(8.0);
+                    // Painted: the rail's button already names it for screen readers.
+                    let (label, plugin) = match open {
+                        Tab::Plugin(i) => (self.plugin_tabs.get(i).map(|t| self.plugin_tab_name(t)).unwrap_or_default(), true),
+                        tab => (TABS.iter().find(|(t, ..)| *t == tab).map_or("", |(_, label, _)| *label).to_string(), false),
+                    };
+                    let label = if plugin { label } else { t(&label).to_string() };
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+                    ui.painter().text(r.left_center(), Align2::LEFT_CENTER, label, style::semibold(13.0), pal().text);
+                    ribbon::rows(ui, |ui| self.tab_content(ui, open));
+                }
+                ribbon::skip_select(false);
+            });
+        });
+    }
+
     /// The ribbon tab's panels of tools.
     fn ribbon_panels(&mut self, ui: &mut Ui) {
-        Frame::new().inner_margin(vec2(8.0, 6.0)).show(ui, |ui| {
-            // A tab wider than the window (Manage is, at 1280) scrolls sideways, each tab where it was left.
-            egui::ScrollArea::horizontal().id_salt(self.tab as u8).auto_shrink([false, true]).show(ui, |ui| {
-                ui.horizontal(|ui| match self.tab {
-                    Tab::Architecture => self.architecture_tab(ui),
-                    Tab::Structure => self.structure_tab(ui),
-                    Tab::Plumbing => self.plumbing_tab(ui),
-                    Tab::Electrical => self.electrical_tab(ui),
-                    Tab::Lightning => self.lightning_tab(ui),
-                    Tab::Data => self.data_tab(ui),
-                    Tab::Annotate => self.annotate_tab(ui),
-                    Tab::Massing => self.massing_tab(ui),
-                    Tab::View => self.view_tab(ui),
-                    Tab::Manage => self.manage_tab(ui),
-                    Tab::Modify | Tab::Context => self.modify_tab(ui),
+        Frame::new().inner_margin(Margin::symmetric(6, 4)).show(ui, |ui| {
+            // A tab wider than the window folds its last panels; one still too wide scrolls sideways, each tab where it was
+            // left.
+            let key = UiId::new(("ribbon-widths", tab_key(self.tab)));
+            let room = ui.available_width();
+            egui::ScrollArea::horizontal().id_salt(tab_key(self.tab)).auto_shrink([false, true]).show(ui, |ui| {
+                ribbon::tab(ui, key, room, |ui| {
+                    ui.horizontal(|ui| self.tab_content(ui, self.tab));
                 });
             });
         });
@@ -2410,49 +4274,91 @@ impl BimApp {
             .clicked()
         };
         let cmd = |k: Key| Some(KeyboardShortcut::new(Modifiers::COMMAND, k));
-        if item(ui, "New", cmd(Key::N)) {
-            self.guard(Pending::New, ctx);
-        }
-        if item(ui, "Open…", cmd(Key::O)) {
-            self.guard(Pending::Open, ctx);
-        }
+        // As Revit's: New and Open, each of a project or a family.
+        SubMenuButton::new(t("New")).ui(ui, |ui| {
+            if item(ui, msg!("Project"), cmd(Key::N)) {
+                self.guard(Pending::New, ctx);
+            }
+            if item(ui, msg!("Family…"), None) {
+                self.new_family_dialog = Some(bimcraft_core::family::Category::Generic);
+            }
+        });
+        SubMenuButton::new(t("Open")).ui(ui, |ui| {
+            if item(ui, msg!("Project…"), cmd(Key::O)) {
+                self.guard(Pending::Open, ctx);
+            }
+            if item(ui, msg!("Family…"), None) {
+                self.open_family(ctx);
+            }
+        });
         self.recent_menu(ui, ctx);
-        if item(ui, "Save", cmd(Key::S)) {
-            self.save(ctx, None);
+        // On a family tab, Save and Save As are the family document's, and say so: the project is never saved from there.
+        let save_as = Some(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S));
+        if self.active_family().is_some() {
+            if item(ui, msg!("Save Family"), cmd(Key::S)) {
+                self.family_save(false);
+            }
+            if item(ui, msg!("Save Family As…"), save_as) {
+                self.family_save(true);
+            }
+        } else {
+            if item(ui, "Save", cmd(Key::S)) {
+                self.save(ctx, None);
+            }
+            if item(ui, msg!("Save As…"), save_as) {
+                self.save_as(ctx, None);
+            }
         }
-        if item(ui, "Save As…", Some(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S))) {
-            self.save_as(ctx, None);
-        }
-        if !self.autosave.candidates.is_empty() && item(ui, "Recover Autosave…", None) {
+        if !self.autosave.candidates.is_empty() && item(ui, msg!("Recover Autosave…"), None) {
             self.autosave.show_recovery = true;
         }
         SubMenuButton::new(t("Export")).ui(ui, |ui| {
-            if ui.button(t("IFC…")).clicked() {
-                self.export(ctx, "IFC4", "ifc");
+            let shortcut = ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::P));
+            if ui.add(egui::Button::new(t("Export…")).shortcut_text(shortcut)).clicked() {
+                self.open_export(None);
             }
-            if ui.button(t("View as PNG…")).clicked() {
-                self.export(ctx, "PNG image", "png");
+            if ui.button(t("Publisher…")).clicked() {
+                self.open_publisher();
             }
-            if ui.button(t("Plan as SVG…")).clicked() {
-                self.export(ctx, "SVG drawing", "svg");
-            }
-            if ui.button(t("Sheets as PDF…")).clicked() {
-                self.export(ctx, "PDF", "pdf");
+            if ui.button(t("Print Set…")).clicked() {
+                self.open_print_sets(None);
             }
         });
         self.report_menu(ui);
         self.update_menu(ui);
         ui.separator();
-        if item(ui, "Settings…", Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma))) {
+        if item(ui, msg!("Settings…"), Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma))) {
             self.settings_page = Some(settings::Page::Interface);
         }
         ui.separator();
-        if item(ui, "Exit", None) {
+        if item(ui, msg!("Exit"), None) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
 
     /// Ribbon buttons that pick tools, under the panel's name.
+    /// The Select panel each tab starts with: Modify, and Revit's Filter while something is selected, to keep some of it by
+    /// category or by the values of a parameter they all have.
+    fn select_panel(&mut self, ui: &mut Ui) {
+        // The Tools palette draws it once, over the tabs it shows.
+        if ribbon::skipping_select() {
+            return;
+        }
+        panel(ui, msg!("Select"), |ui| {
+            if big_button(ui, Icon::Modify, "Modify", structure::same_tool(&self.tool, &Tool::Modify), msg!("Modify (MD): select elements"))
+                .clicked()
+            {
+                self.set_tool(Tool::Modify);
+            }
+            if !self.selection.is_empty() {
+                let tip = msg!("Filter: keep some of the selection, by category or by the values of a parameter they all have");
+                if big_button(ui, Icon::Filter, "Filter", self.selection_filter.is_some(), tip).clicked() {
+                    self.open_filter();
+                }
+            }
+        });
+    }
+
     fn tools(&mut self, ui: &mut Ui, name: &str, tools: Tools) {
         panel(ui, name, |ui| {
             for (icon, label, tip, tool) in tools {
@@ -2465,34 +4371,34 @@ impl BimApp {
     }
 
     fn massing_tab(&mut self, ui: &mut Ui) {
-        let tip = "Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels";
+        let tip = msg!("Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels");
         let shown = !self.graphics_now().resolved(&self.session.model).categories.get("mass").is_some_and(|o| o.hidden);
-        panel(ui, "Conceptual Mass", |ui| {
+        panel(ui, msg!("Conceptual Mass"), |ui| {
             if big_button(ui, Icon::Mass, "Mass", structure::same_tool(&self.tool, &Tool::Mass(Vec::new())), tip).clicked() {
                 self.set_tool(Tool::Mass(Vec::new()));
             }
-            let tip = "Show Mass (MH): hides the masses in this view, or shows them again";
+            let tip = msg!("Show Mass (MH): hides the masses in this view, or shows them again");
             if big_button(ui, Icon::Visibility, "Show Mass", shown, tip).clicked() {
                 self.show_mass();
             }
         });
         let selected = !self.selected_masses().is_empty();
-        panel(ui, "Model by Face", |ui| {
+        panel(ui, msg!("Model by Face"), |ui| {
             ui.add_enabled_ui(selected, |ui| {
                 for (icon, label, tip, command) in [
-                    (Icon::Floor, "Mass Floors", "Mass Floors (MF): a floor at each level the selected masses cross", "mass_floors"),
+                    (Icon::Floor, "Mass Floors", msg!("Mass Floors (MF): a floor at each level the selected masses cross"), "mass_floors"),
                     (
                         Icon::Wall,
                         "Wall by Face",
-                        "Wall by Face (WB): a wall on each edge of the selected masses' footprints",
+                        msg!("Wall by Face (WB): a wall on each edge of the selected masses' footprints"),
                         "wall_by_face",
                     ),
-                    (Icon::Floor, "Floor by Face", "Floor by Face (FB): a floor on the selected masses' top faces", "floor_by_face"),
-                    (Icon::Roof, "Roof by Face", "Roof by Face (RB): a roof on the selected masses' top faces", "roof_by_face"),
+                    (Icon::Floor, "Floor by Face", msg!("Floor by Face (FB): a floor on the selected masses' top faces"), "floor_by_face"),
+                    (Icon::Roof, "Roof by Face", msg!("Roof by Face (RB): a roof on the selected masses' top faces"), "roof_by_face"),
                     (
                         Icon::Align,
                         "Update to Face",
-                        "Update to Face (UF): the walls, floors and roofs made by face from the selected masses follow them again",
+                        msg!("Update to Face (UF): the walls, floors and roofs made by face from the selected masses follow them again"),
                         "update_by_face",
                     ),
                 ] {
@@ -2543,116 +4449,222 @@ impl BimApp {
     }
 
     fn architecture_tab(&mut self, ui: &mut Ui) {
-        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
+        self.select_panel(ui);
         self.tools(
             ui,
-            "Build",
+            msg!("Build"),
             &[
-                (Icon::Wall, "Wall", "Wall (WA): each click builds a wall; Enter or Esc ends the chain", Tool::Wall(Vec::new())),
-                (Icon::Door, "Door", "Door (DR): click a wall", Tool::Door),
-                (Icon::Window, "Window", "Window (WN): click a wall", Tool::Window),
-                (Icon::Column, "Column", "Column (CL): click where it stands", Tool::Column),
-                (Icon::Component, "Component", "Component (CM): a family's type, where you click; Space turns it", Tool::Component),
-                (Icon::Roof, "Roof", "Roof by Footprint: click inside the walls to roof them, on the level above", Tool::Roof),
+                (Icon::Wall, "Wall", msg!("Wall (WA): each click builds a wall; Enter or Esc ends the chain"), Tool::Wall(Vec::new())),
+                (Icon::Door, "Door", msg!("Door (DR): click a wall"), Tool::Door),
+                (Icon::Window, "Window", msg!("Window (WN): click a wall"), Tool::Window),
+                (Icon::Column, "Column", msg!("Column (CL): click where it stands"), Tool::Column),
+                (Icon::Component, "Component", msg!("Component (CM): a family's type, where you click; Space turns it"), Tool::Component),
+                (Icon::Roof, "Roof", msg!("Roof by Footprint: click inside the walls to roof them, on the level above"), Tool::Roof),
                 (
                     Icon::ExtrusionRoof,
-                    "Roof by Extrusion",
-                    "Roof by Extrusion: click a line's start and end, then how far across it's swept; its profile rises from the line",
+                    msg!("Roof by Extrusion"),
+                    msg!(
+                        "Roof by Extrusion: click a line's start and end, then how far across it's swept; its profile rises from the line"
+                    ),
                     Tool::ExtrusionRoof(Vec::new()),
                 ),
-                (Icon::Floor, "Floor", "Floor: click inside the walls to floor them", Tool::Floor),
-                (Icon::Ceiling, "Ceiling", "Ceiling: click inside a room for a ceiling out to its walls", Tool::Ceiling),
+                (Icon::Floor, "Floor", msg!("Floor: click inside the walls to floor them"), Tool::Floor),
+                (Icon::Ceiling, "Ceiling", msg!("Ceiling: click inside a room for a ceiling out to its walls"), Tool::Ceiling),
             ],
         );
         self.tools(
             ui,
-            "Circulation",
+            msg!("Circulation"),
             &[
                 (
                     Icon::Stair,
                     "Stair",
-                    "Stair: click where it starts, then where its run ends; a landing turns it",
+                    msg!("Stair: click where it starts, then where its run ends; a landing turns it"),
                     Tool::Stair(Vec::new()),
                 ),
-                (Icon::Ramp, "Ramp", "Ramp: click where it starts, then where its run ends; a landing turns it", Tool::Ramp(Vec::new())),
+                (
+                    Icon::Ramp,
+                    "Ramp",
+                    msg!("Ramp: click where it starts, then where its run ends; a landing turns it"),
+                    Tool::Ramp(Vec::new()),
+                ),
                 (
                     Icon::Railing,
                     "Railing",
-                    "Railing: click a stair or a ramp for one down each side, or click a path and press Enter",
+                    msg!("Railing: click a stair or a ramp for one down each side, or click a path and press Enter"),
                     Tool::Railing(Vec::new()),
                 ),
             ],
         );
         // Room places one, where Place Rooms places them all: the second is no tool, because there is nothing to
         // click — the walls have already said where the rooms are.
+        let rooms: Tools = &[
+            (Icon::Room, "Room", msg!("Room (RM): click inside walls"), Tool::Room),
+            (
+                Icon::RoomSeparator,
+                "Room Separator",
+                msg!("Room Separator: lines that bound rooms as walls do, to split an open space; click from point to point"),
+                Tool::RoomSeparator(None),
+            ),
+        ];
         let mut placing = false;
-        panel(ui, "Room & Area", |ui| {
-            let tip = "Room (RM): click inside walls";
-            if big_button(ui, Icon::Room, "Room", structure::same_tool(&self.tool, &Tool::Room), tip).clicked() {
-                self.set_tool(Tool::Room);
+        // Room wide, as 0.12 has it; Room Separator and Place Rooms stacked beside it, so the panel takes no more of the
+        // ribbon than 0.12's two wide buttons and the Datum panel after it stays in view.
+        panel(ui, msg!("Room & Area"), |ui| {
+            let (icon, label, tip, tool) = &rooms[0];
+            if big_button(ui, *icon, label, structure::same_tool(&self.tool, tool), tip).clicked() {
+                self.set_tool(tool.clone());
             }
-            placing = big_button(
-                ui,
-                Icon::Room,
-                "Place Rooms",
-                false,
-                "Place Rooms Automatically: a room in every area the walls of this plan shut in that has none",
-            )
-            .clicked();
+            stacked(ui, |ui| {
+                let (icon, label, tip, tool) = &rooms[1];
+                if small_button(ui, *icon, label, structure::same_tool(&self.tool, tool), tip).clicked() {
+                    self.set_tool(tool.clone());
+                }
+                let tip = msg!("Place Rooms Automatically: a room in every area the walls of this plan shut in that has none");
+                placing = small_button(ui, Icon::Room, "Place Rooms", false, tip).clicked();
+            });
         });
         if placing {
             self.place_rooms();
         }
         self.tools(
             ui,
-            "Opening",
+            msg!("Opening"),
             &[
                 (
                     Icon::Shaft,
-                    "Shaft",
-                    "Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through",
+                    msg!("Shaft"),
+                    msg!("Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through"),
                     Tool::Shaft(None),
                 ),
-                (Icon::Dormer, "Dormer", "Dormer: click a roof's slope where its front wall goes; the roof opens under it", Tool::Dormer),
+                (
+                    Icon::Dormer,
+                    "Dormer",
+                    msg!("Dormer: click a roof's slope where its front wall goes; the roof opens under it"),
+                    Tool::Dormer,
+                ),
             ],
         );
-        self.tools(
-            ui,
-            "Datum",
-            &[
-                (Icon::Level, "Level", "Level (LL): a new level at an elevation", Tool::Level),
-                (Icon::Grid, "Grid", "Grid (GR): click its two ends", Tool::Grid(None)),
-            ],
-        );
+        // Datum, and the Work Plane's Set and Ref Plane beside its levels and grids, as Revit's Work Plane panel has them.
+        let datum: Tools = &[
+            (Icon::Level, "Level", msg!("Level (LL): a new level at an elevation"), Tool::Level),
+            (Icon::Grid, "Grid", msg!("Grid (GR): click its two ends"), Tool::Grid(None)),
+        ];
+        panel(ui, msg!("Datum"), |ui| {
+            for (icon, label, tip, tool) in datum {
+                let active = structure::same_tool(&self.tool, tool);
+                if big_button(ui, *icon, label, active, tip).clicked() {
+                    self.set_tool(tool.clone());
+                }
+            }
+            self.work_plane_set(ui);
+            let plane = Tool::ReferencePlane(None);
+            let tip = msg!("Reference Plane (RP): click its two ends; work plane-based components are placed on it and move with it");
+            if big_button(ui, Icon::RefPlane, msg!("Ref Plane"), structure::same_tool(&self.tool, &plane), tip).clicked() {
+                self.set_tool(plane);
+            }
+        });
+    }
+
+    /// Annotate > Dimension, as Revit's: Aligned and Linear big, the others small beside them, in two rows.
+    fn dimension_panel(&mut self, ui: &mut Ui) {
+        let big: [(Icon, &str, &str, Tool); 2] = [
+            (
+                Icon::Dimension,
+                msg!("Aligned"),
+                msg!(
+                    "Aligned Dimension (DI): pick parallel wall faces, wall ends, doors, windows or grids, or endpoints, then click \
+                     where the dimension line goes"
+                ),
+                Tool::Dimension(DimMode::Aligned, Vec::new()),
+            ),
+            (
+                Icon::Linear,
+                msg!("Linear"),
+                msg!(
+                    "Linear Dimension: pick endpoints (wall ends and corners, line ends, grid ends), then click where it goes: \
+                     horizontal or vertical as the cursor lies"
+                ),
+                Tool::Dimension(DimMode::Auto, Vec::new()),
+            ),
+        ];
+        let small: [(Icon, &str, &str, Tool); 7] = [
+            (
+                Icon::Angular,
+                msg!("Angular"),
+                msg!("Angular Dimension: pick two lines that meet, then click where the arc goes"),
+                Tool::Angular(Vec::new()),
+            ),
+            (
+                Icon::Radial,
+                msg!("Radial"),
+                msg!("Radial Dimension: pick a round column, a curved wall, a circle or an arc, then click where the radius goes"),
+                Tool::Round(DimKind::Radial, Vec::new()),
+            ),
+            (
+                Icon::Diameter,
+                msg!("Diameter"),
+                msg!("Diameter Dimension: pick a round column, a curved wall, a circle or an arc, then click where it goes"),
+                Tool::Round(DimKind::Diameter, Vec::new()),
+            ),
+            (
+                Icon::ArcLength,
+                msg!("Arc Length"),
+                msg!("Arc Length Dimension: pick a curved wall or an arc, then click where the dimension's arc goes"),
+                Tool::Round(DimKind::ArcLength, Vec::new()),
+            ),
+            (
+                Icon::Spot,
+                "Spot Elevation",
+                msg!("Spot Elevation (EL): click a floor, a roof or a stair; in a section, a point"),
+                Tool::Spot,
+            ),
+            (
+                Icon::SpotSlope,
+                msg!("Spot Slope"),
+                msg!("Spot Slope: click a floor or a roof in a plan; an arrow points downhill with how steeply its top falls"),
+                Tool::SpotSlope,
+            ),
+            (
+                Icon::SpotCoordinate,
+                "Spot Coordinate",
+                msg!(
+                    "Spot Coordinate (PC): click a point in a plan, then where its leader ends; it reads north, east and the elevation as its type says"
+                ),
+                Tool::SpotCoordinate(None),
+            ),
+        ];
+        panel(ui, "Dimension", |ui| {
+            for (icon, label, tip, tool) in &big {
+                if big_button(ui, *icon, label, structure::same_tool(&self.tool, tool), tip).clicked() {
+                    self.set_tool(tool.clone());
+                }
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for row in small.chunks(4) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 1.0;
+                        for (icon, label, tip, tool) in row {
+                            if small_button(ui, *icon, label, structure::same_tool(&self.tool, tool), tip).clicked() {
+                                self.set_tool(tool.clone());
+                            }
+                        }
+                    });
+                }
+            });
+        });
     }
 
     fn annotate_tab(&mut self, ui: &mut Ui) {
-        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
-        self.tools(
-            ui,
-            "Dimension",
-            &[
-                (
-                    Icon::Dimension,
-                    "Aligned",
-                    "Aligned Dimension (DI): pick parallel wall faces, wall ends, doors, windows or grids, then click where the \
-                     dimension line goes",
-                    Tool::Dimension(Vec::new()),
-                ),
-                (
-                    Icon::Angular,
-                    "Angular",
-                    "Angular Dimension: pick two lines that meet, then click where the arc goes",
-                    Tool::Angular(Vec::new()),
-                ),
-                (Icon::Radial, "Radial", "Radial Dimension: pick a round column, then click where the radius goes", Tool::Radial(None)),
-                (Icon::Spot, "Spot Elevation", "Spot Elevation (EL): click a floor, a roof or a stair; in a section, a point", Tool::Spot),
-            ],
-        );
+        self.select_panel(ui);
+        self.dimension_panel(ui);
+        self.detail_panel(ui);
+        self.region_panel(ui);
         self.tools(
             ui,
             "Text",
-            &[(Icon::Text, "Text", "Text (TX): type the note in the Options Bar, then click where it goes", Tool::Text)],
+            &[(Icon::Text, "Text", msg!("Text (TX): type the note in the Options Bar, then click where it goes"), Tool::Text)],
         );
         self.tools(
             ui,
@@ -2660,12 +4672,13 @@ impl BimApp {
             &[(
                 Icon::Measure,
                 "Measure",
-                "Measure (ME): click two points; their length and angle read beside the ruler between them",
+                msg!("Measure (ME): click two points; their length and angle read beside the ruler between them. In the 3D view, any two points of the model, whatever the work plane"),
                 Tool::Measure(None),
             )],
         );
         panel(ui, "Tag", |ui| {
-            let tip = "Tag by Category (TG): click an element to tag it with its type, a door's or window's mark, or the field in Label";
+            let tip =
+                msg!("Tag by Category (TG): click an element to tag it with its type, a door's or window's mark, or the field in Label");
             if big_button(ui, Icon::Tag, "Tag by Category", self.tool == Tool::Tag, tip).clicked() {
                 self.set_tool(Tool::Tag);
             }
@@ -2700,7 +4713,7 @@ impl BimApp {
 
     fn view_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Graphics", |ui| {
-            let tip = "Visibility/Graphics (VV): what this view hides, and how it draws the rest, by category, filter and element";
+            let tip = msg!("Visibility/Graphics (VV): what this view hides, and how it draws the rest, by category, filter and element");
             let on = self.graphic_view().is_some();
             if ui
                 .add_enabled_ui(on, |ui| big_button(ui, Icon::Visibility, "Visibility/Graphics", self.vg_dialog.is_some(), tip))
@@ -2709,22 +4722,27 @@ impl BimApp {
             {
                 self.open_graphics(0);
             }
-            let tip = "Filters (FT): rules that pick out elements for a view to hide or draw another way";
+            let tip = msg!("Filters (FT): rules that pick out elements for a view to hide or draw another way");
             if big_button(ui, Icon::Filter, "Filters", self.filters_dialog.is_some(), tip).clicked() {
                 self.filters_dialog = Some(graphics::FiltersDialog::default());
             }
-            let tip = "View Templates (VT): a view's settings under a name, for other views to follow";
+            let tip = msg!("View Templates (VT): a view's settings under a name, for other views to follow");
             if big_button(ui, Icon::Template, "View Templates", self.templates_dialog.is_some(), tip).clicked() {
-                self.templates_dialog = Some(graphics::TemplatesDialog::default());
+                self.open_templates();
             }
             if big_button(ui, Icon::ThinLines, "Thin Lines", self.thin, "Thin Lines (TL): every line one pixel wide").clicked() {
                 self.thin = !self.thin;
             }
             let dark = style::dark();
-            let tip = "Dark Mode: the window and the views light on dark; sheets stay paper. It starts as your system's theme";
-            if big_button(ui, Icon::Theme, "Dark Mode", dark, tip).clicked() {
-                ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
-            }
+            let tip = msg!("Choose a theme, including a dark interface with a light canvas");
+            let r = big_button(ui, Icon::Theme, "Dark Mode", dark, tip);
+            let at = r.rect.right_top() + vec2(-8.0, 9.0);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![at + vec2(-3.0, -2.0), at + vec2(3.0, -2.0), at + vec2(0.0, 2.0)],
+                pal().icon,
+                Stroke::NONE,
+            ));
+            ribbon::choices(ui, &r, false, |ui| self.theme_choices(ui, true));
             // A plan's or a section's crop region: on to what it shows, or off.
             let view = match self.sheet {
                 Sheet::Plan(id) | Sheet::Section(id) => Some(id),
@@ -2735,7 +4753,7 @@ impl BimApp {
                 Some(Element::Section(v) | Element::Elevation(v)) => v.crop.is_some(),
                 _ => false,
             });
-            let tip = "Crop View: show only the crop region; drag its edges by their grips";
+            let tip = msg!("Crop View: show only the crop region; drag its edges by their grips");
             if ui.add_enabled_ui(view.is_some(), |ui| big_button(ui, Icon::Crop, "Crop View", cropped, tip)).inner.clicked()
                 && let Some(id) = view
             {
@@ -2744,11 +4762,13 @@ impl BimApp {
         });
         panel(ui, "Create", |ui| {
             if big_button(ui, Icon::View3D, "3D View", self.sheet == Sheet::View3D, "Open the default 3D view").clicked() {
-                self.open_sheet(Sheet::View3D);
+                self.open_3d(None);
             }
-            let tip = "Duplicate View (DP): a new plan of this level with its own annotation; with detailing, it starts with this plan's; as a dependent, it follows this plan's range and graphics";
+            let tip = msg!(
+                "Duplicate View (DP): a new plan of this level with its own annotation; with detailing, it starts with this plan's; as a dependent, it follows this plan's range and graphics"
+            );
             let r = ui.add_enabled_ui(self.plan_key().is_some(), |ui| big_button(ui, Icon::Copy, "Duplicate View", false, tip)).inner;
-            Popup::menu(&r).show(|ui| {
+            ribbon::choices(ui, &r, false, |ui| {
                 for (label, mode) in
                     [("Duplicate", "duplicate"), ("Duplicate with Detailing", "detailing"), ("Duplicate as Dependent", "dependent")]
                 {
@@ -2757,16 +4777,20 @@ impl BimApp {
                     }
                 }
             });
-            let tip = "Section (CR): click its start, then its end; it looks to the left of the line";
+            let tip = msg!("Section (CR): click its start, then its end; it looks to the left of the line");
             if big_button(ui, Icon::Section, "Section", matches!(self.tool, Tool::Section(_)), tip).clicked() {
                 self.set_tool(Tool::Section(None));
             }
-            let tip = "Elevation: click beside the building, on the side to look at";
+            let tip = msg!("Elevation: click a wall, a line or a slab's edge to look at, the project's or a link's");
             if big_button(ui, Icon::Elevation, "Elevation", self.tool == Tool::Elevation, tip).clicked() {
                 self.set_tool(Tool::Elevation);
             }
+            let tip = msg!("Camera: click where its eye stands, then what it looks at: a 3D view in perspective from there");
+            if big_button(ui, Icon::Camera, "Camera", matches!(self.tool, Tool::Camera(_)), tip).clicked() {
+                self.set_tool(Tool::Camera(None));
+            }
             let r = big_button(ui, Icon::Schedule, "Schedules", false, "Make a schedule, or open one");
-            Popup::menu(&r).show(|ui| {
+            ribbon::choices(ui, &r, false, |ui| {
                 if ui.button(t("Schedule/Quantities…")).clicked() {
                     self.new_schedule = Some(properties::NewSchedule::default());
                 }
@@ -2776,7 +4800,8 @@ impl BimApp {
                         self.open_sheet(Sheet::Schedule(cat));
                     }
                 }
-                let made: Vec<(Id, String)> = self.schedules().into_iter().map(|(id, n)| (id, n.to_string())).collect();
+                let made: Vec<(Id, String)> =
+                    self.schedules().into_iter().chain(self.panel_schedules()).map(|(id, n)| (id, n.to_string())).collect();
                 for (id, name) in made {
                     if ui.button(name).clicked() {
                         self.open_sheet(Sheet::Table(id));
@@ -2784,21 +4809,25 @@ impl BimApp {
                 }
             });
         });
-        panel(ui, "Sheet Composition", |ui| {
+        panel(ui, msg!("Sheet Composition"), |ui| {
             if big_button(ui, Icon::Sheet, "Sheet", false, "A new sheet, with a title block").clicked()
                 && let Some(id) = self.run("sheet", json!({})).and_then(|made| made["id"].as_u64())
             {
                 self.open_sheet(Sheet::Paper(id));
             }
+            let tip = msg!("Title Blocks (TB): your own, read from a DXF or typed, with fields each sheet or the whole project fills in");
+            if big_button(ui, Icon::Sheet, "Title Blocks", self.title_blocks_dialog.is_some(), tip).clicked() {
+                self.open_title_blocks(None);
+            }
             let sheet = match self.sheet {
                 Sheet::Paper(id) => Some(id),
                 _ => None,
             };
-            let tip = "Put a view on this sheet: one not on a sheet yet";
+            let tip = msg!("Put a view on this sheet: one not on a sheet yet");
             let r = ui.add_enabled_ui(sheet.is_some(), |ui| big_button(ui, Icon::PlaceView, "Place View", false, tip)).inner;
             if let Some(sheet) = sheet {
                 let views = self.unplaced_views();
-                Popup::menu(&r).show(|ui| {
+                ribbon::choices(ui, &r, false, |ui| {
                     if views.is_empty() {
                         ui.label(t("Every view is on a sheet."));
                     }
@@ -2821,9 +4850,9 @@ impl BimApp {
                 self.views.retain(|v| *v == active);
                 self.floating.retain(|f| f.sheet == active);
             }
-            let tip = "Show or hide the palettes, and pick the interface's language";
+            let tip = msg!("Show or hide the palettes, and pick the interface's language");
             let r = big_button(ui, Icon::Interface, "User Interface", false, tip);
-            Popup::menu(&r).show(|ui| {
+            ribbon::choices(ui, &r, false, |ui| {
                 for p in dock::Palette::ALL {
                     let mut on = self.docking.shown(p);
                     if ui.checkbox(&mut on, t(p.name())).changed() {
@@ -2838,55 +4867,173 @@ impl BimApp {
                     }
                 }
             });
+            // Last, so a narrow window hands it to the panel's list before User Interface (File > Export has it too).
+            if big_button(ui, Icon::Sheet, "Publisher", self.publisher.is_some(), "Open publishing sets and export their print sets")
+                .clicked()
+            {
+                self.open_publisher();
+            }
         });
     }
 
     /// Manage: the project's settings, as Revit's tab has them.
+    /// Insert: what comes into the project from other files, as Revit's tab. Link: other projects, and laser scans.
+    fn insert_tab(&mut self, ui: &mut Ui) {
+        panel(ui, msg!("Link"), |ui| {
+            let tip = msg!(
+                "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to"
+            );
+            if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
+                self.link_dialog = true;
+            }
+            let tip = msg!(
+                "Point Cloud: laser scans (PTS, XYZ, PLY, LAS or E57) brought into the project, one file or a survey's stations as one scan, drawn in the 3D view, plans and sections and snapped to"
+            );
+            if big_button(ui, Icon::PointCloud, "Point Cloud", self.cloud_box.is_some(), tip).clicked() {
+                self.cloud_dialog = true;
+            }
+            let tip = msg!(
+                "Link CAD: a DWG or DXF drawing shown in the plans of a level, read again from its file on Reload and when the project opens"
+            );
+            if big_button(ui, Icon::LinkCad, "Link CAD", self.cad_box.as_ref().is_some_and(|b| b.linked()), tip).clicked() {
+                self.cad_dialog = Some(true);
+            }
+        });
+        panel(ui, msg!("Import"), |ui| {
+            let tip = msg!(
+                "Import CAD: a DWG or DXF drawing brought into the project, drawn under the model in the plans of a level, its layers, colours and linetypes kept, and snapped to"
+            );
+            if big_button(ui, Icon::ImportCad, "Import CAD", self.cad_box.as_ref().is_some_and(|b| !b.linked()), tip).clicked() {
+                self.cad_dialog = Some(false);
+            }
+            let tip = msg!(
+                "Import 3D Model: an OBJ or glTF file's objects brought into the project as Generic Model families, each placed where the file has it on this plan's level, with its materials' colours"
+            );
+            if big_button(ui, Icon::Component, "Import 3D Model", false, tip).clicked() {
+                self.import_mesh_dialog(ui.ctx());
+            }
+        });
+    }
+
+    /// Collaborate: Co-Work, others working on this project live.
+    fn collaborate_tab(&mut self, ui: &mut Ui) {
+        panel(ui, msg!("Work Together"), |ui| {
+            let tip =
+                msg!("Co-Work (CW): host this project for others on BIMCraft, or join someone's session, and see each other's edits live");
+            if big_button(ui, Icon::Cowork, "Co-Work", self.cowork_dialog.is_some(), tip).clicked() {
+                self.open_cowork();
+            }
+        });
+    }
+
     fn manage_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Settings", |ui| {
-            let tip = "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show";
+            let tip = msg!("Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show");
             if big_button(ui, Icon::Materials, "Materials", self.materials_dialog.is_some(), tip).clicked() {
                 self.materials_dialog = Some(properties::MaterialsDialog::new(&self.session.model));
             }
-            let tip = "Favorites: the materials and families you keep for every project; add one to this project with a click";
+            let tip = msg!("Favorites: the materials and families you keep for every project; add one to this project with a click");
             if big_button(ui, Icon::Favorite, "Favorites", self.favorites_dialog.is_some(), tip).clicked() {
                 self.open_favorites();
             }
-            let tip = "Project Parameters: values of your own each element of their categories holds, for schedules and IFC";
-            if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
-                self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
-            }
-            let tip = "Price List (PL): a published price list as this project's data, so a bill of quantities has prices to work with; you say which column holds the code, the wording, the unit and the price";
-            if big_button(ui, Icon::Schedule, "Price List", self.price_dialog.is_some(), tip).clicked() {
-                self.open_prices();
-            }
             let tip =
-                "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type";
-            if big_button(ui, Icon::Delete, "Purge Unused", self.purge_dialog.is_some(), tip).clicked() {
-                self.open_purge();
+                msg!("Plugins: the WASM extensions in your plugin folder, what became of each, their log, and switching them on and off");
+            if big_button(ui, Icon::Code, "Plugins", self.plugins_dialog, tip).clicked() {
+                self.plugins_dialog = true;
             }
-            let tip = "Line Weights: what each pen draws on paper, the model's at each scale and the annotation's at any";
-            if big_button(ui, Icon::LineWeights, "Line Weights", self.line_weights_dialog.is_some(), tip).clicked() {
-                self.line_weights_dialog = Some(lineweights::LineWeightsDialog::new(&self.session.model));
+            // The project's information, its parameters and Purge Unused, stacked, as Revit's Settings panel has them.
+            stacked(ui, |ui| {
+                let tip =
+                    msg!("Project Information: the project's name, number, client, address, status and issue date, and its parameters");
+                if stacked_button(ui, Icon::ProjectInfo, "Project Information", self.project_info_dialog.is_some(), tip).clicked() {
+                    self.open_project_info();
+                }
+                let tip = msg!(
+                    "Project Parameters: project and shared parameters in one place, their categories, dictionaries, import and export"
+                );
+                if stacked_button(ui, Icon::Parameters, "Project Parameters", self.parameter_manager.is_some(), tip).clicked() {
+                    self.parameter_manager = Some(parameters::ParameterManager::new(&self.session.model));
+                }
+                let tip = msg!(
+                    "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type"
+                );
+                if stacked_button(ui, Icon::Delete, "Purge Unused", self.purge_dialog.is_some(), tip).clicked() {
+                    self.open_purge();
+                }
+            });
+            // What annotation draws with: pens, line styles and patterns, fill patterns; one button that lists them.
+            let open = self.line_weights_dialog.is_some() || self.line_styles_dialog.is_some() || self.fill_patterns_dialog.is_some();
+            let tip = msg!("Annotation Settings: line weights, line styles, line patterns and fill patterns");
+            let r = big_button(ui, Icon::AnnotationSettings, "Annotation Settings", open, tip);
+            ribbon::choices(ui, &r, false, |ui| {
+                // As wide as its longest name, not the window.
+                ui.set_width(200.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let tip = msg!("Line Weights: what each pen draws on paper, the model's at each scale and the annotation's at any");
+                if list_row(ui, Icon::LineWeights, "Line Weights", false, tip).clicked() {
+                    self.line_weights_dialog = Some(lineweights::LineWeightsDialog::new(&self.session.model));
+                }
+                let tip = msg!("Line Styles: the pen, colour and line pattern detail lines draw in");
+                if list_row(ui, Icon::ThinLines, "Line Styles", false, tip).clicked() {
+                    self.line_styles_dialog = Some(linestyles::LineStylesDialog::new(&self.session.model));
+                }
+                let tip = msg!("Line Patterns: the dashes, dots, spaces and shapes lines are drawn with");
+                if list_row(ui, Icon::LinePatterns, "Line Patterns", false, tip).clicked() {
+                    self.line_styles_dialog = Some(linestyles::LineStylesDialog::patterns(&self.session.model));
+                }
+                let tip = msg!("Fill Patterns: the patterns filled regions and materials fill with, simple or made from lines drawn");
+                if list_row(ui, Icon::FillPatterns, "Fill Patterns", false, tip).clicked() {
+                    self.fill_patterns_dialog = Some(fillpatterns::FillPatternsDialog::new(&self.session.model));
+                }
+            });
+            let now_std = self.session.model.standard();
+            let tip = tf("Technical Standards: configure drawing standards (NBR, ISO, ANSI, EU); now {}", &[t(now_std.short_name())]);
+            if big_button(ui, Icon::Settings, "Technical Standards", self.standards_dialog.is_some(), &tip).clicked() {
+                self.standards_dialog = Some(standards::StandardsDialog::new(&self.session.model));
             }
-            let tip = "Object Styles: the pen each category draws in, seen and cut, in every view";
-            if big_button(ui, Icon::ObjectStyles, "Object Styles", self.object_styles_dialog.is_some(), tip).clicked() {
-                self.object_styles_dialog = Some(objectstyles::ObjectStylesDialog::new(&self.session.model));
+            let tip = msg!(
+                "Electrical Settings: the voltages, distribution systems and wire types circuits and panels refer to; sections in mm²"
+            );
+            if big_button(ui, Icon::Wire, "Electrical Settings", self.electrical_dialog.is_some(), tip).clicked() {
+                self.electrical_dialog = Some(electrical::ElectricalDialog::new(&self.session.model));
             }
-            let tip = "Snaps: what a picked point sticks to (ends, middles, crossings, centres, perpendiculars), and the angles it steps by; SE, SM, SI, SC, SP and SN take one alone for the next point, SO none";
-            if big_button(ui, Icon::Snaps, "Snaps", self.show_snaps, tip).clicked() {
-                self.show_snaps = true;
+            // Object styles, snaps and units, stacked.
+            stacked(ui, |ui| {
+                let tip = msg!("Object Styles: the pen each category draws in, seen and cut, in every view");
+                if stacked_button(ui, Icon::ObjectStyles, "Object Styles", self.object_styles_dialog.is_some(), tip).clicked() {
+                    self.object_styles_dialog = Some(objectstyles::ObjectStylesDialog::new(&self.session.model));
+                }
+                let tip = msg!(
+                    "Snaps: what a picked point sticks to (ends, middles, crossings, centres, perpendiculars), and the angles it steps by; SE, SM, SI, SC, SP and SN take one alone for the next point, SO none"
+                );
+                if stacked_button(ui, Icon::Snaps, "Snaps", self.show_snaps, tip).clicked() {
+                    self.show_snaps = true;
+                }
+                let now = self.session.model.units;
+                let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
+                let r = stacked_button(ui, Icon::Units, msg!("Project Units"), false, &tip);
+                let asked = self.open_units;
+                let opened = ribbon::choices(ui, &r, asked, |ui| {
+                    for u in Units::ALL {
+                        if ui.selectable_label(u == now, t(u.label())).clicked() {
+                            self.run("units", json!({"length": u.name()}));
+                        }
+                    }
+                });
+                self.open_units &= !opened;
+            });
+            let tip = msg!("Keyboard Shortcuts (KS): customize, edit, and load shortcut keys");
+            if big_button(ui, Icon::Keyboard, "Shortcuts", self.show_shortcuts, tip).clicked() {
+                self.show_shortcuts = true;
             }
-            let now = self.session.model.units;
-            let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
-            let r = big_button(ui, Icon::Units, "Project Units", false, &tip);
-            if std::mem::take(&mut self.open_units) {
-                Popup::open_id(ui.ctx(), Popup::default_response_id(&r));
-            }
-            Popup::menu(&r).show(|ui| {
-                for u in Units::ALL {
-                    if ui.selectable_label(u == now, t(u.label())).clicked() {
-                        self.run("units", json!({"length": u.name()}));
+            // Where a room's area is measured, as Revit's Room Area Computation.
+            let now = self.session.model.room_area;
+            let tip = tf("Room Area Computation: where room areas are measured; now {}", &[&t(now.label()).to_lowercase()]);
+            let r = big_button(ui, Icon::Settings, "Room Area Computation", false, &tip);
+            ribbon::choices(ui, &r, false, |ui| {
+                for a in RoomArea::ALL {
+                    if ui.selectable_label(a == now, t(a.label())).clicked() {
+                        self.run("room_area", json!({"at": a.name()}));
                     }
                 }
             });
@@ -2894,7 +5041,7 @@ impl BimApp {
             let now = self.session.model.language;
             let tip = tf("Project Language: what the drawings say and how new things are named; now {}", &[now.label()]);
             let r = big_button(ui, Icon::Text, "Project Language", false, &tip);
-            Popup::menu(&r).show(|ui| {
+            ribbon::choices(ui, &r, false, |ui| {
                 for l in Language::ALL {
                     if ui.selectable_label(l == now, l.label()).clicked() {
                         self.run("language", json!({"code": l.code()}));
@@ -2902,42 +5049,48 @@ impl BimApp {
                 }
             });
         });
-        // Of a kind, so small buttons side by side rather than wide ones: the tab is a ribbon, and what follows it
-        // has to stay in view.
-        panel(ui, "Links", |ui| {
+        // Revit's Project Location: where the project stands, and what stands with it by shared coordinates.
+        // Yielding: Location goes into the panel's list before any other panel gives way, so the tab is no wider than it was.
+        ribbon::yielding(ui, msg!("Project Location"), |ui| {
             let tip = "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to";
-            if small_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
+            if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
                 self.link_dialog = true;
             }
-            let tip = "Link CAD (LC): a CAD drawing (.dxf) under the plan on screen, to trace over and snap to: a survey, a consultant's drawing. Nothing of it is the project's and no tool can edit it";
-            if small_button(ui, Icon::Plan, "Link CAD", false, tip).clicked() {
-                self.cad_dialog = true;
-            }
-            let tip = "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in";
-            if small_button(ui, Icon::Wall, "Trace Walls", self.trace_dialog.is_some(), tip).clicked() {
-                self.open_trace();
+            let tip = msg!(
+                "Location (LO): where the project stands in the world: its locations, the Project Base Point and the Survey Point, the map system, managing them, and conversions"
+            );
+            if big_button(ui, Icon::Coordinates, "Location", self.coordinates_dialog.is_some(), tip).clicked() {
+                self.open_location();
             }
         });
-        panel(ui, "Family Editor", |ui| {
-            let tip = "New Family: start a family of your own, of a category, to edit its parameters, types and forms";
-            let r = big_button(ui, Icon::FamilyEditor, "New Family", false, tip);
-            Popup::menu(&r).show(|ui| {
-                for c in editor::CATEGORIES {
-                    if ui.button(editor::category_label(c)).clicked() {
-                        self.new_family(c);
-                    }
+        // A drawing under a plan to trace over, the walls traced from it, and the prices a bill of quantities is made with:
+        // the survey-to-estimate work, stacked as small buttons rather than wide ones, because the tab is a ribbon and what
+        // follows it has to stay in view. Insert > Link CAD brings a drawing in as an import instead, which Trace Walls does
+        // not read.
+        panel(ui, msg!("Links"), |ui| {
+            stacked(ui, |ui| {
+                let tip = msg!(
+                    "Link CAD (LC): a CAD drawing (.dxf) under the plan on screen, to trace over and snap to: a survey, a consultant's drawing. Nothing of it is the project's and no tool can edit it"
+                );
+                if small_button(ui, Icon::Plan, "Link CAD", false, tip).clicked() {
+                    self.underlay_dialog = true;
                 }
-            });
-            let tip = "Edit Family: the family of what is selected, or of the component being placed";
-            let family = self.family_in_hand();
-            if ui.add_enabled_ui(family.is_some(), |ui| big_button(ui, Icon::FamilyEditor, "Edit Family", false, tip)).inner.clicked()
-                && let Some(f) = family
-            {
-                self.edit_family(&f);
-            }
+                let tip = msg!(
+                    "Trace Walls (TW): the walls of the drawing under the plan on screen, built. A survey draws a wall as its two faces, so a pair of lines a wall's thickness apart is a wall; the layers say which phase each wall is in"
+                );
+                if small_button(ui, Icon::Wall, "Trace Walls", self.trace_dialog.is_some(), tip).clicked() {
+                    self.open_trace();
+                }
+                let tip = msg!(
+                    "Price List (PL): a published price list as this project's data, so a bill of quantities has prices to work with; you say which column holds the code, the wording, the unit and the price"
+                );
+                if small_button(ui, Icon::Schedule, "Price List", self.price_dialog.is_some(), tip).clicked() {
+                    self.open_prices();
+                }
+            })
         });
-        panel(ui, "Inquiry", |ui| {
-            let tip = "Select by ID: select elements by their IDs, GUIDs or IFC GlobalIds, as many as you paste, and show them";
+        panel(ui, msg!("Inquiry"), |ui| {
+            let tip = msg!("Select by ID: select elements by their IDs, GUIDs or IFC GlobalIds, as many as you paste, and show them");
             if big_button(ui, Icon::SelectById, "Select by ID", self.select_by_id.is_some(), tip).clicked() {
                 self.open_select_by_id();
             }
@@ -2952,21 +5105,36 @@ impl BimApp {
             }
         });
         panel(ui, "Phasing", |ui| {
-            let tip = "Phasing (PH): the project's phases in order, the phase filters that show them, and how a filter draws each";
+            let tip = msg!("Phasing (PH): the project's phases in order, the phase filters that show them, and how a filter draws each");
             if big_button(ui, Icon::Phasing, "Phasing", self.phasing_dialog.is_some(), tip).clicked() {
                 self.phasing_dialog = Some(phasing::PhasingDialog::default());
             }
         });
         panel(ui, "Design Options", |ui| {
-            let tip = "Design Options (DO): sets of options for a part of the design, and the one new elements are made in";
+            let tip = msg!("Design Options (DO): sets of options for a part of the design, and the one new elements are made in");
             if big_button(ui, Icon::Options, "Design Options", self.options_dialog.is_some(), tip).clicked() {
                 self.options_dialog = Some(phasing::OptionsDialog::default());
+            }
+        });
+        panel(ui, msg!("Macros"), |ui| {
+            let tip =
+                msg!("Run Script: commands, one a line as agents and the command line write them, tried first and run as one undo step");
+            if big_button(ui, Icon::Code, "Run Script", self.run_script.is_some(), tip).clicked() {
+                self.open_run_script();
             }
         });
     }
 
     fn modify_tab(&mut self, ui: &mut Ui) {
-        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
+        self.select_panel(ui);
+        if self.sketch.is_some() {
+            self.sketch_draw(ui);
+            self.walls_outline_panel(ui);
+            self.sketch_modify_panel(ui);
+            self.mode_panel(ui);
+            return;
+        }
+        self.sketch_starters(ui);
         panel(ui, "Properties", |ui| {
             let shown = self.docking.shown(dock::Palette::Properties);
             if big_button(ui, Icon::Properties, "Properties", shown, "Properties (PP): show or hide the palette").clicked() {
@@ -2981,31 +5149,49 @@ impl BimApp {
                 self.edit_type();
             }
         });
+        // A dimension selected: its references are picked again from the Modify tab, as from its right-click menu.
+        let dimension = matches!(self.selection.as_slice(), [id]
+            if matches!(self.session.model.elements.get(*id), Some(Element::Dimension(d)) if !d.alignment));
+        if dimension {
+            panel(ui, msg!("Dimension"), |ui| {
+                let active = self.dimension_refs_edit.is_some();
+                let tip = msg!(
+                    "Edit Dimension References: click a picked reference to take it out, another element to add it; click away places the line. Enter confirms, Esc cancels"
+                );
+                if big_button(ui, Icon::Dimension, "Edit Dimension References", active, tip).clicked() {
+                    if active {
+                        self.commit_dimension_refs();
+                    } else {
+                        self.start_dimension_refs_edit();
+                    }
+                }
+            });
+        }
         // Hide in View, and Override Graphics: what the selection does in the view on screen.
         if !self.selection.is_empty() && self.graphic_view().is_some() {
             panel(ui, "View", |ui| {
-                let tip = "Hide Element (EH): leave the selected elements out of this view";
+                let tip = msg!("Hide Element (EH): leave the selected elements out of this view");
                 if big_button(ui, Icon::Visibility, "Hide Element", false, tip).clicked() {
                     self.hide_selection(false);
                 }
-                let tip = "Hide Category (VH): leave every category the selection is of out of this view";
+                let tip = msg!("Hide Category (VH): leave every category the selection is of out of this view");
                 if big_button(ui, Icon::Visibility, "Hide Category", false, tip).clicked() {
                     self.hide_selection(true);
                 }
-                let tip = "Override Graphics by Element (EO): draw the selected elements their own way in this view";
+                let tip = msg!("Override Graphics by Element (EO): draw the selected elements their own way in this view");
                 if big_button(ui, Icon::Visibility, "Override Graphics", false, tip).clicked() {
                     self.override_selection();
                 }
                 // What can be picked while hidden is what Reveal Hidden Elements draws: its selection can be brought back.
                 let (elements, categories) = self.hidden_selection();
                 if !elements.is_empty() {
-                    let tip = "Unhide Element (EU): bring back the selected elements this view hides";
+                    let tip = msg!("Unhide Element (EU): bring back the selected elements this view hides");
                     if big_button(ui, Icon::Visibility, "Unhide Element", false, tip).clicked() {
                         self.unhide_selection(false);
                     }
                 }
                 if !categories.is_empty() {
-                    let tip = "Unhide Category (VU): bring back every category the selection is of that this view hides";
+                    let tip = msg!("Unhide Category (VU): bring back every category the selection is of that this view hides");
                     if big_button(ui, Icon::Visibility, "Unhide Category", false, tip).clicked() {
                         self.unhide_selection(true);
                     }
@@ -3021,107 +5207,166 @@ impl BimApp {
         };
         let rows: [Buttons; 2] = [
             &[
-                (Icon::Align, "Align", "Align (AL): pick a reference line, then what to line up with it", Some(Tool::Align(None)), true),
-                (Icon::Offset, "Offset", "Offset (OF): pick a wall; a copy goes to the cursor's side", Some(Tool::Offset), true),
+                (
+                    Icon::Align,
+                    "Align",
+                    msg!("Align (AL): pick a reference line, then what to line up with it"),
+                    Some(Tool::Align(None)),
+                    true,
+                ),
+                (
+                    Icon::Offset,
+                    "Offset",
+                    msg!("Offset (OF): pick a wall or a line; a copy goes to the cursor's side"),
+                    Some(Tool::Offset),
+                    true,
+                ),
                 (
                     Icon::MirrorPick,
                     "Mirror Pick Axis",
-                    "Mirror, Pick Axis (MM): pick a wall or grid to mirror across",
+                    msg!("Mirror, Pick Axis (MM): pick a wall or grid to mirror across"),
                     Some(Tool::Mirror { draw: false, start: None }),
                     some,
                 ),
                 (
                     Icon::MirrorDraw,
                     "Mirror Draw Axis",
-                    "Mirror, Draw Axis (DM): click the axis's two ends",
+                    msg!("Mirror, Draw Axis (DM): click the axis's two ends"),
                     Some(Tool::Mirror { draw: true, start: None }),
                     some,
                 ),
-                (Icon::Split, "Split Element", "Split Element (SL): click a wall where to split it", Some(Tool::Split), true),
+                (
+                    Icon::Split,
+                    msg!("Split Element"),
+                    msg!("Split Element (SL): click a wall or a line where to split it"),
+                    Some(Tool::Split),
+                    true,
+                ),
+                (
+                    Icon::Linework,
+                    msg!("Linework"),
+                    msg!("Linework (LW): click an edge to draw it in another line style, or hide it, in this view only"),
+                    Some(Tool::Linework),
+                    true,
+                ),
+                (
+                    Icon::TrimSingle,
+                    msg!("Trim/Extend Single Element"),
+                    msg!("Trim/Extend Single Element: pick the line to trim or extend to, then the line to change, on the part to keep"),
+                    Some(Tool::TrimTo { boundary: None, many: false }),
+                    true,
+                ),
             ],
             &[
-                (Icon::Move, "Move", "Move (MV): click a base point, then where it goes", Some(Tool::Move(None)), some),
-                (Icon::Copy, "Copy", "Copy (CO): click a base point, then where the copy goes", Some(Tool::Copy(None)), some),
+                (Icon::Move, "Move", msg!("Move (MV): click a base point, then where it goes"), Some(Tool::Move(None)), some),
+                (Icon::Copy, "Copy", msg!("Copy (CO): click a base point, then where the copy goes"), Some(Tool::Copy(None)), some),
                 (
                     Icon::Rotate,
                     "Rotate",
-                    "Rotate (RO): click the angle's start, then its end",
+                    msg!("Rotate (RO): click the angle's start, then its end"),
                     Some(Tool::Rotate { centre: P2(0.0, 0.0), start: None, place: false }),
                     some,
                 ),
                 (
                     Icon::Trim,
                     "Trim/Extend to Corner",
-                    "Trim/Extend to Corner (TR): pick two walls, on the parts to keep",
+                    msg!("Trim/Extend to Corner (TR): pick two walls or two lines, on the parts to keep"),
                     Some(Tool::Trim(None)),
                     true,
                 ),
-                (Icon::Delete, "Delete", "Delete (DE) the selection", None, some),
+                (
+                    Icon::TrimMultiple,
+                    msg!("Trim/Extend Multiple Elements"),
+                    msg!(
+                        "Trim/Extend Multiple Elements: pick the line to trim or extend to, then each line to change, on the part to keep"
+                    ),
+                    Some(Tool::TrimTo { boundary: None, many: true }),
+                    true,
+                ),
+                (Icon::Delete, "Delete", msg!("Delete (DE) the selection"), None, some),
             ],
         ];
-        // The Wall tool's Draw panel: lines, or arcs by their ends and a point on them.
-        if matches!(self.tool, Tool::Wall(_)) {
-            panel(ui, "Draw", |ui| {
-                if big_button(ui, Icon::Line, "Line", !self.wall_arc, "Line: a wall along each step between the points clicked").clicked() {
-                    self.draw_arc(false);
-                }
-                let tip = "Start-End-Radius Arc: click its start, its end, then a point it passes through";
-                if big_button(ui, Icon::Arc, "Start-End-Radius Arc", self.wall_arc, tip).clicked() {
-                    self.draw_arc(true);
-                }
-            });
+        // The Wall tool's and the Detail Line tool's Draw panels: lines, rectangles, polygons, circles, arcs and the rest.
+        match self.tool {
+            Tool::Wall(_) => self.draw_panel(ui, draw::Target::Wall),
+            Tool::DetailLine(_) => self.draw_panel(ui, draw::Target::Detail),
+            _ => {}
         }
-        // Placing a component: Revit's Mode panel, which loads a family from a file.
-        if matches!(self.tool, Tool::Component | Tool::Fixture(_)) {
-            panel(ui, "Mode", |ui| {
-                let tip = "Load Family: a family saved as a .json file, BIMCraft's own";
-                if big_button(ui, Icon::LoadFamily, "Load Family", false, tip).clicked() {
-                    let dialog = rfd::AsyncFileDialog::new().add_filter(t("BIMCraft family"), &["json"]);
-                    self.ask_file(ui.ctx(), dialog, false, |app, path| {
-                        if let Some(r) = app.run("family", json!({"path": path.to_string_lossy()})) {
-                            let name = r["name"].as_str().unwrap_or_default().to_string();
-                            let first = r["family"]["types"].as_object().and_then(|t| t.keys().next().cloned()).unwrap_or_default();
-                            app.component = Some((name, first));
-                        }
-                    });
+        // Detail lines selected, or sketch lines picked: Join into Polyline and Explode Polyline.
+        let picked = self.sketch.as_ref().map(|sk| sk.picked.len());
+        if (self.lines_selected() && self.tool == Tool::Modify) || (picked.is_some() && self.tool == Tool::Modify) {
+            panel(ui, msg!("Modify Lines"), |ui| {
+                let two = picked.unwrap_or(self.selection.len()) >= 2;
+                let tip = msg!("Join into Polyline (PJ): the lines selected, meeting end to end, become one polyline");
+                if ui.add_enabled_ui(two, |ui| big_button(ui, Icon::JoinPolyline, "Join into Polyline", false, tip)).inner.clicked() {
+                    self.join_polyline();
                 }
+                let tip = msg!("Explode Polyline (EX): a polyline taken apart into a line or an arc for each segment");
+                if big_button(ui, Icon::ExplodePolyline, "Explode Polyline", false, tip).clicked() {
+                    self.explode_polyline();
+                }
+                self.vertex_buttons(ui);
             });
         }
         // Walls selected: Revit's Modify Wall panel.
         let walls = self.selected_walls();
-        if !walls.is_empty() && matches!(self.tool, Tool::Modify | Tool::Attach) {
-            panel(ui, "Modify Wall", |ui| {
-                let tip = "Flip (Space): the walls' exterior sides go to the other side of their location lines";
-                if big_button(ui, Icon::Flip, "Flip", false, tip).clicked() {
-                    self.flip();
+        let attachable = self.selected_attachable();
+        if !attachable.is_empty() && matches!(self.tool, Tool::Modify | Tool::Attach) {
+            let title = if walls.is_empty() { msg!("Modify Column") } else { msg!("Modify Wall") };
+            panel(ui, title, |ui| {
+                if !walls.is_empty() {
+                    let tip = msg!("Flip (Space): the walls' exterior sides go to the other side of their location lines");
+                    if big_button(ui, Icon::Flip, "Flip", false, tip).clicked() {
+                        self.flip();
+                    }
                 }
-                let tip = "Attach Top/Base: pick a roof or a floor for the walls' tops, or bases, to follow";
+                let tip = msg!("Attach Top/Base: pick a roof or a floor for the tops, or bases, of the walls and columns to follow");
                 if big_button(ui, Icon::Attach, "Attach Top/Base", self.tool == Tool::Attach, tip).clicked() {
                     self.set_tool(Tool::Attach);
                 }
-                if big_button(ui, Icon::Detach, "Detach Top/Base", false, "Detach Top/Base: the walls' tops and bases their own again")
-                    .clicked()
-                {
-                    self.run("modify", json!({"ids": walls, "attach_top": null, "attach_base": null}));
+                let tip = msg!("Detach Top/Base: the tops and bases of the walls and columns their own again");
+                if big_button(ui, Icon::Detach, "Detach Top/Base", false, tip).clicked() {
+                    self.run("modify", json!({"ids": attachable, "attach_top": null, "attach_base": null}));
                 }
             });
         }
-        // A roof selected: which of its edges stand upright.
-        if self.selected_roof().is_some() && matches!(self.tool, Tool::Modify | Tool::GableEdge) {
-            panel(ui, "Shape Editing", |ui| {
-                let tip = "Gable Edge: click an edge of a roof's footprint to stand it upright, a gable end; click again to slope it";
+        // Work plane-based components selected: Revit's Work Plane panel, Edit Work Plane (T12).
+        let hosted = self.work_plane_components();
+        if !hosted.is_empty() && self.tool == Tool::Modify {
+            panel(ui, msg!("Work Plane"), |ui| {
+                let tip = msg!(
+                    "Edit Work Plane: the components onto a level, a reference plane or a face picked (the Work Plane dialog), keeping their Offset from Host"
+                );
+                if big_button(ui, Icon::WorkPlane, msg!("Edit Work Plane"), self.work_plane.is_some(), tip).clicked() {
+                    self.open_component_work_plane(hosted.clone());
+                }
+            });
+        }
+        // A roof selected: which of its edges stand upright; a flat one's shape too.
+        let shaping = matches!(self.tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_));
+        if let Some(roof) = self.selected_roof()
+            && (matches!(self.tool, Tool::Modify | Tool::GableEdge) || shaping)
+        {
+            panel(ui, msg!("Shape Editing"), |ui| {
+                let tip = msg!("Gable Edge: click an edge of a roof's footprint to stand it upright, a gable end; click again to slope it");
                 if big_button(ui, Icon::GableEdge, "Gable Edge", self.tool == Tool::GableEdge, tip).clicked() {
                     self.set_tool(Tool::GableEdge);
                 }
+                if self.selected_shapeable().is_some() {
+                    self.shape_tools(ui, roof);
+                }
             });
         }
-        // A floor selected: its slope arrow.
-        if self.selected_floor().is_some() && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_)) {
+        // A floor selected: its slope arrow, or its shape's points and split lines.
+        if let Some(floor) = self.selected_floor()
+            && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_))
+        {
             panel(ui, "Shape Editing", |ui| {
-                let tip = "Slope Arrow: click its tail, then its head; the floor rises toward the head at the Options Bar's slope";
+                let tip = msg!("Slope Arrow: click its tail, then its head; the floor rises toward the head at the Options Bar's slope");
                 if big_button(ui, Icon::SlopeArrow, "Slope Arrow", matches!(self.tool, Tool::SlopeArrow(_)), tip).clicked() {
                     self.set_tool(Tool::SlopeArrow(None));
                 }
+                self.shape_tools(ui, floor);
             });
         }
         panel(ui, "Modify", |ui| {
@@ -3143,27 +5388,75 @@ impl BimApp {
             });
         });
         panel(ui, "Phasing", |ui| {
-            let tip = "Demolish (DW): click an element to take it down in the view's phase; click it again to take it back";
+            let tip = msg!("Demolish (DW): click an element to take it down in the view's phase; click it again to take it back");
             let on = self.graphic_view().is_some();
             if ui.add_enabled_ui(on, |ui| big_button(ui, Icon::Demolish, "Demolish", self.tool == Tool::Demolish, tip)).inner.clicked() {
                 self.set_tool(Tool::Demolish);
             }
         });
-        panel(ui, "Geometry", |ui| {
-            let tip = "Paint (PT): lay a material, and its texture, over the face you click in the 3D view";
+        panel(ui, msg!("Geometry"), |ui| {
+            let tip = msg!("Paint (PT): lay a material, and its texture, over the face you click in the 3D view");
             if big_button(ui, Icon::Paint, "Paint", self.tool == Tool::Paint, tip).clicked() {
                 self.set_tool(Tool::Paint);
             }
-            let tip = "Remove Paint: take the paint off the face you click in the 3D view";
+            let tip = msg!("Remove Paint: take the paint off the face you click in the 3D view");
             if big_button(ui, Icon::Unpaint, "Remove Paint", self.tool == Tool::Unpaint, tip).clicked() {
                 self.set_tool(Tool::Unpaint);
             }
         });
+        self.mode_panel(ui);
     }
 
     /// The Options Bar: the contextual tab's name, then the tool's options.
+    /// The Options Bar, while there's something on it (a contextual tab's name, a tool's options): a card floating over the
+    /// view's top left, so the view never moves when it comes and goes, and taking the clicks that land on it.
+    fn options_bar(&mut self, ctx: &Context) {
+        if self.family_doc() {
+            if !self.family_has_options() {
+                self.options_rect = Rect::NOTHING;
+                return;
+            }
+            let g = f32::from(style::gap());
+            let view = self.view_rect;
+            let top = view.top().max(self.tabs_foot - g + 4.0);
+            let frame = style::card([false; 4]).inner_margin(Margin::symmetric(10, 3));
+            let shown = Area::new(UiId::new("family-options-bar"))
+                .order(Order::Middle)
+                .fixed_pos(pos2(view.left() + g, top + g))
+                .show(ctx, |ui| frame.show(ui, |ui| self.family_options(ui)).inner);
+            self.options_rect = if shown.inner { shown.response.rect } else { Rect::NOTHING };
+            return;
+        }
+        if self.context().is_none() && matches!(self.tool, Tool::Modify) && self.note_edit.is_none() {
+            self.options_rect = Rect::NOTHING;
+            return;
+        }
+        let g = f32::from(style::gap());
+        let view = self.view_rect;
+        let frame = style::card([false; 4]).inner_margin(Margin::symmetric(10, 3));
+        // Below the tabs where they float over the view.
+        let top = view.top().max(self.tabs_foot - g + 4.0);
+        let shown = Area::new(UiId::new("options-bar")).order(Order::Middle).fixed_pos(pos2(view.left() + g, top + g)).show(ctx, |ui| {
+            // Kept short of the view's zoom buttons on the right, as far as its fields wrap (a drop-down doesn't).
+            ui.set_max_width((view.width() - 2.0 * g - 60.0).max(200.0));
+            frame.show(ui, |ui| self.options(ui));
+        });
+        self.options_rect = shown.response.rect;
+    }
+
+    /// Where a view's navigation bar starts: at its top right, or under the Options Bar when that reaches over it.
+    pub(crate) fn nav_corner(&self, view: Rect) -> Pos2 {
+        let at = view.right_top() + vec2(-46.0, 14.0);
+        let o = self.options_rect;
+        if view.contains(o.left_top()) && o.right() > at.x - 6.0 && o.bottom() + 6.0 > at.y {
+            return pos2(at.x, o.bottom() + 6.0);
+        }
+        at
+    }
+
     fn options(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
+        // Wrapped: in a narrow view (the window's least) the bar takes a second line rather than run over the zoom buttons.
+        ui.horizontal_wrapped(|ui| {
             ui.set_min_height(24.0);
             if let Some(name) = self.context() {
                 // Painted: the tab already names it for screen readers.
@@ -3173,8 +5466,28 @@ impl BimApp {
                 ui.painter().text(r.left_center(), Align2::LEFT_CENTER, name, font, pal().text);
                 ui.separator();
             }
+            if self.note_edit.is_some() {
+                self.note_options(ui);
+                return;
+            }
+            if self.sketch.is_some() {
+                self.sketch_options(ui);
+                match self.tool {
+                    Tool::SketchLine(_) => self.shape_options(ui),
+                    Tool::Offset => self.offset_options(ui),
+                    _ => {}
+                }
+                return;
+            }
             match self.tool {
                 Tool::Wall(_) => self.wall_options(ui),
+                Tool::Linework => self.linework_options(ui),
+                Tool::DetailGroup => self.group_options(ui),
+                Tool::RepeatingDetail(_) => {
+                    self.group_options(ui);
+                    let l = ui.label(t("Spacing:"));
+                    ui.add(egui::TextEdit::singleline(&mut self.repeat_spacing).desired_width(70.0)).labelled_by(l.id);
+                }
                 Tool::Paint => {
                     let label = ui.label(t("Material:"));
                     let names: Vec<String> = self.session.model.materials.keys().cloned().collect();
@@ -3205,9 +5518,42 @@ impl BimApp {
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.ceiling_height).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                 }
+                Tool::Camera(_) => {
+                    let hint = self.session.model.units.name();
+                    let l = ui.label(t("Eye Height:"));
+                    ui.add(TextEdit::singleline(&mut self.camera_eye_height).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Target Height:"));
+                    ui.add(TextEdit::singleline(&mut self.camera_target_height).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Lens:"));
+                    ui.add(TextEdit::singleline(&mut self.camera_lens).desired_width(48.0).hint_text("mm")).labelled_by(l.id);
+                }
                 Tool::SlopeArrow(_) => {
                     let l = ui.label(t("Slope:"));
                     ui.add(TextEdit::singleline(&mut self.floor_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
+                }
+                // Add Point along the surface as it is, an offset over it; or Absolute, an elevation above the level.
+                Tool::AddPoint => {
+                    ui.radio_value(&mut self.shape_along, true, t("Along Surface"));
+                    ui.radio_value(&mut self.shape_along, false, t("Absolute"));
+                    let hint = self.session.model.units.name();
+                    if self.shape_along {
+                        let l = ui.label(t("Offset from Surface:"));
+                        ui.add(TextEdit::singleline(&mut self.shape_offset).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    } else {
+                        let l = ui.label(t("Elevation:"));
+                        ui.add(TextEdit::singleline(&mut self.shape_z).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                        self.elevation_base(ui);
+                    }
+                }
+                Tool::ModifySubElements => {
+                    let l = ui.label(t("Elevation:"));
+                    let hint = self.session.model.units.name();
+                    let field = ui.add(TextEdit::singleline(&mut self.shape_z).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    // Under Modify Sub Elements, Enter sets the selection to it.
+                    if self.tool == Tool::ModifySubElements && field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        self.shape_apply();
+                    }
+                    self.elevation_base(ui);
                 }
                 Tool::Stair(_) => {
                     let l = ui.label(t("Width:"));
@@ -3262,6 +5608,17 @@ impl BimApp {
                     ui.checkbox(&mut self.multiple, t("Multiple"));
                 }
                 Tool::Rotate { .. } => self.rotate_options(ui),
+                Tool::RotateNorth { .. } => self.rotate_north_options(ui),
+                Tool::SpecifyPoint => {
+                    if ui.button(t("Back to Coordinates")).clicked() {
+                        self.stop_specify_pick();
+                    }
+                }
+                Tool::ExportRegion(_) => {
+                    if ui.button(t("Back to Export")).clicked() {
+                        self.set_tool(Tool::Modify);
+                    }
+                }
                 Tool::Mirror { .. } => {
                     ui.checkbox(&mut self.mirror_copy, t("Copy"));
                 }
@@ -3271,10 +5628,30 @@ impl BimApp {
                     ui.add(TextEdit::singleline(&mut self.tag_label).desired_width(160.0).hint_text(t("a field, such as Type or Height")))
                         .labelled_by(l.id);
                 }
+                Tool::DetailLine(_) => self.line_style_options(ui),
+                // Between endpoints: as the cursor lies, aligned, horizontal or vertical (Space steps them).
+                Tool::Dimension(mode, _) => {
+                    ui.label(t("Place:"));
+                    for (m, label) in [
+                        (DimMode::Auto, msg!("Auto")),
+                        (DimMode::Aligned, msg!("Aligned")),
+                        (DimMode::Horizontal, msg!("Horizontal")),
+                        (DimMode::Vertical, msg!("Vertical")),
+                    ] {
+                        if ui.selectable_label(mode == m, t(label)).clicked()
+                            && let Tool::Dimension(now, _) = &mut self.tool
+                        {
+                            *now = m;
+                        }
+                    }
+                }
                 Tool::Text => {
                     let l = ui.label(t("Text:"));
                     ui.add(TextEdit::singleline(&mut self.note_text).desired_width(240.0).hint_text(t("what the note says")))
                         .labelled_by(l.id);
+                    if ui.checkbox(&mut self.note_leader, t("Leader")).changed() {
+                        self.note_arrow = None;
+                    }
                 }
                 Tool::Attach => {
                     ui.label(t("Attach Wall:"));
@@ -3285,15 +5662,129 @@ impl BimApp {
                         self.attach_base = true;
                     }
                 }
-                Tool::Offset => {
-                    let l = ui.label(t("Offset:"));
-                    let hint = self.session.model.units.name();
-                    ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text(hint)).labelled_by(l.id);
-                    ui.checkbox(&mut self.offset_copy, t("Copy"));
-                }
+                Tool::Offset => self.offset_options(ui),
+                Tool::Component => self.component_options(ui),
                 _ => {}
             }
         });
+    }
+
+    /// The reference planes of the project a work plane-based family may be placed on, by name (unnamed ones by id).
+    fn placement_planes(&self) -> Vec<(bimcraft_core::ids::Guid, String)> {
+        let m = &self.session.model;
+        m.rare("refplane")
+            .into_iter()
+            .filter_map(|id| match m.elements.get(id) {
+                Some(bimcraft_core::model::Element::RefPlane(p)) => {
+                    let name = if p.name.is_empty() { id.to_string() } else { p.name.clone() };
+                    Some((m.guid(id), format!("{} : {name}", t("Reference Plane"))))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether the family the Component tool places is work plane-based.
+    fn placing_on_work_plane(&self) -> bool {
+        self.placing().is_some_and(|(f, _)| self.session.model.families.get(&f).is_some_and(|f| f.work_plane_based))
+    }
+
+    /// The Component tool's Options Bar, for a work plane-based family: Place on Work Plane, its Placement Plane (the view's
+    /// level or a reference plane of the project) and Rotate after placement.
+    fn component_options(&mut self, ui: &mut Ui) {
+        if !self.placing_on_work_plane() {
+            ui.checkbox(&mut self.rotate_after, t("Rotate after placement"));
+            return;
+        }
+        if ui.selectable_label(!self.place_on_face, t("Place on Work Plane")).clicked() {
+            self.place_on_face = false;
+        }
+        if ui.selectable_label(self.place_on_face, t("Place on Face")).clicked() {
+            self.place_on_face = true;
+        }
+        if self.place_on_face {
+            ui.checkbox(&mut self.rotate_after, t("Rotate after placement"));
+            return;
+        }
+        let level = self.plan_level().and_then(|l| self.session.model.level(l).map(|l| l.name.clone())).unwrap_or_default();
+        let on_level = format!("{} : {level}", t("Level"));
+        let planes = self.placement_planes();
+        let now = self.placement_plane.and_then(|g| planes.iter().find(|(p, _)| *p == g)).map_or(on_level.clone(), |(_, n)| n.clone());
+        let names: Vec<String> = std::iter::once(on_level).chain(planes.iter().map(|(_, n)| n.clone())).collect();
+        let l = ui.label(t("Placement Plane:"));
+        if let Some(n) = properties::combo(ui, (0, "placement-plane"), l.id, &now, &names) {
+            self.placement_plane = planes.iter().find(|(_, name)| *name == n).map(|(g, _)| *g);
+        }
+        ui.checkbox(&mut self.rotate_after, t("Rotate after placement"));
+    }
+
+    /// A component placed with `params` (and its Placement Plane, for a work plane-based family placed in plan at height
+    /// `z`): with Rotate after placement, it is selected and Rotate starts about its point.
+    pub(crate) fn place_component(&mut self, mut params: Value, z: f64) {
+        if self.placing_on_work_plane() && self.place_on_face {
+            // On the face under the point: a ceiling plan's ceiling, a plan's floor or roof.
+            let at = params["at"].as_array().and_then(|a| Some(P2(a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+            let ceiling = matches!(self.sheet, Sheet::Ceiling(_));
+            let found = self.plan_level().zip(at).and_then(|(l, q)| self.session.model.face_in_plan(l, q, ceiling));
+            let Some((id, face)) = found else {
+                let text =
+                    if ceiling { t("There's no ceiling here to place it on.") } else { t("There's no floor or roof here to place it on.") };
+                self.status = Status { text: text.into(), error: true };
+                return;
+            };
+            params["host"] = json!({"face": {"element": id, "face": face.name()}});
+            if let Some(o) = params.as_object_mut() {
+                o.remove("offset");
+                o.remove("level");
+            }
+            self.place_made(params);
+            return;
+        }
+        if self.placing_on_work_plane()
+            && let Some(g) = self.placement_plane.filter(|g| self.placement_planes().iter().any(|(p, _)| p == g))
+        {
+            // On the plane: a plan point taken straight onto it; an upright plane's, along its normal from the view's height.
+            let upright = matches!(self.session.model.elements.get(g), Some(bimcraft_core::model::Element::RefPlane(p)) if p.upright());
+            if upright && let Some([x, y]) = params["at"].as_array().map(|a| [a[0].clone(), a[1].clone()]) {
+                params["at"] = json!([x, y, z]);
+            }
+            params["host"] = json!({"plane": g});
+            if let Some(o) = params.as_object_mut() {
+                o.remove("offset");
+            }
+        }
+        self.place_made(params);
+    }
+
+    /// Place on Face in the 3D view: the component on face `face` of element `id`, at point `at` there.
+    pub(crate) fn place_component_on_face(&mut self, id: Id, face: bimcraft_core::model::FaceRole, at: [f64; 3]) {
+        let Some((family, ty)) = self.placing() else { return };
+        let params = json!({"family": family, "type": ty, "at": at.map(|v| (v * 1e3).round() / 1e3 + 0.0),
+                            "angle": self.component_angle, "host": {"face": {"element": id, "face": face.name()}}});
+        self.place_made(params);
+    }
+
+    /// `component` run with `params`; with Rotate after placement, what it made is selected and Rotate starts about it.
+    fn place_made(&mut self, params: Value) {
+        let at = params["at"].as_array().and_then(|a| Some(P2(a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+        let Some(made) = self.run("component", params) else { return };
+        if self.rotate_after
+            && let (Some(id), Some(at)) = (made["id"].as_u64(), at)
+        {
+            self.selection = vec![id];
+            self.set_tool(Tool::Rotate { centre: at, start: None, place: false });
+            if let Tool::Rotate { centre, .. } = &mut self.tool {
+                *centre = at;
+            }
+        }
+    }
+
+    /// Offset's Options Bar: the distance, and Copy.
+    fn offset_options(&mut self, ui: &mut Ui) {
+        let l = ui.label(t("Offset:"));
+        let hint = self.session.model.units.name();
+        ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text(hint)).labelled_by(l.id);
+        ui.checkbox(&mut self.offset_copy, t("Copy"));
     }
 
     fn wall_options(&mut self, ui: &mut Ui) {
@@ -3309,7 +5800,10 @@ impl BimApp {
             }
         });
         c.response.labelled_by(l.id);
-        ui.checkbox(&mut self.chain, t("Chain"));
+        if self.shape().chains() {
+            ui.checkbox(&mut self.chain, t("Chain"));
+        }
+        self.shape_options(ui);
     }
 
     /// Rotate's Options Bar: an angle to type (Enter turns by it), Place Centre, and Copy.
@@ -3328,6 +5822,31 @@ impl BimApp {
             *place = true;
         }
         ui.checkbox(&mut self.rotate_copy, t("Copy"));
+    }
+
+    /// Rotate Project North's Options Bar: an angle to type (Enter turns by it), Align with True North (by the active
+    /// location's angle), and Place Centre.
+    fn rotate_north_options(&mut self, ui: &mut Ui) {
+        let l = ui.label(t("Angle:"));
+        let r = ui.add(TextEdit::singleline(&mut self.angle).desired_width(60.0).hint_text("°")).labelled_by(l.id);
+        if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            match (self.angle.trim().parse::<f64>(), &self.tool) {
+                (Ok(a), &Tool::RotateNorth { centre, .. }) if a.is_finite() => self.rotate_project_north(Some(a), Some(centre)),
+                _ => self.status = Status { text: tf("rotate: `{}` is not an angle in degrees", &[&self.angle]), error: true },
+            }
+        }
+        let angle = self.session.model.site().rotation;
+        let align = tf("Align with True North ({}°)", &[&format!("{angle:.3}")]);
+        if ui.add_enabled(angle.abs() > 1e-9, egui::Button::new(align)).clicked()
+            && let &Tool::RotateNorth { centre, .. } = &self.tool
+        {
+            self.rotate_project_north(None, Some(centre));
+        }
+        if ui.button(t("Place Centre")).clicked()
+            && let Tool::RotateNorth { place, .. } = &mut self.tool
+        {
+            *place = true;
+        }
     }
 
     fn level_options(&mut self, ui: &mut Ui) {
@@ -3355,112 +5874,219 @@ impl BimApp {
 
     /// What the tool wants next, in the status bar as Revit puts it.
     fn prompt(&self) -> &'static str {
+        if let Some(hint) = self.family_prompt() {
+            return hint;
+        }
+        if let Some(hint) = self.sketch_prompt() {
+            return hint;
+        }
+        if self.picking_pattern_lines() {
+            return msg!("Select fill pattern lines then press Enter");
+        }
+        match self.tool {
+            Tool::PatternCorner(None) => return msg!("Click on Bottom Left Corner"),
+            Tool::PatternCorner(Some(_)) => return msg!("Click on Top Right Corner"),
+            _ => {}
+        }
         match (self.sheet, &self.tool) {
             (Sheet::View3D, Tool::Modify) => {
-                return "Click to select. Drag to orbit (or Shift and the middle button), the middle button pans, the wheel zooms.";
+                return msg!(
+                    "Click to select, drag a box to select several. Shift and the middle button orbit, the middle button pans, the wheel zooms."
+                );
             }
             (Sheet::Paper(_), Tool::Modify) => {
-                return "Click a view on the sheet to select it, drag it to move it, double-click it to open it.";
+                return msg!("Click a view on the sheet to select it, drag it to move it, double-click it to open it.");
             }
             (Sheet::Section(_), Tool::Modify) => {
-                return "Click to select what the view cuts or sees; the middle button pans, the wheel zooms.";
+                return msg!("Click to select what the view cuts or sees; the middle button pans, the wheel zooms.");
             }
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), Tool::Level) => {
-                return "Type the new level's elevation in the Options Bar, then Create.";
+                return msg!("Type the new level's elevation in the Options Bar, then Create.");
             }
-            (Sheet::Section(_) | Sheet::Paper(_), Tool::Text) => return "Type the note in the Options Bar, then click where it goes.",
-            (Sheet::Section(_), Tool::Spot) => return "Click a point to mark its height.",
+            (Sheet::Section(_) | Sheet::Paper(_), Tool::Text) => {
+                return msg!("Type the note in the Options Bar, then click where it goes.");
+            }
+            (Sheet::Section(_), Tool::Spot) => return msg!("Click a point to mark its height."),
             // Demolish picks in these views as it does in a plan; Paint in the 3D view alone.
             (Sheet::View3D | Sheet::Section(_), Tool::Demolish) | (Sheet::View3D, Tool::Paint | Tool::Unpaint) => {}
+            // Shape Editing works on the floor's top in the 3D view too.
+            (Sheet::View3D, Tool::ModifySubElements) => {
+                return msg!(
+                    "Click a point, a corner or an edge to select it (Shift adds), then type its height or drag its arrows; Delete removes it."
+                );
+            }
+            (Sheet::View3D, Tool::Measure(_)) => {
+                return msg!(
+                    "Click points along what to measure: each length and the total read beside them. Click the first point again to close it and read its area; Enter ends the chain, Esc clears it."
+                );
+            }
+            (Sheet::View3D, Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Attach | Tool::Trim(_) | Tool::TrimTo { .. }) => {}
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), _) => {
-                return "This tool works in plan views: open one from the Project Browser.";
+                return msg!("This tool works in plan views: open one from the Project Browser.");
             }
             _ => {}
         }
+        if matches!(self.target(), Some(draw::Target::Detail | draw::Target::Wall))
+            && let Some(prompt) = self.shape_prompt()
+        {
+            return prompt;
+        }
+        if self.dimension_refs_edit.is_some() {
+            return msg!(
+                "Click a face, an axis or a corner to add it, the same one again to take it out; Tab steps over the references of the element under the cursor. Enter or the button confirms, Esc cancels."
+            );
+        }
         match &self.tool {
-            Tool::Modify => "Click to select, Tab for what's underneath, Ctrl adds, Shift takes away; drag to box or to move.",
-            Tool::Wall(chain) if chain.is_empty() => "Click to enter the wall's start point.",
-            Tool::Wall(chain) if self.wall_arc && chain.len() == 1 => "Click to enter the arc's end point.",
-            Tool::Wall(_) if self.wall_arc => "Click a point the arc passes through: it sets the radius. Esc cancels.",
-            Tool::Wall(_) => "Click to build the wall to the next point. Enter or Esc ends the chain, Shift keeps it square.",
-            Tool::Attach if self.attach_base => "Pick a roof or a floor: the selected walls' bases stand on it.",
-            Tool::Attach => "Pick a roof or a floor: the selected walls' tops follow its underside.",
-            Tool::Door => "Click a wall to place the door.",
-            Tool::Window => "Click a wall to place the window.",
-            Tool::Room => "Click inside walls to place a room; the outline shows the room you'd get.",
+            Tool::Modify => msg!("Click to select, Tab for what's underneath, Ctrl adds, Shift takes away; drag to box or to move."),
+            Tool::Wall(chain) if chain.is_empty() => msg!("Click to enter the wall's start point."),
+            Tool::Wall(_) => msg!("Click to build the wall to the next point. Enter or Esc ends the chain, Shift keeps it square."),
+            Tool::Attach if self.attach_base => msg!("Pick a roof or a floor: the bases of what's selected stand on it."),
+            Tool::Attach => msg!("Pick a roof or a floor: the tops of what's selected follow its underside."),
+            Tool::Door => msg!("Click a wall to place the door."),
+            Tool::Window => msg!("Click a wall to place the window."),
+            Tool::Room => msg!("Click inside walls to place a room; the outline shows the room you'd get."),
+            Tool::RoomSeparator(None) => msg!("Click the separation line's start."),
+            Tool::RoomSeparator(Some(_)) => msg!("Click the line's next point; each click places a line. Esc ends the chain."),
             Tool::Level => "Type the new level's elevation in the Options Bar, then Create.",
-            Tool::Grid(None) => "Click to enter the grid's start point.",
-            Tool::Grid(Some(_)) => "Click to enter the grid's end point.",
-            Tool::Move(None) | Tool::Copy(None) => "Click a base point to measure from.",
-            Tool::Move(Some(_)) => "Click where the base point goes, or type a distance and press Enter. Esc cancels.",
-            Tool::Copy(Some(_)) => "Click where the copy's base point goes, or type a distance and press Enter. Esc cancels.",
-            Tool::Rotate { place: true, .. } => "Click the centre of rotation.",
-            Tool::Rotate { start: None, .. } => "Click the start of the angle, or type an angle in the Options Bar.",
-            Tool::Rotate { start: Some(_), .. } => "Click the end of the angle. Esc cancels.",
-            Tool::Mirror { draw: false, .. } => "Pick a wall or grid to mirror across.",
-            Tool::Mirror { draw: true, start: None } => "Click the start of the mirror axis.",
-            Tool::Mirror { draw: true, start: Some(_) } => "Click the end of the mirror axis.",
-            Tool::Align(None) => "Pick a reference line: a grid, or a wall's face or centre line.",
-            Tool::Align(Some(_)) => "Pick the wall or grid to line up with the reference.",
-            Tool::Trim(None) => "Pick the first wall, on the part to keep.",
-            Tool::Trim(Some(_)) => "Pick the second wall, on the part to keep.",
-            Tool::Split => "Click a wall where to split it.",
-            Tool::Offset => "Point to a wall: the offset goes to the cursor's side. Click to place it.",
-            Tool::Demolish => "Click an element to take it down in the view's phase; click it again to take it back.",
-            Tool::Paint => "Click a face to paint it with the material in the Options Bar; the 3D view orbits as ever.",
-            Tool::Unpaint => "Click a painted face to take its paint off.",
-            Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, centre line or end, a door, a window or a grid to measure from.",
-            Tool::Dimension(refs) if refs.len() == 1 => "Pick the next reference, parallel to the first.",
-            Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",
-            Tool::Measure(None) => "Click the ruler's start: points snap as they do drawing.",
-            Tool::Measure(Some(_)) => "Click its end: its length and angle read beside it. Esc cancels.",
-            Tool::Tag => "Click an element to tag it with its type, a door's or window's with its mark, or with the field in Label.",
-            Tool::Angular(refs) if refs.len() < 2 => "Pick a wall, a grid or another line; then one that meets it.",
-            Tool::Angular(_) => "Click where the arc goes: the angle on that side. Esc cancels.",
-            Tool::Radial(None) => "Pick a round column.",
-            Tool::Radial(Some(_)) => "Click where the radius goes. Esc cancels.",
-            Tool::Text => "Type the note in the Options Bar, then click where it goes: its top left corner.",
-            Tool::Spot => "Click a floor, a roof, a stair or a wall: the spot elevation reads the height of its top there.",
-            Tool::Section(None) => "Click the section's start: it looks to the left of the line you draw.",
-            Tool::Section(Some(_)) => "Click the section's end.",
-            Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
-            Tool::Column => "Click to place a column, as high as the Options Bar says.",
+            Tool::Grid(None) => msg!("Click to enter the grid's start point."),
+            Tool::Grid(Some(_)) => msg!("Click to enter the grid's end point."),
+            Tool::ReferencePlane(None) => msg!("Click to enter the reference plane's start point."),
+            Tool::ReferencePlane(Some(_)) => msg!("Click to enter the reference plane's end point."),
+            Tool::Move(None) | Tool::Copy(None) => msg!("Click a base point to measure from."),
+            Tool::Move(Some(_)) => msg!("Click where the base point goes, or type a distance and press Enter. Esc cancels."),
+            Tool::Copy(Some(_)) => msg!("Click where the copy's base point goes, or type a distance and press Enter. Esc cancels."),
+            Tool::Rotate { place: true, .. } => msg!("Click the centre of rotation."),
+            Tool::Rotate { start: None, .. } => msg!("Click the start of the angle, or type an angle and press Enter."),
+            Tool::Rotate { start: Some(_), .. } => msg!("Click the end of the angle. Esc cancels."),
+            Tool::RotateNorth { place: true, .. } => msg!("Click the centre the model turns about."),
+            Tool::Acquire => msg!("Click a linked model or a CAD drawing: this project takes its shared coordinates. Esc cancels."),
+            Tool::SpotCoordinate(None) => msg!("Click the point the spot coordinate reads; it snaps."),
+            Tool::SpotCoordinate(Some(_)) => msg!("Click where its leader ends. Esc cancels."),
+            Tool::ExportRegion(None) => msg!("Click a corner of the region to export. Esc goes back to Export."),
+            Tool::ExportRegion(Some(_)) => msg!("Click the region's opposite corner. Esc goes back to Export."),
+            Tool::SpecifyPoint => {
+                msg!(
+                    "Click the point the shared coordinates typed are at: it snaps, and a wall's corner is its bottom, a slab's its top. Esc goes back."
+                )
+            }
+            Tool::RotateNorth { start: None, .. } => {
+                msg!("Rotate Project North: click the start of the angle, or type an angle and press Enter. It turns the whole model.")
+            }
+            Tool::RotateNorth { start: Some(_), .. } => {
+                msg!("Click the end of the angle: the model turns, and true north with it, so nothing moves in the world. Esc cancels.")
+            }
+            Tool::Mirror { draw: false, .. } => msg!("Pick a wall or grid to mirror across."),
+            Tool::Mirror { draw: true, start: None } => msg!("Click the start of the mirror axis."),
+            Tool::Mirror { draw: true, start: Some(_) } => msg!("Click the end of the mirror axis."),
+            Tool::Align(None) => msg!("Pick a reference edge or centre line; the line under the cursor is highlighted."),
+            Tool::Align(Some(_)) => msg!("Pick the element's highlighted edge to move and turn onto the reference."),
+            Tool::Trim(None) => msg!("Pick the first wall or line, on the part to keep."),
+            Tool::Trim(Some(_)) => msg!("Pick the second wall or line, on the part to keep."),
+            Tool::TrimTo { boundary: None, .. } => msg!("Pick the line to trim or extend to: a line, a wall or a grid."),
+            Tool::TrimTo { many: false, .. } => msg!("Click the line to trim or extend to it, on the part to keep."),
+            Tool::TrimTo { many: true, .. } => {
+                msg!("Click each line to trim or extend to it, on the part to keep; Esc picks another boundary.")
+            }
+            Tool::Vertex { delete: false } => msg!("Click a polyline or a spline where a vertex goes."),
+            Tool::Vertex { delete: true } => msg!("Click a polyline's corner or a spline's point to take it out."),
+            Tool::Split => msg!("Click a wall or a line where to split it."),
+            Tool::Offset => msg!("Point to a wall or a line: the offset goes to the cursor's side. Click to place it."),
+            Tool::Demolish => msg!("Click an element to take it down in the view's phase; click it again to take it back."),
+            Tool::Linework => msg!("Click an edge to draw it in the line style in the Options Bar; <By Category> puts it back."),
+            Tool::DetailGroup => msg!("Click where the group's origin goes."),
+            Tool::RepeatingDetail(None) => msg!("Click where the repeating detail starts."),
+            Tool::RepeatingDetail(Some(_)) => msg!("Click where it ends: the group repeats along the line every spacing."),
+            Tool::Paint => msg!("Click a face to paint it with the material in the Options Bar; the 3D view orbits as ever."),
+            Tool::Unpaint => msg!("Click a painted face to take its paint off."),
+            Tool::Dimension(_, refs) if refs.is_empty() => {
+                msg!("Pick a wall face, centre line or end, a door, a window, a grid, or an endpoint to measure from.")
+            }
+            Tool::Dimension(_, refs) if refs.len() == 1 => msg!("Pick the next reference or endpoint."),
+            Tool::Dimension(..) => msg!(
+                "Pick more references, or click away from them where the dimension line goes; Tab steps over the faces, axes and \
+                 corners of the element under the cursor. A picked reference clicked again is taken out, Backspace takes out the \
+                 last, Esc starts over. Space steps Auto, Aligned, Horizontal, Vertical."
+            ),
+            Tool::Measure(None) => msg!("Click the ruler's start: points snap as they do drawing."),
+            Tool::Measure(Some(_)) => msg!("Click its end: its length and angle read beside it. Esc cancels."),
+            Tool::Tag => msg!("Click an element to tag it with its type, a door's or window's with its mark, or with the field in Label."),
+            Tool::Angular(refs) if refs.len() < 2 => msg!("Pick a wall, a grid or another line; then one that meets it."),
+            Tool::Angular(_) => msg!("Click where the arc goes: the angle on that side. Esc cancels."),
+            Tool::Round(DimKind::ArcLength, picked) if picked.is_empty() => msg!("Pick a curved wall or an arc."),
+            Tool::Round(_, picked) if picked.is_empty() => msg!("Pick a round column, a curved wall, a circle or an arc."),
+            Tool::Round(DimKind::ArcLength, picked) if picked.len() == 2 => msg!("Pick the second point on the arc. Esc cancels."),
+            Tool::Round(DimKind::ArcLength, _) => {
+                msg!("Click where the dimension's arc goes, or pick two points on the arc to measure between. Esc cancels.")
+            }
+            Tool::Round(DimKind::Diameter, _) => msg!("Click where the diameter goes. Esc cancels."),
+            Tool::Round(..) => msg!("Click where the radius goes. Esc cancels."),
+            Tool::Text => msg!("Type the note in the Options Bar, then click where it goes: its top left corner."),
+            Tool::Spot => msg!("Click a floor, a roof, a stair or a wall: the spot elevation reads the height of its top there."),
+            Tool::SpotSlope => msg!("Click a floor or a roof: the spot slope reads how steeply its top falls there, and which way."),
+            Tool::Section(None) => msg!("Click the section's start: it looks to the left of the line you draw."),
+            Tool::Section(Some(_)) => msg!("Click the section's end."),
+            Tool::Elevation => msg!("Click a straight wall, a line or a slab's edge for the elevation to look at."),
+            Tool::Camera(None) => msg!("Click where the camera's eye stands: it looks at the point you click next."),
+            Tool::Camera(Some(_)) => msg!("Click what the camera looks at; its eye and target heights are the Options Bar's."),
+            Tool::Column => msg!("Click to place a column, as high as the Options Bar says."),
             Tool::Run(..) | Tool::Stand(_) => structure::hint(&self.tool).unwrap_or_default(),
-            Tool::Component | Tool::Fixture(_) => "Click where the component goes; Space turns it a quarter turn.",
+            Tool::Component | Tool::Fixture(_) => msg!("Click where the component goes; Space turns it a quarter turn."),
             // With a radius in the Options Bar, the run clicked says only which way it sets off, and the click
             // after it which side it coils to.
             Tool::Stair(pts) | Tool::Ramp(pts) if pts.len() == 1 && !self.spiral_radius.trim().is_empty() => {
-                "Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels."
+                msg!("Click which way it sets off from its foot: with a radius it climbs in one curved run. Esc cancels.")
             }
             Tool::Stair(pts) | Tool::Ramp(pts) if pts.len() == 2 && !self.spiral_radius.trim().is_empty() => {
-                "Click which side it coils to as it climbs: to the left or the right of the way it sets off."
+                msg!("Click which side it coils to as it climbs: to the left or the right of the way it sets off.")
             }
-            Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
+            Tool::Stair(pts) if pts.is_empty() => msg!("Click where the stair starts: the middle of its first riser."),
             Tool::Stair(pts) if pts.len() == 1 => {
-                "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels."
+                msg!("Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels.")
             }
-            Tool::Ramp(pts) if pts.is_empty() => "Click where the ramp starts: the middle of its foot.",
+            Tool::Ramp(pts) if pts.is_empty() => msg!("Click where the ramp starts: the middle of its foot."),
             Tool::Ramp(pts) if pts.len() == 1 => {
-                "Click where its run ends: past its top, one run, as high as the Options Bar says; short of it, a landing. Esc cancels."
+                msg!(
+                    "Click where its run ends: past its top, one run, as high as the Options Bar says; short of it, a landing. Esc cancels."
+                )
             }
-            Tool::Stair(_) | Tool::Ramp(_) => "Click which way the next run goes from the landing: on, left, right, or back beside it.",
-            Tool::Railing(pts) if pts.is_empty() => "Click a stair or a ramp for a railing down each side, or the start of a path.",
-            Tool::Railing(_) => "Click the path's next point. Enter finishes, Esc cancels.",
-            Tool::Roof => "Click inside the walls to roof them, on the level above: the overhang runs past their faces.",
-            Tool::ExtrusionRoof(pts) if pts.is_empty() => "Click the start of the line the roof's profile runs along.",
-            Tool::ExtrusionRoof(pts) if pts.len() == 1 => "Click the line's end: the profile rises from it at the Options Bar's slope.",
-            Tool::ExtrusionRoof(_) => "Click how far across the roof is swept, to either side of the line. Esc cancels.",
-            Tool::Dormer => "Click a roof's slope where the dormer's front wall goes, across the slope.",
-            Tool::GableEdge => "Click an edge of a roof's footprint: it stands upright, a gable end; click it again to slope it.",
-            Tool::Floor => "Click inside the walls to floor them: the slab runs under their outline, its top at the level.",
-            Tool::Ceiling => "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",
-            Tool::Shaft(None) => "Click a corner of the shaft opening.",
-            Tool::Shaft(Some(_)) => "Click the opposite corner: the shaft cuts the floors, ceilings and roofs up to its top. Esc cancels.",
-            Tool::Mass(pts) if pts.is_empty() => "Click the first corner of the mass's footprint.",
-            Tool::Mass(pts) if pts.len() < 3 => "Click the footprint's next corner. Esc cancels.",
-            Tool::Mass(_) => "Click the next corner; Enter, or the first corner again, finishes the mass. Esc cancels.",
-            Tool::SlopeArrow(None) => "Click the slope arrow's tail: where the floor's top stays at its height offset.",
-            Tool::SlopeArrow(Some(_)) => "Click its head: the floor rises toward it at the Options Bar's slope. Esc cancels.",
+            Tool::Stair(_) | Tool::Ramp(_) => {
+                msg!("Click which way the next run goes from the landing: on, left, right, or back beside it.")
+            }
+            Tool::Railing(pts) if pts.is_empty() => msg!("Click a stair or a ramp for a railing down each side, or the start of a path."),
+            Tool::Railing(_) => msg!("Click the path's next point. Enter finishes, Esc cancels."),
+            Tool::Roof => msg!("Click inside the walls to roof them, on the level above: the overhang runs past their faces."),
+            Tool::ExtrusionRoof(pts) if pts.is_empty() => msg!("Click the start of the line the roof's profile runs along."),
+            Tool::ExtrusionRoof(pts) if pts.len() == 1 => {
+                msg!("Click the line's end: the profile rises from it at the Options Bar's slope.")
+            }
+            Tool::ExtrusionRoof(_) => msg!("Click how far across the roof is swept, to either side of the line. Esc cancels."),
+            Tool::Dormer => msg!("Click a roof's slope where the dormer's front wall goes, across the slope."),
+            Tool::GableEdge => msg!("Click an edge of a roof's footprint: it stands upright, a gable end; click it again to slope it."),
+            Tool::Floor => msg!("Click inside the walls to floor them: the slab runs under their outline, its top at the level."),
+            Tool::Ceiling => msg!("Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says."),
+            Tool::Shaft(None) => msg!("Click a corner of the shaft opening."),
+            Tool::Shaft(Some(_)) => {
+                msg!("Click the opposite corner: the shaft cuts the floors, ceilings and roofs up to its top. Esc cancels.")
+            }
+            Tool::Mass(pts) if pts.is_empty() => msg!("Click the first corner of the mass's footprint."),
+            Tool::Mass(pts) if pts.len() < 3 => msg!("Click the footprint's next corner. Esc cancels."),
+            Tool::Mass(_) => msg!("Click the next corner; Enter, or the first corner again, finishes the mass. Esc cancels."),
+            Tool::DetailLine(pts) if pts.is_empty() => msg!("Click where the detail line starts."),
+            Tool::DetailLine(_) => "Click its next point; Enter finishes it, the first point again closes it. Esc cancels.",
+            Tool::SlopeArrow(None) => msg!("Click the slope arrow's tail: where the floor's top stays at its height offset."),
+            Tool::SlopeArrow(Some(_)) => msg!("Click its head: the floor rises toward it at the Options Bar's slope. Esc cancels."),
+            Tool::ModifySubElements => {
+                msg!(
+                    "Click a point, a corner or an edge to select it (Shift adds), then type its height; drag a point to move it; Delete removes it."
+                )
+            }
+            Tool::AddPoint => {
+                msg!("Click on the top: a point there, the Options Bar's offset over the surface, or at its Absolute elevation.")
+            }
+            Tool::AddSplitLine(None) => msg!("Click where the split line starts: a point, a corner or an edge of the top."),
+            Tool::AddSplitLine(Some(_)) => msg!("Click where it ends: the top folds along it. Esc cancels."),
+            Tool::SketchLine(_) | Tool::SketchPick => msg!("Click where the line starts."),
+            Tool::PatternCorner(_) => msg!("Click on Bottom Left Corner"),
         }
     }
 
@@ -3469,17 +6095,31 @@ impl BimApp {
             ui.label(RichText::new(t(self.prompt())).color(pal().muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // How many elements are selected, by the selection filter, as Revit shows it.
+                // A click on it filters the selection, as Revit's does.
                 ui.label(format!(":{}", self.selection.len()));
-                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                self.export_progress(ui);
+                let (r, funnel) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
                 icons::paint(ui.painter(), Icon::Filter, r, pal().icon);
+                funnel.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t("Filter Selection")));
+                if funnel.on_hover_text(t("Filter Selection")).clicked() {
+                    self.open_filter();
+                }
                 if let Some(p) = self.canvas.cursor {
                     let u = self.session.model.units;
+                    // Where the cursor is in the world too, once the project's shared coordinates aren't its own.
+                    if let Some(shared) = self.shared_readout(p) {
+                        ui.monospace(RichText::new(shared).color(pal().accent_ink)).on_hover_text(t(
+                            "The cursor in shared coordinates: the active location's east and north, in the map system's unit",
+                        ));
+                    }
                     ui.monospace(format!("x {}  y {}", u.with_unit(p.0), u.with_unit(p.1)));
                 }
                 if let Some(note) = self.snap_note() {
-                    ui.label(RichText::new(note).color(pal().accent));
+                    ui.label(RichText::new(note).color(pal().accent_ink));
                 }
-                if self.dirty() {
+                // The active document's: an open family's draft, else the project.
+                let unsaved = self.active_family().map_or_else(|| self.dirty(), |ed| ed.unsaved());
+                if unsaved {
                     ui.label(RichText::new(t("Unsaved changes")).color(pal().muted));
                 }
                 self.option_selector(ui);
@@ -3492,9 +6132,9 @@ impl BimApp {
         if self.status.text.is_empty() {
             return;
         }
-        let (title, color) = if self.status.error { (t("Error"), pal().error) } else { (t("Note"), pal().accent) };
+        let (title, color) = if self.status.error { (t("Error"), pal().error) } else { (t("Note"), pal().accent_ink) };
         let at = self.view_rect.right_bottom() - vec2(16.0, 16.0);
-        Area::new(UiId::new("warning")).order(Order::Foreground).fixed_pos(at).pivot(Align2::RIGHT_BOTTOM).show(ctx, |ui| {
+        Area::new(UiId::new("warning")).order(Order::Middle).fixed_pos(at).pivot(Align2::RIGHT_BOTTOM).show(ctx, |ui| {
             Frame::popup(ui.style()).fill(pal().surface).stroke(Stroke::new(1.0, color)).show(ui, |ui| {
                 ui.set_max_width(380.0);
                 ui.horizontal(|ui| {
@@ -3531,22 +6171,45 @@ impl BimApp {
     /// The docked views' tabs: a click opens one, a drag moves it along the bar or, let go off it, floats it.
     fn view_tabs(&mut self, ui: &mut Ui) {
         self.tab_rects.clear();
-        let (mut open, mut closed) = (None, None);
+        let mut closed = None;
+        // A family opened from the start page with no project behind it: the blank project's tabs aren't shown, until something
+        // is loaded into it.
+        let alone = self.family_from_home && !self.families.is_empty() && !self.dirty();
         let bar = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            for sheet in self.views.clone() {
+            for sheet in self.views.clone().into_iter().filter(|s| !alone || matches!(s, Sheet::Family(..))) {
                 // A ceiling plan's tab says so: its level's plan has the level's name too.
                 let name = if matches!(sheet, Sheet::Ceiling(_)) { self.view_title(sheet) } else { self.view_name(sheet) };
+                // A family document's tabs: the family's icon, the document named over it; they neither float nor tile, and the
+                // last of a document closes it.
+                let family = match sheet {
+                    Sheet::Family(id, _) => Some(self.family_of(id).map(|ed| ed.title().to_string()).unwrap_or_default()),
+                    _ => None,
+                };
                 let many = self.views.len() > 1;
-                let r = tab_button_with(ui, &name, sheet == self.front, false, Sense::click_and_drag(), if many { 18.0 } else { 0.0 });
+                let sense = if family.is_some() { Sense::click() } else { Sense::click_and_drag() };
+                let lead = if family.is_some() { 18.0 } else { 0.0 };
+                let r = tab_button_with(ui, &name, sheet == self.front, false, sense, (lead, if many { 18.0 } else { 0.0 }));
+                let r = match &family {
+                    Some(doc) => {
+                        let icon = Rect::from_center_size(pos2(r.rect.left() + 14.0, r.rect.center().y), vec2(14.0, 14.0));
+                        icons::paint(
+                            ui.painter(),
+                            Icon::FamilyEditor,
+                            icon,
+                            if sheet == self.front { pal().accent_ink } else { pal().icon },
+                        );
+                        r.on_hover_text(tf("Family document: {}", &[doc]))
+                    }
+                    None => r,
+                };
                 self.tab_rects.push((sheet, r.rect));
-                if sheet == self.front {
-                    open = Some(r.rect);
-                }
                 // The × is part of the tab, at its right end.
                 if many {
                     let x = Rect::from_center_size(pos2(r.rect.right() - 16.0, r.rect.center().y), vec2(16.0, 16.0));
-                    let label = tf("Close {}", &[&name]);
+                    // A family document's last tab closes the document: Close Family, as its × said before it had tabs.
+                    let last = matches!(sheet, Sheet::Family(id, _) if self.doc_tabs(id).len() == 1);
+                    let label = if last { t(msg!("Close Family")).to_string() } else { tf("Close {}", &[&name]) };
                     let c = ui.interact(x, ui.id().with(("close view", sheet)), Sense::click());
                     c.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, &label));
                     if c.hovered() {
@@ -3568,7 +6231,7 @@ impl BimApp {
                     self.dragging = Some(dock::Drag::View(sheet));
                 }
                 r.context_menu(|ui| {
-                    if ui.add_enabled(many, egui::Button::new(t("Float"))).clicked() {
+                    if ui.add_enabled(many && family.is_none(), egui::Button::new(t("Float"))).clicked() {
                         let at = self.view_rect.left_top() + vec2(60.0, 60.0);
                         self.float_view(sheet, at);
                     }
@@ -3583,7 +6246,6 @@ impl BimApp {
             self.close_view(sheet);
         }
         self.tab_bar = bar.response.rect.with_max_x(ui.max_rect().right());
-        rule_under_tabs(ui.painter(), ui.max_rect().x_range(), ui.min_rect().bottom(), open);
     }
 
     /// The schedule on screen: the project's, by id, and as it is (one every project has may be
@@ -3602,6 +6264,9 @@ impl BimApp {
 
     /// The schedule on screen as a table: its headings, its rows, its totals under a rule.
     fn schedule(&mut self, ui: &mut Ui) {
+        if let Some(id) = self.showing_panel_schedule() {
+            return self.panel_schedule_view(ui, id);
+        }
         let Some((_, sc)) = self.shown_schedule() else { return };
         // The right-click menu, on the schedule and on each of its cells.
         let groups = self.context_items();
@@ -3681,10 +6346,19 @@ impl BimApp {
 
     fn dialogs(&mut self, ctx: &Context) {
         self.type_properties(ctx);
+        self.delete_rooms_window(ctx);
         self.family_type_properties(ctx);
         self.materials_window(ctx);
         self.favorites_window(ctx);
         self.family_editor_window(ctx);
+        self.sync_family_tab();
+        self.closing_window(ctx);
+        if let Some(p) = self.after_documents.take() {
+            self.guard(p, ctx);
+        }
+        self.new_family_window(ctx);
+        self.family_load_dialog(ctx);
+        self.family_closed_from_home();
         self.snaps_window(ctx);
         self.parameters_window(ctx);
         self.new_schedule_window(ctx);
@@ -3693,26 +6367,62 @@ impl BimApp {
         self.filters_window(ctx);
         self.templates_window(ctx);
         self.phasing_window(ctx);
+        self.display_window(ctx);
+        self.project_info_window(ctx);
+        self.reinforce_window(ctx);
         self.line_weights_window(ctx);
         self.object_styles_window(ctx);
+        self.line_styles_window(ctx);
+        self.title_blocks_window(ctx);
+        self.fill_patterns_window(ctx);
+        self.text_type_window(ctx);
+        self.dimension_type_window(ctx);
+        self.spot_type_window(ctx);
+        self.dimension_text_window(ctx);
+        self.standards_window(ctx);
+        self.electrical_window(ctx);
+        self.coordinates_window(ctx);
         self.options_window(ctx);
         self.price_window(ctx);
         self.purge_window(ctx);
         self.trace_window(ctx);
         self.cad_scale_window(ctx);
+        self.cowork_window(ctx);
+        self.lend_window(ctx);
+        self.quit_window(ctx);
+        self.knock_window(ctx);
         if std::mem::take(&mut self.link_dialog) {
             self.link_model_dialog(ctx);
         }
-        if std::mem::take(&mut self.cad_dialog) {
+        if std::mem::take(&mut self.underlay_dialog) {
             self.link_cad_dialog(ctx);
         }
+        if std::mem::take(&mut self.cloud_dialog) {
+            self.point_cloud_dialog(ctx);
+        }
+        self.point_cloud_window(ctx);
+        if let Some(link) = self.cad_dialog.take() {
+            self.import_cad_dialog(ctx, link);
+        }
+        self.import_cad_window(ctx);
+        self.link_window(ctx);
         self.select_by_id_window(ctx);
+        self.run_script_window(ctx);
+        self.work_plane_window(ctx);
         self.ids_of_selection_window(ctx);
+        self.selection_filter_window(ctx);
         self.shortcuts_window(ctx);
         self.settings_window(ctx);
+        self.plugins_window(ctx);
+        self.plugin_report_window(ctx);
+        self.background_grid_window(ctx);
         self.installing_box(ctx);
         self.importing_box(ctx);
         self.report_window(ctx);
+        self.export_window(ctx);
+        self.publisher_window(ctx);
+        self.print_sets_window(ctx);
+        self.name_set_window(ctx);
         if self.pending.is_none() {
             self.recovery_window(ctx);
         }
@@ -3725,16 +6435,18 @@ impl BimApp {
         }
         let mut choice = None;
         let name = self.session.model.name.clone();
-        let r = Modal::new(UiId::new("unsaved")).show(ctx, |ui| {
-            ui.label(RichText::new(tf("Save changes to {}?", &[&name])).strong());
-            ui.label(t("If you don't, the changes since it was last saved are lost."));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                for (label, c) in [("Save", Choice::Save), ("Don't Save", Choice::Discard), ("Cancel", Choice::Cancel)] {
-                    if ui.button(t(label)).clicked() {
-                        choice = Some(c);
+        let r = Modal::new(UiId::new("unsaved"), tf("Save changes to {}?", &[&name])).width(580.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.label(t("If you don't, the changes since it was last saved are lost."));
+            });
+            crate::popup::footer(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (label, c) in [("Save", Choice::Save), (msg!("Don't Save"), Choice::Discard), ("Cancel", Choice::Cancel)] {
+                        if ui.button(t(label)).clicked() {
+                            choice = Some(c);
+                        }
                     }
-                }
+                });
             });
         });
         if choice.is_some() || r.should_close() {
@@ -3766,15 +6478,22 @@ impl BimApp {
 }
 
 impl eframe::App for BimApp {
+    /// Runs before each pass, and while the window is hidden too: agents and a Co-Work session's guests are answered when the
+    /// window is minimised.
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.pump(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
 
-    /// Tab over the plan cycles through what's under the cursor, as in Revit, rather than moving
-    /// the keyboard between widgets.
+    /// Tab over the plan cycles through what's under the cursor, as in Revit (or moves between a shape's numbers),
+    /// rather than moving the keyboard between widgets.
     fn raw_input_hook(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
         self.pace(&mut raw.events);
-        if self.canvas.hovering() && !ctx.egui_wants_keyboard_input() {
+        // The family document's views take Tab themselves (F10c), the project's canvas being out of sight.
+        if self.canvas.hovering() && self.active_family().is_none() && !ctx.egui_wants_keyboard_input() {
             self.tab_cycle |= raw.events.iter().any(|e| matches!(e, Event::Key { key: Key::Tab, pressed: true, .. }));
             raw.events.retain(|e| !matches!(e, Event::Key { key: Key::Tab, .. }));
         }

@@ -112,7 +112,7 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
                 cx.model.types.runs.entry("beam".to_string()).or_default(),
                 &name,
                 |t: &RunType| (t.width - width).abs() < SAME_SECTION_MM && (t.depth - depth).abs() < SAME_SECTION_MM && !t.round,
-                RunType { width, depth, round: false, material: String::new() },
+                RunType { width, depth, round: false, material: String::new(), profile: None },
             );
             Ok(Run {
                 type_name,
@@ -124,6 +124,7 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
                 justify: Justify::Top,
                 system: String::new(),
                 params: Default::default(),
+                join: true,
             })
         })();
         match made {

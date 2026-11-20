@@ -71,7 +71,7 @@ fn tw_opens_trace_walls_on_the_drawing_under_the_plan_and_ks_lists_it() {
     assert!(h.state().trace_dialog.is_some(), "{}", h.state().status.text);
     // It says which drawing it reads, and offers Find.
     assert!(says(&h, "rilievo"), "the drawing is named");
-    assert!(h.query_by_label("Find").is_some());
+    assert!(h.query_by_label("Find Walls").is_some());
     assert!(crate::shortcuts().iter().any(|(letters, name)| *letters == "TW" && *name == "Trace Walls"));
 }
 
@@ -79,7 +79,7 @@ fn tw_opens_trace_walls_on_the_drawing_under_the_plan_and_ks_lists_it() {
 fn it_floats_so_the_plan_behind_it_can_still_be_worked_and_its_title_bar_closes_it() {
     let mut h = linked(&one_room("MURI"), None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     // A shortcut still reaches the plan: the window takes no keys, because what it found is drawn behind it and is
     // there to be looked at.
     let thin = h.state().thin;
@@ -109,7 +109,7 @@ fn a_plan_cropped_to_one_sheet_traces_that_sheet_and_not_the_rest_of_the_file() 
     shortcut(&mut h, "TW");
     // With the plan uncropped there is nothing to read inside, so it reads the lot.
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Whole));
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(8), "both sheets");
     press(&mut h, "Close window");
     // Cropped to the plan, it reads what is inside the crop and nothing else.
@@ -119,7 +119,7 @@ fn a_plan_cropped_to_one_sheet_traces_that_sheet_and_not_the_rest_of_the_file() 
     h.run();
     shortcut(&mut h, "TW");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Crop), "a cropped plan is what to trace");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the sheet in the crop and no other");
 }
 
@@ -154,7 +154,7 @@ fn a_part_is_added_from_the_crop_with_the_survey_own_name_for_it_and_traced_by_n
     assert_eq!(combo_value(&h, "What to read"), "Inside the plan's crop", "a cropped plan is what to read");
     choose(&mut h, "What to read", "PIANTA PIANO TERRA");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.what.clone()), Some(crate::trace::What::Part("PIANTA PIANO TERRA".into())));
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the part and no other");
 }
 
@@ -162,7 +162,7 @@ fn a_part_is_added_from_the_crop_with_the_survey_own_name_for_it_and_traced_by_n
 fn find_says_what_it_found_and_draws_it_and_nothing_is_built_until_build() {
     let mut h = linked(&one_room("MURI"), None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     // Four walls, their axes stretched to the corners: 2 × 7700 and 2 × 5700.
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4));
     assert!(says(&h, "4 walls, 26.80 m, of 8 lines"), "what it found is said");
@@ -195,7 +195,7 @@ fn doorway() -> Vec<(String, [f64; 4])> {
 fn the_openings_it_found_are_drawn_over_the_plan_and_come_in_as_doors_and_windows() {
     let mut h = linked(&doorway(), None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert!(says(&h, "1 Door and 0 Windows."), "what it found is said");
     assert!(says(&h, "900 mm Door: 1 \u{d7} Single 900 x 2100"), "and the type it would come in as");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.holes.len()), Some(1));
@@ -326,7 +326,7 @@ fn the_heights_tab_builds_the_slab_the_elevation_draws_under_this_storeys_floor(
 fn the_walls_tab_builds_the_stair_the_plan_draws_at_the_going_it_draws_it() {
     let mut h = a_storey_with_an_elevation();
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     press(&mut h, "Read the Stair");
     // The going and the width are what a plan draws at the size they are built to; how high one step rises is
     // the storey's, which is where the level above stands. Both runs the plan draws are this one stair's.
@@ -349,7 +349,7 @@ fn the_walls_tab_builds_the_stair_the_plan_draws_at_the_going_it_draws_it() {
 fn the_walls_tab_says_the_curved_run_the_plan_draws_between_two_runs() {
     let mut h = a_storey_with_a_curved_stair();
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     press(&mut h, "Read the Stair");
     // The same twelve risers as over a fan of three treads, and the radius the plan draws the two arcs at.
     assert!(says(&h, "This stair climbs 3000 mm in 12 risers of 250 mm, each step 280 mm deep."), "what it read");
@@ -365,7 +365,7 @@ fn the_walls_tab_says_the_curved_run_the_plan_draws_between_two_runs() {
 fn the_walls_tab_says_the_spiral_run_a_plan_draws_with_no_run_on_it() {
     let mut h = a_storey_with_a_spiral_stair();
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     press(&mut h, "Read the Stair");
     // Nothing in the plan is drawn the way a flight is, so the stair is read from the curve alone: 16 risers over
     // the 3 m to the storey above, and the going is the arc one tread covers at the walk line, 1000 out from the
@@ -570,7 +570,7 @@ fn with_the_openings_unticked_a_doorway_is_left_as_the_drawing_has_it() {
     let mut h = linked(&doorway(), None);
     shortcut(&mut h, "TW");
     pick(&mut h, Role::CheckBox, "Find the openings too");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| (d.found.len(), d.holes.len())), Some((2, 0)));
     press(&mut h, "Build 2");
     assert_eq!((ids(&h, "wall").len(), ids(&h, "door").len()), (2, 0));
@@ -585,7 +585,7 @@ fn the_rooms_the_walls_shut_in_are_placed_with_them_when_the_window_asks_for_the
     let mut h = linked(&lines, None);
     shortcut(&mut h, "TW");
     pick(&mut h, Role::CheckBox, "Place the rooms too");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     press(&mut h, "Build 5");
     assert_eq!((ids(&h, "wall").len(), ids(&h, "room").len()), (5, 2));
     assert!(says(&h, "5 walls and 2 rooms built from"), "{}", h.state().status.text);
@@ -598,7 +598,7 @@ fn place_rooms_fills_the_plan_on_screen_and_leaves_the_rooms_already_in_it_alone
     lines.push(("MURI".to_string(), [300.0, 3050.0, 7700.0, 3050.0]));
     let mut h = linked(&lines, None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     press(&mut h, "Build 5");
     assert!(ids(&h, "room").is_empty(), "the rooms were not asked for");
     press(&mut h, "Architecture");
@@ -620,12 +620,12 @@ fn the_lines_that_stand_alone_are_left_out_and_said_so_and_taken_when_they_are_a
     lines.extend(boundary.into_iter().map(|l| ("CONFINE".to_string(), l)));
     let mut h = linked(&lines, None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the room's walls, not the boundary");
     assert!(says(&h, "1 lines met no wall of the building and were left out."), "and it says so");
     // Asked for them, it gives them: what it found is a reading, and the user's word is the last one.
     pick(&mut h, Role::CheckBox, "Take the lines that stand alone too");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(5));
     press(&mut h, "Build 5");
     assert_eq!(ids(&h, "wall").len(), 5);
@@ -641,7 +641,7 @@ fn a_layers_phase_is_put_right_in_the_window_and_the_walls_come_in_it() {
     choose(&mut h, "Built in: Quote", "New Construction");
     assert_eq!(combo_value(&h, "Built in: Quote"), "New Construction");
     press_near(&mut h, "Walls", "Read the Layer Names Again");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert!(says(&h, "New Construction: 4 walls"), "the phase the layer now names");
     press(&mut h, "Build 4");
     let built = ids(&h, "wall");
@@ -657,14 +657,14 @@ fn a_layer_turned_off_in_the_window_is_not_traced() {
     lines.extend(room("ARREDI", [12000.0, 0.0, 20000.0, 6000.0], 300.0));
     let mut h = linked(&lines, None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(8), "both rooms");
     press(&mut h, "Layers");
     pick(&mut h, Role::CheckBox, "ARREDI");
     press_near(&mut h, "Walls", "Read the Layer Names Again");
     // What was found was found with the layers as they were, so it is dropped and looked for again.
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(0));
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "the furniture is not traced");
 }
 
@@ -675,13 +675,13 @@ fn a_drawing_in_metres_that_says_millimetres_finds_nothing_and_is_told_what_to_d
         one_room("MURI").into_iter().map(|(l, [a, b, c, d])| (l, [a / 1000.0, b / 1000.0, c / 1000.0, d / 1000.0])).collect();
     let mut h = linked(&small, None);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(0));
     assert!(says(&h, "The longest line in it is 8.00 mm"), "the longest line says the drawing is in metres");
     // Linked again with the scale it is drawn at, the same drawing is the same room.
     let mut h = linked(&small, Some(1000.0));
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4));
 }
 
@@ -698,7 +698,7 @@ fn a_drawing_that_measures_on_itself_says_what_scale_to_link_it_with() {
     h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&small, measure)})).expect("it comes in");
     h.run();
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(0));
     assert!(says(&h, "drawn at a scale of 1000"), "its own measurements say what to link it with");
     assert!(!says(&h, "The longest line in it is"), "and the sign a drawing with no measurement goes by is not shown");
@@ -747,7 +747,7 @@ QUOTE
     press(&mut h, "Bring it in at 1000");
     assert_eq!(ids(&h, "underlay").len(), 1, "{}", h.state().status.text);
     shortcut(&mut h, "TW");
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.found.len()), Some(4), "and it traces as a drawing in metres");
 }
 
@@ -758,7 +758,7 @@ fn a_refusal_is_said_inside_the_window_beside_the_button_that_was_pressed() {
     // The thinnest wall asked for is thicker than the thickest, so no wall can be between the two.
     h.state_mut().trace_dialog.as_mut().expect("the window").how.thin = 900.0;
     h.run();
-    press(&mut h, "Find");
+    press(&mut h, "Find Walls");
     let said = h.state().trace_dialog.as_ref().map(|d| d.error.clone()).unwrap_or_default();
     assert!(said.contains("trace_walls"), "the core's refusal, inside the window: {said:?}");
     assert!(says(&h, "trace_walls"), "and on screen");

@@ -7,18 +7,27 @@
 //! what a view's graphics come to for each element: the drawing code asks it what to leave out and
 //! how to draw the rest, and it dresses the finished drawing.
 
+use bimcraft_i18n::{msg, ui_msg};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::language::Language;
 use crate::model::{Element, Guid, Id, Key, MAX_TEXT, Model, ViewRange};
 use crate::pen::{MAX_PEN, Pen};
 use crate::render::{Drawing, Part, Prim, Rgb};
 use crate::schedule;
 
+#[cfg(test)]
+mod category_tests;
+#[cfg(test)]
+mod fill_tests;
+
 /// The categories a plan, a section or a 3D view draws, and so may hide and override: those of the
-/// model, then those of the annotation.
-pub const MODEL: [&str; 25] = [
+/// model, then those of the annotation. A family component is of its family's category (see [`COMPONENTS`]); `component`, which
+/// names them all, is no row of its own (see [`COMPONENT`]).
+pub const MODEL: [&str; 47] = [
     "wall",
     "floor",
     "ceiling",
@@ -27,29 +36,177 @@ pub const MODEL: [&str; 25] = [
     "door",
     "window",
     "room",
+    "roomseparator",
+    "propertyline",
     "column",
     "structuralcolumn",
     "footing",
     "beam",
     "stripfooting",
     "pipe",
+    "duct",
     "conduit",
     "cabletray",
     "wire",
     "downconductor",
     "groundconductor",
     "cable",
-    "component",
+    "rebar",
+    "furniture",
+    "casework",
+    "plumbing",
+    "drain",
+    "pipefitting",
+    "pipeaccessory",
+    "equipment",
+    "outlet",
+    "switch",
+    "airterminal",
+    "earthing",
+    "inspectionbox",
+    "lighting",
+    "generic",
+    "dataoutlet",
+    "voiceoutlet",
+    "patchpanel",
+    "rack",
     "stair",
     "ramp",
     "railing",
     "roof",
+    "site",
 ];
-pub const ANNOTATION: [&str; 8] = ["dimension", "tag", "text", "spot", "grid", "level", "section", "elevation"];
+/// What every family component is, named as a whole: an override, a view filter, a view template or a schedule that names
+/// `component` means every one of [`COMPONENTS`], as it did when they were one row. It is no row of Visibility/Graphics or
+/// Object Styles any more, but a file or a command may still say it; a category's own override is laid over it.
+pub const COMPONENT: &str = "component";
+/// The categories of family components, the names a family's category goes by in a file: one row each in Visibility/Graphics
+/// and Object Styles, in [`MODEL`]. A door's or a window's family is placed in a wall as a door or a window, so it has none.
+pub const COMPONENTS: [&str; 18] = [
+    "furniture",
+    "casework",
+    "plumbing",
+    "drain",
+    "pipefitting",
+    "pipeaccessory",
+    "equipment",
+    "outlet",
+    "switch",
+    "airterminal",
+    "earthing",
+    "inspectionbox",
+    "lighting",
+    "generic",
+    "dataoutlet",
+    "voiceoutlet",
+    "patchpanel",
+    "rack",
+];
+pub const ANNOTATION: [&str; 12] =
+    ["dimension", "tag", "text", "line", "region", "spot", "spotcoordinate", "grid", "level", "section", "elevation", "circuit"];
+/// The point clouds, which views hide and override as Revit's Visibility/Graphics does on a tab of their own: not a model
+/// category, so Object Styles has no row for them.
+pub const SCANS: [&str; 1] = ["pointcloud"];
+/// The CAD imports, which views hide and override on a tab of their own too, as Revit's Imported Categories.
+pub const IMPORTED: [&str; 1] = ["cadimport"];
 
-/// Whether views draw elements of `category`.
+/// A subcategory: a part of a category a view hides, shows and overrides apart from the rest, as Revit's (Rooms >
+/// Reference). It is held in a view's graphics by its `key`, as a category is; `off` ones are hidden unless the view shows
+/// them. A category hidden hides its subcategories. Some are a kind of element of their own (`roomseparator`), others a
+/// part of their category's elements that the drawing code asks after (`roomreference`, the cross at a room's point).
+#[derive(Clone, Copy, Debug)]
+pub struct Sub {
+    pub key: &'static str,
+    pub parent: &'static str,
+    /// Its name, in English, as Visibility/Graphics lists it under its category.
+    pub name: &'static str,
+    pub off: bool,
+}
+
+/// Every subcategory, under its category. A new one is a row here, and its drawing code asks [`Graphics::hides`] (or the
+/// view's [`Look`], for a kind of element).
+pub const SUBCATEGORIES: &[Sub] = &[
+    Sub { key: "roomreference", parent: "room", name: ui_msg!("Reference"), off: true },
+    Sub { key: "roomseparator", parent: "room", name: ui_msg!("Room Separation Lines"), off: false },
+    // A door's swing and a window's opening lines: the family symbols that name it (`subcategory: "Opening"`), and a door
+    // of the project's own type's swing.
+    Sub { key: "dooropening", parent: "door", name: ui_msg!("Opening"), off: false },
+    Sub { key: "windowopening", parent: "window", name: ui_msg!("Opening"), off: false },
+    // The three origins, as Revit's Site has them: hidden unless a view shows them.
+    Sub { key: "internalorigin", parent: "site", name: ui_msg!("Internal Origin"), off: true },
+    Sub { key: "projectbasepoint", parent: "site", name: ui_msg!("Project Base Point"), off: true },
+    Sub { key: "surveypoint", parent: "site", name: ui_msg!("Survey Point"), off: true },
+];
+
+/// The subcategory `key` is, if it is one.
+pub fn sub(key: &str) -> Option<&'static Sub> {
+    SUBCATEGORIES.iter().find(|s| s.key == key)
+}
+
+/// The subcategories of category `parent`, in order.
+pub fn subcategories(parent: &str) -> impl Iterator<Item = &'static Sub> + '_ {
+    SUBCATEGORIES.iter().filter(move |s| s.parent == parent)
+}
+
+/// The categories a 3D view hides unless it shows them: rooms, which a 3D view draws, once shown, as see-through solids in
+/// the selection's colour (and a selected one whatever it says). Every new 3D view starts with them hidden.
+pub const OFF_IN_3D: [&str; 1] = ["room"];
+
+/// Whether `key` is hidden unless a view shows it.
+pub fn off_unless_shown(key: &str) -> bool {
+    sub(key).is_some_and(|s| s.off)
+}
+
+/// The category of family components a family of `category` has, as a row of [`MODEL`]; none for a door's or a window's, which
+/// are placed in walls as doors and windows. Every other category is named here, so a new one is a compile error until it is.
+pub fn component_category(category: crate::family::Category) -> Option<&'static str> {
+    use crate::family::Category as C;
+    Some(match category {
+        C::Furniture => "furniture",
+        C::Casework => "casework",
+        C::Plumbing => "plumbing",
+        C::Drain => "drain",
+        C::PipeFitting => "pipefitting",
+        C::PipeAccessory => "pipeaccessory",
+        C::Equipment => "equipment",
+        C::Outlet => "outlet",
+        C::Switch => "switch",
+        C::AirTerminal => "airterminal",
+        C::Earthing => "earthing",
+        C::InspectionBox => "inspectionbox",
+        C::Lighting => "lighting",
+        C::Generic => "generic",
+        C::DataOutlet => "dataoutlet",
+        C::VoiceOutlet => "voiceoutlet",
+        C::PatchPanel => "patchpanel",
+        C::Rack => "rack",
+        C::Door | C::Window => return None,
+    })
+}
+
+/// The category views and Object Styles know element `e` by: its own, but for a component, which is of its family's category
+/// (`component` when its family is gone, or is a door's or a window's).
+pub fn category_of(m: &Model, e: &Element) -> &'static str {
+    match e {
+        Element::Component(c) => m.families.get(&c.family).and_then(|f| component_category(f.category)).unwrap_or(COMPONENT),
+        // A 3D view's dimensions are Dimensions to its Visibility/Graphics.
+        Element::Dimension3D(_) => "dimension",
+        other => other.category(),
+    }
+}
+
+/// Whether `category` is one of the model's: a row of [`MODEL`], or `component`, which names the family categories.
+pub fn is_model(category: &str) -> bool {
+    MODEL.contains(&category) || category == COMPONENT
+}
+
+/// Whether views draw elements of `category`, or hide and show it (a subcategory).
 pub fn drawn(category: &str) -> bool {
-    MODEL.contains(&category) || ANNOTATION.contains(&category)
+    is_model(category)
+        || ANNOTATION.contains(&category)
+        || SCANS.contains(&category)
+        || IMPORTED.contains(&category)
+        || sub(category).is_some()
 }
 
 /// How much of a mass a 3D view sees through, percent, unless its graphics say otherwise.
@@ -61,11 +218,13 @@ pub const MAX_ENTRIES: usize = 100_000;
 pub const MAX_APPLIED: usize = 32;
 pub const MAX_FILTERS: usize = 64;
 pub const MAX_TEMPLATES: usize = 64;
+/// The most edges of Linework a view holds: each is split out of its element's lines when the view is drawn.
+pub const MAX_LINEWORK: usize = 2000;
 
 /// How much a view draws of what it cuts. Coarse: the cut in one poché, an opening only its gap and jambs. Medium: a
 /// compound element's layers, each a fill with a line between, and an opening's leaf, swing and glass. Fine: the layers'
 /// patterns too, and a floor's surface pattern.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Detail {
     Coarse,
@@ -80,9 +239,9 @@ impl Detail {
     /// What it is called, in English.
     pub fn name(self) -> &'static str {
         match self {
-            Detail::Coarse => "Coarse",
-            Detail::Medium => "Medium",
-            Detail::Fine => "Fine",
+            Detail::Coarse => ui_msg!("Coarse"),
+            Detail::Medium => ui_msg!("Medium"),
+            Detail::Fine => ui_msg!("Fine"),
         }
     }
 
@@ -109,9 +268,9 @@ impl VisualStyle {
     /// What it is called, in English.
     pub fn name(self) -> &'static str {
         match self {
-            VisualStyle::Shaded => "Shaded",
-            VisualStyle::HiddenLine => "Hidden Line",
-            VisualStyle::Wireframe => "Wireframe",
+            VisualStyle::Shaded => ui_msg!("Shaded"),
+            VisualStyle::HiddenLine => ui_msg!("Hidden Line"),
+            VisualStyle::Wireframe => ui_msg!("Wireframe"),
         }
     }
 
@@ -135,12 +294,12 @@ pub enum Dash {
 }
 
 impl Dash {
-    /// The on and off lengths a line is drawn with, px.
-    fn pattern(self) -> Option<[f32; 2]> {
+    /// The on and off lengths a line is drawn with, px, on paper `k` times [`crate::sheet::DENSITY`] pixels to the mm.
+    fn pattern(self, k: f32) -> Option<Vec<f32>> {
         match self {
             Dash::Solid => None,
-            Dash::Dashed => Some([10.0, 5.0]),
-            Dash::Dotted => Some([2.0, 4.0]),
+            Dash::Dashed => crate::render::on_paper(&crate::render::DASHED, k),
+            Dash::Dotted => crate::render::on_paper(&[2.0, 4.0], k),
         }
     }
 }
@@ -168,7 +327,15 @@ mod rgb {
     }
 }
 
-/// How lines and fills draw: a colour, a weight, a dash for lines, a colour for fills.
+/// One overridden pattern layer. No pattern explicitly hides the layer; no layer override inherits it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PatternFill {
+    pub pattern: Option<String>,
+    pub color: [u8; 3],
+}
+
+/// How lines and fills draw: line settings, the solid fill colour, and independent pattern layers.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Style {
@@ -180,6 +347,10 @@ pub struct Style {
     pub dash: Option<Dash>,
     #[serde(with = "rgb", skip_serializing_if = "Option::is_none")]
     pub fill: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<PatternFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<PatternFill>,
 }
 
 impl Style {
@@ -194,6 +365,8 @@ impl Style {
             weight: self.weight.or(base.weight),
             dash: self.dash.or(base.dash),
             fill: self.fill.or(base.fill),
+            foreground: self.foreground.clone().or_else(|| base.foreground.clone()),
+            background: self.background.clone().or_else(|| base.background.clone()),
         }
     }
 
@@ -239,9 +412,31 @@ pub struct Override {
     pub halftone: bool,
     #[serde(skip_serializing_if = "is_zero")]
     pub transparency: u8,
+    /// Shown, a subcategory hidden unless a view shows it ([`Sub::off`]).
+    #[serde(skip_serializing_if = "is_false")]
+    pub shown: bool,
 }
 
 impl Override {
+    pub(crate) fn check_patterns(&self, m: &Model) -> Result<(), String> {
+        for s in [&self.projection, &self.cut] {
+            for name in [&s.foreground, &s.background].into_iter().flatten().filter_map(|p| p.pattern.as_ref()) {
+                if !m.fill_patterns.contains_key(name) {
+                    return Err(format!("there's no fill pattern `{name}`"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn patterns_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        [&mut self.projection, &mut self.cut]
+            .into_iter()
+            .flat_map(|s| [&mut s.foreground, &mut s.background])
+            .flatten()
+            .filter_map(|p| p.pattern.as_mut())
+    }
+
     pub fn is_empty(&self) -> bool {
         *self == Override::default()
     }
@@ -254,6 +449,7 @@ impl Override {
             cut: self.cut.over(&base.cut),
             halftone: self.halftone || base.halftone,
             transparency: if self.transparency > 0 { self.transparency } else { base.transparency },
+            shown: self.shown || base.shown,
         }
     }
 
@@ -295,14 +491,21 @@ struct AppliedJson {
 
 impl From<AppliedJson> for Applied {
     fn from(a: AppliedJson) -> Applied {
-        let over = Override { hidden: a.hidden, projection: a.projection, cut: a.cut, halftone: a.halftone, transparency: a.transparency };
+        let over = Override {
+            hidden: a.hidden,
+            projection: a.projection,
+            cut: a.cut,
+            halftone: a.halftone,
+            transparency: a.transparency,
+            shown: false,
+        };
         Applied { filter: a.filter, over }
     }
 }
 
 impl From<Applied> for AppliedJson {
     fn from(a: Applied) -> AppliedJson {
-        let Override { hidden, projection, cut, halftone, transparency } = a.over;
+        let Override { hidden, projection, cut, halftone, transparency, .. } = a.over;
         AppliedJson { filter: a.filter, hidden, projection, cut, halftone, transparency }
     }
 }
@@ -339,6 +542,46 @@ pub struct Graphics {
     /// How a 3D view draws its surfaces.
     #[serde(skip_serializing_if = "is_shaded")]
     pub style: VisualStyle,
+    /// Canvas grid owned by this view, or supplied by its view template.
+    #[serde(skip_serializing_if = "crate::background_grid::BackgroundGrid::is_default")]
+    pub background_grid: crate::background_grid::BackgroundGrid,
+    /// Revit's Linework: an edge of an element drawn in a line style of the view's own, or not at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub linework: Vec<Linework>,
+    /// The layers of each CAD drawing it hides, by the drawing's name: Revit's Imported Categories, layer by layer.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub layers: BTreeMap<String, BTreeSet<String>>,
+    /// Which north is up in a plan: project north, or true north (turned by the active location's angle to it).
+    #[serde(skip_serializing_if = "Orientation::is_project")]
+    pub orientation: Orientation,
+}
+
+/// Which north a plan has up, as Revit's view Orientation: Project North (the model's y), or True North (the active
+/// location's), the plan turned on screen by the angle between them; the model never moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    #[default]
+    ProjectNorth,
+    TrueNorth,
+}
+
+impl Orientation {
+    pub fn is_project(&self) -> bool {
+        *self == Orientation::ProjectNorth
+    }
+}
+
+/// An edge of `element` as the view draws it, from `from` to `to` (mm in the view's terms), in line style `style` instead
+/// of its own; none, it isn't drawn (Revit's `<Invisible lines>`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Linework {
+    pub element: Guid,
+    pub from: crate::geom::P2,
+    pub to: crate::geom::P2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 impl Graphics {
@@ -378,6 +621,9 @@ impl Graphics {
         if t.controls.contains(&Group::Style) {
             g.style = t.graphics.style;
         }
+        if t.controls.contains(&Group::BackgroundGrid) {
+            g.background_grid = t.graphics.background_grid;
+        }
         std::borrow::Cow::Owned(g)
     }
 
@@ -397,14 +643,49 @@ impl Graphics {
             && self.options.is_empty()
     }
 
-    /// Whether category `c` is hidden.
+    /// Whether a 3D view with these graphics draws category `c`: as [`Graphics::hides`] says, and one of [`OFF_IN_3D`] only
+    /// where the view shows it.
+    pub fn shows_in_3d(&self, c: &str) -> bool {
+        !self.hides(c) && (!OFF_IN_3D.contains(&c) || self.categories.get(c).is_some_and(|o| o.shown))
+    }
+
+    /// Whether category or subcategory `c` is hidden: hidden itself, off and not shown, or its category hidden.
     pub fn hides(&self, c: &str) -> bool {
-        self.categories.get(c).is_some_and(|o| o.hidden)
+        let own = match self.categories.get(c) {
+            Some(o) => o.hidden || (off_unless_shown(c) && !o.shown),
+            None => off_unless_shown(c),
+        };
+        own || sub(c).is_some_and(|s| self.hides(s.parent)) || (COMPONENTS.contains(&c) && self.hides(COMPONENT))
+    }
+
+    /// These with `component` split into the family categories it names: each takes its own override laid over it, and
+    /// `component` is gone. What a view draws is the same, and every category has the row an editor shows it by.
+    pub fn split_component(&mut self) {
+        let Some(all) = self.categories.remove(COMPONENT) else { return };
+        for key in COMPONENTS {
+            let merged = self.categories.get(key).map_or_else(|| all.clone(), |own| own.over(&all));
+            self.categories.insert(key.to_string(), merged);
+        }
+    }
+
+    /// The category that hides `c` from this view, the one to show to bring it back: `c` itself, else what it is under
+    /// (`component`, for a category of a family component). None when it isn't hidden.
+    pub fn hidden_by(&self, c: &'static str) -> Option<&'static str> {
+        let own = match self.categories.get(c) {
+            Some(o) => o.hidden || (off_unless_shown(c) && !o.shown),
+            None => off_unless_shown(c),
+        };
+        if own {
+            return Some(c);
+        }
+        let parent = sub(c).map(|s| s.parent).or_else(|| COMPONENTS.contains(&c).then_some(COMPONENT))?;
+        self.hidden_by(parent)
     }
 
     /// Whether it is sound in `m`: known categories, overrides in range, filters and the template
     /// there are.
     pub fn check(&self, m: &Model) -> Result<(), String> {
+        self.background_grid.check()?;
         if self.categories.len() > MAX_ENTRIES || self.elements.len() > MAX_ENTRIES {
             return Err(format!("it has more than {MAX_ENTRIES} overrides"));
         }
@@ -415,13 +696,53 @@ impl Graphics {
             if !drawn(c) {
                 return Err(format!(
                     "`{c}` isn't a category views draw; there are: {}",
-                    MODEL.iter().chain(&ANNOTATION).copied().collect::<Vec<_>>().join(", ")
+                    MODEL
+                        .iter()
+                        .chain(&ANNOTATION)
+                        .chain(&SCANS)
+                        .chain(&IMPORTED)
+                        .chain(&[COMPONENT])
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
             o.check(&format!("category `{c}`"))?;
         }
         for (id, o) in &self.elements {
             o.check(&format!("element {id}"))?;
+        }
+        if self.linework.len() > MAX_LINEWORK {
+            return Err(format!(
+                "it has {} edges of Linework; a view holds up to {MAX_LINEWORK}, so take some off (linework with remove)",
+                self.linework.len()
+            ));
+        }
+        for (i, l) in self.linework.iter().enumerate() {
+            let ends = [l.from, l.to];
+            if !ends.iter().all(|p| p.is_finite() && p.0.abs() <= crate::model::MAX_COORD && p.1.abs() <= crate::model::MAX_COORD) {
+                return Err(format!("Linework edge {i}: its ends are numbers within {} mm", crate::model::MAX_COORD));
+            }
+            if let Some(st) = &l.style
+                && !m.line_styles.contains_key(st)
+            {
+                return Err(format!("Linework edge {i}: there's no line style `{st}`{}", known(m.line_styles.keys())));
+            }
+        }
+        for o in self.categories.values().chain(self.elements.values()).chain(self.filters.iter().map(|a| &a.over)) {
+            o.check_patterns(m)?;
+        }
+        if self.layers.len() > crate::cad::MAX_CADS || self.layers.values().any(|l| l.len() > crate::model::MAX_HIDDEN) {
+            return Err(format!(
+                "it hides layers of more than {} CAD drawings, or more than {} of one",
+                crate::cad::MAX_CADS,
+                crate::model::MAX_HIDDEN
+            ));
+        }
+        for (cad, layers) in &self.layers {
+            if let Some(n) = std::iter::once(cad).chain(layers).find(|n| n.chars().count() > crate::model::MAX_TEXT) {
+                return Err(format!("the layer or drawing `{n}` is longer than {} characters", crate::model::MAX_TEXT));
+            }
         }
         let mut seen = BTreeSet::new();
         for a in &self.filters {
@@ -531,17 +852,73 @@ pub enum Group {
     Detail,
     /// A 3D view's visual style.
     Style,
+    /// The canvas background grid display settings.
+    #[serde(rename = "background_grid")]
+    BackgroundGrid,
 }
 
 impl Group {
-    pub const ALL: [Group; 8] =
-        [Group::Categories, Group::Filters, Group::Range, Group::Phase, Group::Options, Group::Scale, Group::Detail, Group::Style];
+    pub const ALL: [Group; 9] = [
+        Group::Categories,
+        Group::Filters,
+        Group::Range,
+        Group::Phase,
+        Group::Options,
+        Group::Scale,
+        Group::Detail,
+        Group::Style,
+        Group::BackgroundGrid,
+    ];
 }
 
-/// A view template: settings under a name for views to follow, the groups in `controls`.
+/// The kind of view a template is for, as Revit's are: plans (floor and ceiling), elevations and sections, or 3D views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ViewKind {
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "section")]
+    Section,
+    #[serde(rename = "3d")]
+    ThreeD,
+}
+
+impl ViewKind {
+    pub const ALL: [ViewKind; 3] = [ViewKind::Plan, ViewKind::Section, ViewKind::ThreeD];
+
+    /// The kind view element `e` is, if it is a view a template can be for.
+    pub fn of(e: &Element) -> Option<ViewKind> {
+        match e {
+            Element::Level(_) | Element::PlanView(_) => Some(ViewKind::Plan),
+            Element::Section(_) | Element::Elevation(_) => Some(ViewKind::Section),
+            Element::View3D(_) => Some(ViewKind::ThreeD),
+            _ => None,
+        }
+    }
+
+    /// The groups a template for this kind of view holds: a plan's view range, a 3D view's visual style, the scale, detail
+    /// level and background grids of the others.
+    pub fn groups(self) -> Vec<Group> {
+        Group::ALL
+            .into_iter()
+            .filter(|g| {
+                !matches!(
+                    (self, g),
+                    (ViewKind::Plan, Group::Style)
+                        | (ViewKind::Section, Group::Range | Group::Style)
+                        | (ViewKind::ThreeD, Group::Range | Group::Scale | Group::Detail | Group::BackgroundGrid)
+                )
+            })
+            .collect()
+    }
+}
+
+/// A view template: settings under a name for views to follow, the groups in `controls`, for views of `kind` (any, when it
+/// says none).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewTemplate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ViewKind>,
     pub controls: BTreeSet<Group>,
     #[serde(default, skip_serializing_if = "Graphics::is_default")]
     pub graphics: Graphics,
@@ -563,6 +940,36 @@ impl ViewTemplate {
     }
 }
 
+/// The view templates a new project starts with, named in `language`: three plan templates for the electrical disciplines,
+/// each controlling the view's categories alone (its scale, detail and range stay the view's own). Power draws luminaires in
+/// halftone behind the outlets and equipment; Lighting hides the outlets; Ceiling keeps luminaires and cable trays and hides
+/// what stands on the floor or the wall. A project from before has none, unless it made them.
+pub fn starter_templates(language: Language) -> BTreeMap<String, ViewTemplate> {
+    let template = |hidden: &[&str], halftone: &[&str]| {
+        let mut categories = BTreeMap::new();
+        for c in hidden {
+            categories.insert((*c).to_string(), Override { hidden: true, ..Override::default() });
+        }
+        for c in halftone {
+            categories.insert((*c).to_string(), Override { halftone: true, ..Override::default() });
+        }
+        ViewTemplate {
+            kind: Some(ViewKind::Plan),
+            controls: BTreeSet::from([Group::Categories]),
+            graphics: Graphics { categories, ..Graphics::default() },
+            view_range: None,
+        }
+    };
+    [
+        (msg!("Electrical Power"), template(&[], &["lighting"])),
+        (msg!("Electrical Lighting"), template(&["outlet"], &[])),
+        (msg!("Electrical Ceiling"), template(&["outlet", "switch", "equipment", "dataoutlet", "voiceoutlet", "patchpanel", "rack"], &[])),
+    ]
+    .into_iter()
+    .map(|(name, t)| (language.word(name).to_string(), t))
+    .collect()
+}
+
 /// Whether the project's view filters and view templates are sound.
 pub(crate) fn check_project(m: &Model) -> Result<(), String> {
     if m.view_filters.len() > MAX_FILTERS {
@@ -579,11 +986,11 @@ pub(crate) fn check_project(m: &Model) -> Result<(), String> {
         }
     };
     for (n, f) in &m.view_filters {
-        named("view filter", n)?;
+        named(ui_msg!("view filter"), n)?;
         f.check(m).map_err(|e| format!("view filter `{n}`: {e}"))?;
     }
     for (n, t) in &m.view_templates {
-        named("view template", n)?;
+        named(ui_msg!("view template"), n)?;
         t.check(m).map_err(|e| format!("view template `{n}`: {e}"))?;
     }
     Ok(())
@@ -608,6 +1015,7 @@ pub fn check_followed(m: &Model, old: &Element, new: &Element) -> Result<(), Str
     follows(Group::Scale, a.scale == b.scale, "scale")?;
     follows(Group::Detail, a.detail == b.detail, "detail level")?;
     follows(Group::Style, a.style == b.style, "visual style")?;
+    follows(Group::BackgroundGrid, a.background_grid == b.background_grid, "background grids")?;
     if let (Element::Level(x), Element::Level(y)) = (old, new) {
         follows(Group::Range, x.view_range == y.view_range, "view range")?;
     }
@@ -652,11 +1060,22 @@ pub fn graphics_of(m: &Model, view: impl Key) -> Option<&Graphics> {
 }
 
 /// What a view's graphics come to for each element of the model.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct Look {
     hidden: BTreeSet<Id>,
+    /// The layers of each CAD drawing it hides, by the drawing's name.
+    layers: BTreeMap<String, BTreeSet<String>>,
     paint: BTreeMap<Id, Override>,
+    /// How element `id`'s lines in subcategory `key` are drawn where the view says so of that subcategory: its row's override
+    /// over its category's, under the filters and the element's own.
+    sub_paint: BTreeMap<(Id, &'static str), Override>,
     style: VisualStyle,
+    /// The section box a 3D view is cut to, its min and max corners, while it's on.
+    section: Option<([f64; 3], [f64; 3])>,
+    /// A 3D view's Graphic Display Options: its edges, silhouettes and ambient shadows.
+    display: crate::view3d::DisplayOptions,
+    /// How it looks at a family's forms and at what detail, which their Visibility Settings read (F8).
+    forms: crate::family::visibility::FormView,
     /// Where the phase it shows stands in the project's order, and how its phase filter shows each status: an element
     /// is drawn by them already (`hidden`, `paint`), and a CAD drawing's layers are drawn by them where they are drawn.
     pub at: usize,
@@ -670,9 +1089,67 @@ fn halftone(c: Rgb) -> Rgb {
 }
 
 impl Look {
+    /// The resolved fill layers for the renderer, after category, filter and element precedence.
+    pub(crate) fn pattern_style(&self, id: Id, cut: bool) -> Option<&Style> {
+        let o = self.paint.get(&id)?;
+        let s = if cut { &o.cut } else { &o.projection };
+        (s.foreground.is_some() || s.background.is_some()).then_some(s)
+    }
+
+    pub(crate) fn pattern_styles(&self) -> BTreeMap<Id, [Style; 2]> {
+        self.paint
+            .iter()
+            .filter(|(id, _)| self.pattern_style(**id, false).is_some() || self.pattern_style(**id, true).is_some())
+            .map(|(id, o)| (*id, [o.projection.clone(), o.cut.clone()]))
+            .collect()
+    }
+
     /// What view `view` looks like: nothing hidden or painted when it isn't a view, or has no graphics.
     pub fn of(m: &Model, view: impl Key) -> Look {
-        graphics_of(m, view).map_or_else(Look::default, |own| Look::with(m, own))
+        let look = graphics_of(m, view).map_or_else(Look::default, |own| Look::with(m, own));
+        let display = match m.elements.get(view) {
+            Some(Element::View3D(v)) => v.display,
+            _ => Default::default(),
+        };
+        use crate::family::visibility::Seen;
+        let seen = match m.elements.get(m.plan_source(view)) {
+            Some(Element::Level(_) | Element::PlanView(_)) => Seen::Plan,
+            Some(Element::Section(v) | Element::Elevation(v)) => Seen::Along(v.looking()),
+            _ => Seen::ThreeD,
+        };
+        let forms = crate::family::visibility::FormView { seen, ..look.forms };
+        Look { section: m.section_box(view), display, forms, ..look }
+    }
+
+    /// How it looks at a family's forms, and at what detail (F8).
+    pub fn forms(&self) -> crate::family::visibility::FormView {
+        self.forms
+    }
+
+    /// This look seeing forms as `forms` says instead.
+    pub fn with_forms(self, forms: crate::family::visibility::FormView) -> Look {
+        Look { forms, ..self }
+    }
+
+    /// Whether it draws a triangle or a solid whose Visibility Settings are packed as `vis`
+    /// ([`crate::family::visibility::packed`]): in projection, or (`cut`) as a section's poché.
+    pub fn forms_show(&self, vis: u32, cut: bool) -> bool {
+        vis == 0 || self.forms.shows(vis, cut)
+    }
+
+    /// How a 3D view draws its edges and shadows: its Graphic Display Options.
+    pub fn display(&self) -> crate::view3d::DisplayOptions {
+        self.display
+    }
+
+    /// The section box the view is cut to, its min and max corners: none unless it's a 3D view with one turned on.
+    pub fn section_box(&self) -> Option<([f64; 3], [f64; 3])> {
+        self.section
+    }
+
+    /// This look cut to section box `section` instead: a box being dragged, before its command runs.
+    pub fn with_section_box(self, section: Option<([f64; 3], [f64; 3])>) -> Look {
+        Look { section, ..self }
     }
 
     /// What the default 3D view looks like: as its own view's graphics say once something has changed
@@ -686,14 +1163,15 @@ impl Look {
     /// (a room's area) makes redraws slow.
     pub fn with(m: &Model, own: &Graphics) -> Look {
         let g = own.resolved(m);
+        let forms = crate::family::visibility::FormView { detail: g.detail, ..Default::default() };
         // The phase it shows, and how its filter shows each status: what an element is drawn by, and a CAD drawing's
         // layers with it (`underlay::status`), which are no elements and so are not in `hidden`.
         let at = g.phase.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(m.phases.len().saturating_sub(1));
-        let mut look =
-            Look { style: g.style, at, filter: g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n)).cloned(), ..Look::default() };
+        let filter = g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n)).cloned();
+        let mut look = Look { style: g.style, layers: own.layers.clone(), forms, at, filter, ..Look::default() };
         // Nothing to look for: no graphics of its own, and nothing in the project phased or in an option.
         let linked = m.elements.keys().next_back().is_some_and(|id| crate::link::is_linked(*id));
-        if own.draws_as_is() && !linked && !crate::phasing::any(m) && !m.elements.values().any(|e| matches!(e, Element::Mass(_))) {
+        if own.draws_as_is() && !linked && !crate::phasing::any(m) && m.rare("mass").is_empty() {
             return look;
         }
         let filter = look.filter.as_ref();
@@ -701,7 +1179,7 @@ impl Look {
         let applied: Vec<(&Applied, BTreeSet<Id>)> =
             g.filters.iter().filter_map(|a| Some((a, m.view_filters.get(&a.filter)?.matching(m)))).collect();
         for (&id, e) in &m.elements {
-            let cat = e.category();
+            let cat = category_of(m, e);
             if !drawn(cat) {
                 continue;
             }
@@ -735,15 +1213,37 @@ impl Look {
                 continue;
             }
             // The category's, then each filter's from the last to the first, then the element's own.
-            let mut over = g.categories.get(cat).map_or_else(|| base.clone(), |c| c.over(&base));
-            for (a, picked) in applied.iter().rev().filter(|(_, picked)| picked.contains(&id)) {
-                let _ = picked;
-                over = a.over.over(&over);
+            // A component takes what `component` says of all of them, under what its own category does.
+            let all = if COMPONENTS.contains(&cat) {
+                g.categories.get(COMPONENT).map_or_else(|| base.clone(), |c| c.over(&base))
+            } else {
+                base.clone()
+            };
+            let own = m.elements.guid(id).and_then(|k| g.elements.get(&k));
+            // Each filter's from the last to the first, then the element's own, over `under`.
+            let layered = |under: Override| {
+                let mut over = under;
+                for (a, _) in applied.iter().rev().filter(|(_, picked)| picked.contains(&id)) {
+                    over = a.over.over(&over);
+                }
+                if let Some(own) = own {
+                    over = own.over(&over);
+                }
+                over
+            };
+            let category = g.categories.get(cat).map_or(all.clone(), |c| c.over(&all));
+            // A subcategory's row, over its category's: what its lines are drawn with where it says something.
+            for s in subcategories(cat) {
+                if let Some(row) = g.categories.get(s.key) {
+                    let o = layered(row.over(&category));
+                    if !o.is_empty() {
+                        look.sub_paint.insert((id, s.key), o);
+                    }
+                }
             }
-            if let Some(own) = m.elements.guid(id).and_then(|k| g.elements.get(&k)) {
-                over = own.over(&over);
-            }
-            if over.hidden {
+            let over = layered(category);
+            // A subcategory's elements go with their category, hidden.
+            if over.hidden || sub(cat).is_some_and(|s| g.hides(s.parent)) {
                 look.hidden.insert(id);
             } else if !over.is_empty() {
                 look.paint.insert(id, over);
@@ -757,6 +1257,11 @@ impl Look {
         self.style
     }
 
+    /// The layers of the CAD drawing `cad` the view hides.
+    pub fn hidden_layers(&self, cad: &str) -> Option<&BTreeSet<String>> {
+        self.layers.get(cad)
+    }
+
     /// Whether the view draws element `id`.
     pub fn shows(&self, id: Id) -> bool {
         !self.hidden.contains(&id)
@@ -766,7 +1271,8 @@ impl Look {
     /// otherwise: what the drawing code fills the union of cut walls with.
     pub fn cut_fill(&self, id: Id, default: Rgb) -> Rgb {
         let Some(o) = self.paint.get(&id) else { return default };
-        let c = o.cut.fill.map_or(default, |[r, g, b]| Rgb(r, g, b));
+        let base = if self.pattern_style(id, true).is_some() { crate::render::PAPER } else { default };
+        let c = o.cut.fill.map_or(base, |[r, g, b]| Rgb(r, g, b));
         if o.halftone { halftone(c) } else { c }
     }
 
@@ -775,6 +1281,11 @@ impl Look {
         let Some(o) = self.paint.get(&id) else { return base };
         let c = o.projection.fill.map_or(base, |[r, g, b]| Rgb(r, g, b));
         if o.halftone { halftone(c) } else { c }
+    }
+
+    /// Whether the view fills element `id`'s surfaces with a colour of its own (its projection's fill), whatever theirs are.
+    pub fn filled(&self, id: Id) -> bool {
+        self.paint.get(&id).is_some_and(|o| o.projection.fill.is_some())
     }
 
     /// The colour of the edges of element `id`'s surfaces in a 3D view, and of what a section sees
@@ -798,11 +1309,15 @@ impl Look {
     /// `d` with its primitives drawn as the view says: the colours, weights and dashes of each
     /// element's lines in projection and cut, its fills, lighter in halftone.
     pub fn dress(&self, d: &mut Drawing) {
-        if self.paint.is_empty() {
+        if self.paint.is_empty() && self.sub_paint.is_empty() {
             return;
         }
-        for (((prim, owner), part), pen) in d.prims.iter_mut().zip(&d.owners).zip(&d.parts).zip(d.pens.iter_mut()) {
-            let Some(over) = owner.and_then(|id| self.paint.get(&id)) else { continue };
+        let paper = d.paper();
+        let subs = &d.subs;
+        for (i, (((prim, owner), part), pen)) in d.prims.iter_mut().zip(&d.owners).zip(&d.parts).zip(d.pens.iter_mut()).enumerate() {
+            let sub = subs.get(i).copied().flatten();
+            let of_sub = owner.zip(sub).and_then(|k| self.sub_paint.get(&k));
+            let Some(over) = of_sub.or_else(|| owner.and_then(|id| self.paint.get(&id))) else { continue };
             let style = if *part == Part::Cut { &over.cut } else { &over.projection };
             match prim {
                 Prim::Line { color, dash, .. } => {
@@ -816,7 +1331,7 @@ impl Look {
                             *pen = Some(p);
                         }
                         if let Some(k) = style.dash {
-                            *dash = k.pattern();
+                            *dash = k.pattern(paper);
                         }
                     }
                     if over.halftone {
@@ -824,7 +1339,16 @@ impl Look {
                     }
                 }
                 Prim::Fill { color, .. } => {
-                    if *part != Part::Pattern
+                    if *part == Part::LinePattern {
+                        if let Some([r, g, b]) = style.color {
+                            *color = Rgb(r, g, b);
+                        }
+                        if pen.is_some()
+                            && let Some(p) = style.weight
+                        {
+                            *pen = Some(p);
+                        }
+                    } else if *part != Part::Pattern
                         && let Some([r, g, b]) = style.fill
                     {
                         *color = Rgb(r, g, b);
@@ -871,10 +1395,14 @@ pub(crate) mod testing {
     }
 
     /// Pen, colour and dash of the lines `id` owns: `u8::MAX` for a line no pen draws (lettering's).
-    pub(crate) fn lines(d: &Drawing, id: u64) -> Vec<(u8, Rgb, Option<[f32; 2]>)> {
+    /// Each line element `id` draws: its pen, its colour and its dashes, px of a sheet's drawing (on the paper, whatever the zoom).
+    pub(crate) fn lines(d: &Drawing, id: u64) -> Vec<(u8, Rgb, Option<Vec<f32>>)> {
+        let paper = |x: &f32| (x / d.paper() * 100.0).round() / 100.0;
         (d.prims.iter().zip(&d.owners).zip(&d.pens))
             .filter_map(|((p, o), pen)| match p {
-                Prim::Line { color, dash, .. } if *o == Some(id) => Some((pen.map_or(u8::MAX, |p| p.0), *color, *dash)),
+                Prim::Line { color, dash, .. } if *o == Some(id) => {
+                    Some((pen.map_or(u8::MAX, |p| p.0), *color, dash.as_ref().map(|v| v.iter().map(paper).collect())))
+                }
                 _ => None,
             })
             .collect()
@@ -989,7 +1517,7 @@ mod tests {
         );
         let d = plan(&s, 100000);
         assert!(lines(&d, walls[0]).contains(&(6, RED, None)), "{:?}", lines(&d, walls[0]));
-        assert!(lines(&d, low).contains(&(3, Rgb(0, 0, 200), Some([10.0, 5.0]))), "{:?}", lines(&d, low));
+        assert!(lines(&d, low).contains(&(3, Rgb(0, 0, 200), Some(vec![10.0, 5.0]))), "{:?}", lines(&d, low));
         // Another view keeps its own look.
         assert!(lines(&plan(&s, 100001), up).contains(&(10, Rgb(25, 25, 25), None)));
         // An override merges into the last, and null takes a field back.
@@ -1064,7 +1592,9 @@ mod tests {
             r#"column {"at": [5000, 1000]}
                stair {"start": [1000, 1000], "end": [3500, 1000], "railings": true}
                ramp {"start": [1000, 2500], "angle": 0, "height": 500}
-               shaft {"boundary": [[7000, 5000], [7800, 5000], [7800, 5800], [7000, 5800]]}"#,
+               shaft {"boundary": [[7000, 5000], [7800, 5000], [7800, 5800], [7000, 5800]]}
+               detail_line {"points": [[1000, 4800], [3000, 4800]]}
+               filled_region {"type": "Diagonal Up", "sketch": [[[500, 4900], [2500, 4900]], [[2500, 4900], [2500, 5600]], [[2500, 5600], [500, 5600]], [[500, 5600], [500, 4900]]]}"#,
         )
         .unwrap();
         let ids = |s: &mut Session, category: &str| -> Vec<u64> {
@@ -1248,7 +1778,7 @@ mod tests {
         run(&mut s, "graphics", json!({"view": section, "categories": {"walls": {"cut": {"weight": 8}}}}));
         let thin = (4, Rgb(25, 25, 25), None);
         let d = plan(&s, 100000);
-        assert!(lines(&d, walls[0]).contains(&(8, Rgb(25, 25, 25), Some([10.0, 5.0]))), "the outline");
+        assert!(lines(&d, walls[0]).contains(&(8, Rgb(25, 25, 25), Some(vec![10.0, 5.0]))), "the outline");
         assert!(lines(&d, walls[0]).contains(&thin), "the layers' lines");
         let view = render::section_fit(&s.model, section, 800, 600);
         let d = render::section(&s.model, section, view);
@@ -1675,7 +2205,7 @@ mod tests {
         // The category's override is the weakest, and a filter that hides hides, whatever the others do.
         run(&mut s, "graphics", json!({"view": 100000, "categories": {"walls": {"cut": {"color": [9, 9, 9], "dash": "dotted"}}}}));
         let lines = lines(&plan(&s, 100000), walls[1]);
-        assert!(lines.contains(&(3, Rgb(0, 200, 0), Some([2.0, 4.0]))), "{lines:?}");
+        assert!(lines.contains(&(3, Rgb(0, 200, 0), Some(vec![2.0, 4.0]))), "{lines:?}");
         run(&mut s, "graphics", json!({"view": 100000, "filters": [first, {"filter": "B", "hidden": true}]}));
         assert!(owned(&plan(&s, 100000), walls[1]).is_empty());
         // A filter applies once, and in a section as in a plan.
@@ -1730,7 +2260,10 @@ mod tests {
         let grid = run(&mut s, "grid", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
         run(&mut s, "graphics", json!({"view": 100000, "hide": ["grids"], "categories": {"walls": {"cut": {"color": [200, 0, 0]}}}}));
         let r = run(&mut s, "template", json!({"name": "Presentation", "from": "Level 1"}));
-        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"]));
+        assert_eq!(
+            r["controls"],
+            json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style", "background_grid"])
+        );
         assert_eq!((r["hidden"].clone(), r["categories"]["wall"]["cut"]["color"].clone()), (json!(["grid"]), json!([200, 0, 0])));
         assert!(!owned(&plan(&s, 100001), grid).is_empty() && lines(&plan(&s, 100001), up).iter().all(|l| l.1 != RED));
         run(&mut s, "graphics", json!({"view": "Level 2", "template": "Presentation"}));
@@ -1743,7 +2276,7 @@ mod tests {
             (
                 json!("Presentation"),
                 json!(["grid"]),
-                json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"])
+                json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style", "background_grid"])
             )
         );
         // Change the template, and its views follow; the view it came from doesn't.
@@ -1762,6 +2295,38 @@ mod tests {
         run(&mut s, "template", json!({"name": "Presentation", "controls": ["categories"]}));
         assert!(run(&mut s, "graphics", json!({"view": 100001, "template": null}))["template"].is_null());
         assert_eq!(run(&mut s, "graphics", json!({"view": 100001}))["hidden"], json!(["room"]));
+    }
+
+    #[test]
+    fn a_template_is_for_a_kind_of_view_and_is_copied_and_renamed_as_revits_are() {
+        let mut s = Session::new();
+        house(&mut s);
+        // Made from a view, it is for views of its kind; made from nothing, for the kind it says, or any.
+        assert_eq!(run(&mut s, "template", json!({"name": "Plans", "from": "Level 1"}))["kind"], "plan");
+        run(&mut s, "graphics", json!({"view": "{3D}", "hide": ["levels"]}));
+        assert_eq!(run(&mut s, "template", json!({"name": "Shaded", "from": "{3D}"}))["kind"], "3d");
+        assert_eq!(run(&mut s, "template", json!({"name": "Cuts", "kind": "section", "detail": "fine"}))["kind"], "section");
+        assert!(run(&mut s, "template", json!({"name": "Any", "controls": ["scale"]}))["kind"].is_null());
+        let e = s.execute("template", &json!({"name": "Cuts", "kind": "sheet"})).unwrap_err();
+        assert!(e.contains("plan, section or 3d"), "{e}");
+        // Duplicate: a new one like another, everything it holds, under its own name.
+        run(&mut s, "graphics", json!({"view": "Level 2", "template": "Plans"}));
+        let copy = run(&mut s, "template", json!({"name": "Plans 2", "like": "Plans", "detail": "coarse"}));
+        assert_eq!((copy["kind"].clone(), copy["detail"].clone(), copy["views"].clone()), (json!("plan"), json!("coarse"), json!([])));
+        assert_eq!(s.model.view_templates["Plans 2"].controls, s.model.view_templates["Plans"].controls);
+        let e = s.execute("template", &json!({"name": "Plans 3", "like": "Nope"})).unwrap_err();
+        assert!(e.contains("Nope"), "{e}");
+        // Rename: the views following it follow it under its new name.
+        let r = run(&mut s, "template", json!({"name": "Plans", "rename": "Working Plans"}));
+        assert_eq!((r["name"].clone(), r["views"].clone()), (json!("Working Plans"), json!([100001])));
+        assert!(!s.model.view_templates.contains_key("Plans"));
+        assert_eq!(run(&mut s, "graphics", json!({"view": "Level 2"}))["template"], "Working Plans");
+        let e = s.execute("template", &json!({"name": "Working Plans", "rename": "Shaded"})).unwrap_err();
+        assert!(e.contains("already"), "{e}");
+        // It survives a file.
+        let (back, left_out) = crate::model::Model::read(&s.model.to_json().unwrap()).unwrap();
+        assert!(left_out.is_empty(), "{left_out:?}");
+        assert_eq!(back.view_templates["Shaded"].kind, Some(super::ViewKind::ThreeD));
     }
 
     #[test]
@@ -1805,7 +2370,7 @@ mod tests {
         }
         // Level 1 follows it: its annotation and its detail are the template's, its own settings stay as they were.
         run(&mut s, "scale", json!({"view": 100000, "scale": 50}));
-        let view = View { scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
+        let view = View { angle: 0.0, scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
         let k = |s: &Session| render::annotation(&s.model, 100000, view);
         let layered = |s: &Session| render::draw(&s.model, 100000, view).prims.len();
         let (alone, fine) = (k(&s), layered(&s));

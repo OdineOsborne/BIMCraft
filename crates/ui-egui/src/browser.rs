@@ -4,6 +4,8 @@
 //! case aside) must match an entry's name or the name of a group it is in, so `ceiling 2` finds Level 2's ceiling plan,
 //! and what matched is marked.
 
+use bimcraft_i18n::msg;
+
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, CollapsingHeader, Layout, Rect, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, WidgetInfo, WidgetType, vec2};
 
@@ -36,12 +38,12 @@ impl Tab {
 
     pub fn name(self) -> &'static str {
         match self {
-            Tab::All => "All",
-            Tab::Views => "Views",
+            Tab::All => msg!("All"),
+            Tab::Views => msg!("Views"),
             Tab::Schedules => "Schedules",
-            Tab::Sheets => "Sheets",
+            Tab::Sheets => msg!("Sheets"),
             Tab::Families => "Families",
-            Tab::Legends => "Legends",
+            Tab::Legends => msg!("Legends"),
         }
     }
 
@@ -65,12 +67,32 @@ impl Tab {
 const SYSTEM_FAMILIES: [&str; 10] =
     ["wall", "floor", "roof", "ceiling", "door", "window", "column", "railing", "structuralcolumn", "footing"];
 
+/// A view or sheet picked in the browser: Ctrl adds or takes one, Shift a run of them, as in any list of the system's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pick {
+    View(Sheet),
+    /// A 3D view: the default `{3D}` when none.
+    View3D(Option<Id>),
+}
+
+impl Pick {
+    /// The element it is, as a print set holds it: none for what isn't one yet.
+    pub(crate) fn element(self) -> Option<Id> {
+        crate::printsets::element_of(&match self {
+            Pick::View(s) => crate::find::Found::View(s),
+            Pick::View3D(id) => crate::find::Found::View3D(id),
+        })
+    }
+}
+
 /// What a click on an entry does.
 #[derive(Clone, Debug, PartialEq)]
 enum Act {
     /// A group: it folds.
     Group,
     Open(Sheet),
+    /// A 3D view: open it in the 3D tab, none for the default `{3D}`.
+    Open3D(Option<Id>),
     /// A family's type: the Component tool places it.
     Place(String, String),
     /// A plan's right-click menu: a duplicate of it, in a mode of the command's.
@@ -83,6 +105,14 @@ enum Act {
     Pick(&'static str, String),
     /// A link: it is the selection, for Properties.
     Select(Id),
+    /// A Ctrl-click (toggles it) or a Shift-click (picks the run to it from the last picked; with Ctrl, adds the run).
+    Choose(Pick, bool, bool),
+    /// Create Print Set…, of these.
+    NewSet(Vec<Pick>),
+    /// Open the Publisher from the browser's right-click menu.
+    Publisher,
+    /// Expand All, or Collapse All.
+    Fold(bool),
 }
 
 /// An entry of the tree, or a group of them.
@@ -111,6 +141,27 @@ impl Node {
     fn with_menu(mut self, menu: Vec<(&'static str, Act)>) -> Node {
         self.menu = menu;
         self
+    }
+
+    /// What picking it picks: a view or sheet.
+    fn pick(&self) -> Option<Pick> {
+        match self.act {
+            Act::Open(s) => Some(Pick::View(s)),
+            Act::Open3D(id) => Some(Pick::View3D(id)),
+            _ => None,
+        }
+    }
+
+    /// The views and sheets in it and under it, in order, as far as they show for `words`.
+    fn picks(&self, words: &[String], out: &mut Vec<Pick>) {
+        if !self.shows(words) {
+            return;
+        }
+        let left: Vec<String> = words.iter().filter(|w| spans(&self.label, w).is_none()).cloned().collect();
+        out.extend(self.pick());
+        for k in &self.kids {
+            k.picks(&left, out);
+        }
     }
 
     /// Whether it shows for the words still to match (those its groups didn't): it matches all of them, or, a group,
@@ -179,15 +230,16 @@ pub fn words(find: &str) -> Vec<String> {
 }
 
 impl BimApp {
-    /// The Project Browser's palette: its tabs and its search over the tree, which scrolls under them.
+    /// The Project Browser's palette: the minimap of the view, its tabs and its search over the tree, which scrolls under them.
     pub(crate) fn browser_palette(&mut self, ui: &mut Ui) {
         egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 6, bottom: 4 }).show(ui, |ui| {
+            self.minimap(ui);
             self.browser_tabs(ui);
             ui.add_space(4.0);
             self.browser_search(ui);
         });
         ui.separator();
-        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]).min_scrolled_height(0.0);
         scroll.id_salt("browser").show(ui, |ui| egui::Frame::new().inner_margin(8.0).show(ui, |ui| self.browser(ui)));
     }
 
@@ -216,17 +268,17 @@ impl BimApp {
                 };
                 p.rect(rect, 4.0, fill, if on { Stroke::new(1.0, pal().accent) } else { Stroke::NONE }, StrokeKind::Inside);
                 if r.has_focus() {
-                    p.rect_stroke(rect, 4.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+                    p.rect_stroke(rect, 4.0, crate::style::focus_ring(), StrokeKind::Inside);
                 }
                 let ink = match (on, tab.ready()) {
-                    (true, _) => pal().accent,
+                    (true, _) => pal().accent_ink,
                     (false, true) => pal().icon,
                     (false, false) => pal().muted.gamma_multiply(0.6),
                 };
                 let icon = Rect::from_center_size(rect.left_center() + vec2(13.0, 0.0), vec2(16.0, 16.0));
                 icons::paint(p, tab.icon(), icon, ink);
                 if let Some(g) = text {
-                    p.galley(rect.left_center() + vec2(24.0, -g.size().y / 2.0), g, pal().accent);
+                    p.galley(rect.left_center() + vec2(24.0, -g.size().y / 2.0), g, pal().accent_ink);
                 }
                 let r = if tab.ready() { r.on_hover_text(&what) } else { r.on_hover_text(t("Coming in a later version")) };
                 if r.clicked() {
@@ -284,18 +336,75 @@ impl BimApp {
             return;
         }
         let mut act = None;
-        for node in shown {
+        for node in &shown {
             self.browser_node(ui, node, &words, "", &mut act);
+        }
+        self.browser_fold = None;
+        // A plain click on a view picks it alone, and opens it.
+        if let Some(pick) = act.as_ref().and_then(|a| Node::leaf("", a.clone(), false).pick()) {
+            self.browser_picked = vec![pick];
+            self.browser_anchor = Some(pick);
         }
         match act {
             Some(Act::Open(sheet)) => self.open_sheet(sheet),
+            Some(Act::Open3D(id)) => self.open_3d(id),
+            Some(Act::Choose(pick, shift, ctrl)) => {
+                let mut order = Vec::new();
+                for node in &shown {
+                    node.picks(&words, &mut order);
+                }
+                let at = |p: &Pick| order.iter().position(|o| o == p);
+                match (shift, self.browser_anchor.as_ref().and_then(at), at(&pick)) {
+                    (true, Some(a), Some(b)) => {
+                        let run = order[a.min(b)..=a.max(b)].to_vec();
+                        if ctrl {
+                            for p in run {
+                                if !self.browser_picked.contains(&p) {
+                                    self.browser_picked.push(p);
+                                }
+                            }
+                        } else {
+                            self.browser_picked = run;
+                        }
+                    }
+                    _ => {
+                        // Ctrl adds what the window shows first, as the one picked before it.
+                        if self.browser_picked.is_empty()
+                            && let Some(open) = order.iter().find(|p| matches!(p, Pick::View(s) if *s == self.sheet))
+                        {
+                            self.browser_picked.push(*open);
+                        }
+                        if let Some(i) = self.browser_picked.iter().position(|p| *p == pick) {
+                            self.browser_picked.remove(i);
+                        } else {
+                            self.browser_picked.push(pick);
+                        }
+                        self.browser_anchor = Some(pick);
+                    }
+                }
+            }
+            Some(Act::NewSet(picks)) => {
+                let mut views: Vec<Id> = Vec::new();
+                for id in picks.into_iter().filter_map(Pick::element) {
+                    if !views.contains(&id) {
+                        views.push(id);
+                    }
+                }
+                if views.is_empty() {
+                    self.status = crate::Status { text: t("None of these can be printed yet.").into(), error: true };
+                } else {
+                    self.name_set = Some(crate::printsets::NameSet { name: self.free_set_name(), views, error: None });
+                }
+            }
+            Some(Act::Fold(open)) => self.browser_fold = Some(open),
+            Some(Act::Publisher) => self.open_publisher(),
             Some(Act::Place(family, ty)) => {
                 self.component = Some((family, ty));
                 self.set_tool(Tool::Component);
             }
             Some(Act::Duplicate(view, mode)) => self.duplicate_view_of(view, mode),
             Some(Act::Delete(ids)) => {
-                self.run("delete", serde_json::json!({"ids": ids}));
+                self.delete_elements(ids);
             }
             Some(Act::Do(command, params)) => {
                 self.run(command, params);
@@ -312,43 +421,87 @@ impl BimApp {
     fn browser_node(&self, ui: &mut Ui, node: &Node, words: &[String], path: &str, act: &mut Option<Act>) {
         let left: Vec<String> = words.iter().filter(|w| spans(&node.label, w).is_none()).cloned().collect();
         let text = marked(ui, &node.label, words);
-        if node.act != Act::Group {
-            let r = ui.selectable_label(node.on, text);
-            if r.clicked() {
-                *act = Some(node.act.clone());
+        // Its right-click menu: its own items, a print set of what is picked (or of what it holds), and folding.
+        let menu = |ui: &mut Ui, act: &mut Option<Act>, picks: Vec<Pick>| {
+            for (label, item) in &node.menu {
+                if ui.button(t(label)).clicked() {
+                    *act = Some(item.clone());
+                    ui.close();
+                }
             }
             if !node.menu.is_empty() {
-                r.context_menu(|ui| {
-                    for (label, item) in &node.menu {
-                        if ui.button(t(label)).clicked() {
-                            *act = Some(item.clone());
-                            ui.close();
-                        }
-                    }
+                ui.separator();
+            }
+            if !picks.is_empty() {
+                let label = if picks.len() > 1 {
+                    tf("Create Print Set of {}…", &[&picks.len().to_string()])
+                } else {
+                    t("Create Print Set…").to_string()
+                };
+                if ui.button(label).clicked() {
+                    *act = Some(Act::NewSet(picks));
+                    ui.close();
+                }
+                ui.separator();
+            }
+            if ui.button(t("Publisher…")).clicked() {
+                *act = Some(Act::Publisher);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(t("Expand All")).clicked() {
+                *act = Some(Act::Fold(true));
+                ui.close();
+            }
+            if ui.button(t("Collapse All")).clicked() {
+                *act = Some(Act::Fold(false));
+                ui.close();
+            }
+        };
+        if node.act != Act::Group {
+            let pick = node.pick();
+            let on = match pick {
+                Some(p) if self.browser_picked.len() > 1 => self.browser_picked.contains(&p),
+                _ => node.on,
+            };
+            let r = ui.selectable_label(on, text);
+            if r.clicked() {
+                let mods = ui.input(|i| i.modifiers);
+                *act = Some(match pick {
+                    Some(p) if mods.command || mods.shift => Act::Choose(p, mods.shift, mods.command),
+                    _ => node.act.clone(),
                 });
             }
+            // Of the picked when it is one of them, else of itself.
+            let picks = match pick {
+                Some(p) if self.browser_picked.len() > 1 && self.browser_picked.contains(&p) => self.browser_picked.clone(),
+                Some(p) => vec![p],
+                None => Vec::new(),
+            };
+            r.context_menu(|ui| menu(ui, act, picks));
             return;
         }
         let path = format!("{path}/{}", node.label);
         let mut header = CollapsingHeader::new(text).id_salt(("browser", &path)).default_open(node.open);
         if !words.is_empty() {
             header = header.open(Some(true));
+        } else if let Some(open) = self.browser_fold {
+            header = header.open(Some(open));
         }
         let shown = header.show(ui, |ui| {
             for kid in node.kids.iter().filter(|k| k.shows(&left)) {
                 self.browser_node(ui, kid, &left, &path, act);
             }
         });
-        if !node.menu.is_empty() {
-            shown.header_response.context_menu(|ui| {
-                for (label, item) in &node.menu {
-                    if ui.button(t(label)).clicked() {
-                        *act = Some(item.clone());
-                        ui.close();
-                    }
-                }
-            });
-        }
+        let mut picks = Vec::new();
+        node.picks(words, &mut picks);
+        shown.header_response.context_menu(|ui| menu(ui, act, picks));
+    }
+
+    /// A name for a new print set that no set has: Print Set 1, 2…
+    fn free_set_name(&self) -> String {
+        let sets = &self.session.model.print_sets;
+        (1..).map(|n| tf("Print Set {}", &[&n.to_string()])).find(|n| !sets.contains_key(n)).unwrap_or_default()
     }
 
     /// What the browser lists under the tab in force.
@@ -381,6 +534,26 @@ impl BimApp {
         out
     }
 
+    /// Every view the browser opens (plans, 3D views, sections, schedules, sheets), in its order, as Find lists them.
+    pub(crate) fn openable(&self) -> Vec<(String, crate::find::Found)> {
+        use crate::find::Found;
+        fn walk(app: &BimApp, nodes: &[Node], out: &mut Vec<(String, Found)>) {
+            for n in nodes {
+                match &n.act {
+                    Act::Open(sheet) => out.push((app.view_title(*sheet), Found::View(*sheet))),
+                    Act::Open3D(id) => out.push((format!("{}: {}", t("3D View"), n.label), Found::View3D(*id))),
+                    _ => {}
+                }
+                walk(app, &n.kids, out);
+            }
+        }
+        let sheets = self.sheets().into_iter().map(|(id, name)| self.view_leaf(&name, Sheet::Paper(id)));
+        let nodes: Vec<Node> = [self.views_node(), self.schedules_node()].into_iter().chain(sheets).collect();
+        let mut out = Vec::new();
+        walk(self, &nodes, &mut out);
+        out
+    }
+
     fn view_leaf(&self, name: &str, sheet: Sheet) -> Node {
         Node::leaf(name, Act::Open(sheet), self.sheet == sheet)
     }
@@ -391,12 +564,7 @@ impl BimApp {
         let levels: Vec<(Id, String)> = m.levels().iter().map(|(id, l)| (*id, l.name.clone())).collect();
         // Sections and elevations, by name.
         let views = |category: &str| {
-            let mut v: Vec<(Id, String)> = m
-                .elements
-                .iter()
-                .filter(|(_, e)| e.category() == category)
-                .filter_map(|(id, _)| Some((*id, m.section(*id)?.name.clone())))
-                .collect();
+            let mut v: Vec<(Id, String)> = m.rare(category).into_iter().filter_map(|id| Some((id, m.section(id)?.name.clone()))).collect();
             v.sort_by(|a, b| a.1.cmp(&b.1));
             v
         };
@@ -410,9 +578,9 @@ impl BimApp {
             .collect();
         let plan_leaf = |id: Id, name: &str, view: bool, sheet: Sheet| {
             let mut menu = vec![
-                ("Duplicate", Act::Duplicate(id, "duplicate")),
-                ("Duplicate with Detailing", Act::Duplicate(id, "detailing")),
-                ("Duplicate as Dependent", Act::Duplicate(id, "dependent")),
+                (msg!("Duplicate"), Act::Duplicate(id, "duplicate")),
+                (msg!("Duplicate with Detailing"), Act::Duplicate(id, "detailing")),
+                (msg!("Duplicate as Dependent"), Act::Duplicate(id, "dependent")),
             ];
             if view {
                 menu.push(("Delete", Act::Delete(vec![id])));
@@ -424,9 +592,26 @@ impl BimApp {
         let mut kids = vec![
             Node::group(t("Floor Plans"), true, plans),
             Node::group(t("Ceiling Plans"), true, ceilings),
-            Node::group(t("3D Views"), true, vec![self.view_leaf("{3D}", Sheet::View3D)]),
+            Node::group(t("3D Views"), true, {
+                // Every 3D view: the default `{3D}` (made when first changed; shown even before it exists), then each
+                // camera view. Opening one stands the 3D tab where its camera looks from.
+                let active = self.active_3d();
+                let mut three: Vec<Node> = vec![match m.default_3d() {
+                    Some(id) => Node::leaf("{3D}", Act::Open3D(Some(id)), active == Some(id)),
+                    None => Node::leaf("{3D}", Act::Open3D(None), active.is_none()),
+                }];
+                three.extend(m.elements.iter().filter_map(|(id, e)| match e {
+                    Element::View3D(v) if v.name != "{3D}" => {
+                        let leaf = Node::leaf(&v.name, Act::Open3D(Some(*id)), active == Some(*id));
+                        Some(leaf.with_menu(vec![("Delete", Act::Delete(vec![*id]))]))
+                    }
+                    _ => None,
+                }));
+                three
+            }),
         ];
-        for (group, category) in [("Elevations (Building Elevation)", "elevation"), ("Sections (Building Section)", "section")] {
+        for (group, category) in [(msg!("Elevations (Building Elevation)"), "elevation"), (msg!("Sections (Building Section)"), "section")]
+        {
             let views = views(category);
             if !views.is_empty() {
                 kids.push(Node::group(t(group), true, views.iter().map(|(id, name)| self.view_leaf(name, Sheet::Section(*id))).collect()));
@@ -435,7 +620,7 @@ impl BimApp {
         Node::group(t("Views (all)"), true, kids)
     }
 
-    /// Schedules/Quantities (all): the six every project has, then the project's own.
+    /// Schedules/Quantities (all): the seven every project has, then the project's own.
     fn schedules_node(&self) -> Node {
         let m = &self.session.model;
         let mut kids: Vec<Node> = SCHEDULES
@@ -448,7 +633,18 @@ impl BimApp {
                 self.view_leaf(&name, Sheet::Schedule(cat))
             })
             .collect();
-        kids.extend(self.schedules().into_iter().map(|(id, name)| self.view_leaf(name, Sheet::Table(id))));
+        // The project's own have a right-click Delete; the seven every project has stay.
+        kids.extend(
+            self.schedules()
+                .into_iter()
+                .map(|(id, name)| self.view_leaf(name, Sheet::Table(id)).with_menu(vec![("Delete", Act::Delete(vec![id]))])),
+        );
+        // The panel schedules of the distribution boards.
+        let panels = self.panel_schedules();
+        if !panels.is_empty() {
+            let leaves = panels.into_iter().map(|(id, name)| self.view_leaf(name, Sheet::Table(id))).collect();
+            kids.push(Node::group(t("Panel Schedules"), true, leaves));
+        }
         Node::group(t("Schedules/Quantities (all)"), true, kids)
     }
 
@@ -456,26 +652,27 @@ impl BimApp {
     fn links_node(&self) -> Option<Node> {
         let m = &self.session.model;
         let kids: Vec<Node> = m
-            .elements
-            .iter()
-            .filter_map(|(id, e)| match e {
-                Element::Link(l) => {
+            .rare("link")
+            .into_iter()
+            .filter_map(|id| match m.elements.get(id) {
+                Some(Element::Link(l)) => {
                     let label = if m.loaded.contains_key(&l.path) { l.name.clone() } else { tf("{} (not loaded)", &[&l.name]) };
-                    let menu = vec![("Reload", Act::Do("reload", serde_json::json!({"id": id}))), ("Remove", Act::Delete(vec![*id]))];
-                    Some(Node::leaf(&label, Act::Select(*id), self.selection == [*id]).with_menu(menu))
+                    let menu = vec![(msg!("Reload"), Act::Do("reload", serde_json::json!({"id": id}))), ("Remove", Act::Delete(vec![id]))];
+                    Some(Node::leaf(&label, Act::Select(id), self.selection == [id]).with_menu(menu))
                 }
                 _ => None,
             })
             .collect();
-        (!kids.is_empty())
-            .then(|| Node::group(t("Linked Models"), true, kids).with_menu(vec![("Reload All", Act::Do("reload", serde_json::json!({})))]))
+        (!kids.is_empty()).then(|| {
+            Node::group(t("Linked Models"), true, kids).with_menu(vec![(msg!("Reload All"), Act::Do("reload", serde_json::json!({})))])
+        })
     }
 
     /// The sheets, by number, as "A101 - Name".
     fn sheets(&self) -> Vec<(Id, String)> {
         let m = &self.session.model;
         let mut sheets: Vec<(Id, String)> =
-            m.elements.keys().filter_map(|id| m.sheet(*id).map(|s| (*id, format!("{} - {}", s.number, s.name)))).collect();
+            m.rare("sheet").into_iter().filter_map(|id| m.sheet(id).map(|s| (id, format!("{} - {}", s.number, s.name)))).collect();
         sheets.sort_by(|a, b| a.1.cmp(&b.1));
         sheets
     }

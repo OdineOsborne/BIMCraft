@@ -1,200 +1,437 @@
-//! DWG through a DXF bridge: a drawing in Autodesk's own format turned into the DXF bytes BIMCraft's own reader
-//! ([`bimcraft_core::dxf`]) already understands. Nothing of the dependency's types leaves this crate — the whole of its
-//! surface here is bytes in, bytes out — so what reads a drawing stays one reader, and what is depended on stays in one
-//! place.
+//! DWG drawings, as the DXF text the core reads.
 //!
-//! **Why a dependency at all.** DWG has no published specification, so it cannot be read under the rule the rest of
-//! BIMCraft's formats are read under. `acadrust` is MPL-2.0, a copyleft of each file rather than of a whole work: used
-//! unmodified, as it is here, BIMCraft's own files stay `MIT OR Apache-2.0`, and `NOTICE` says where it came from.
-//! LibreDWG, the other open reader, is GPL-3 and could not be.
+//! DWG has no permissively licensed reader of BIMCraft's own, so this crate is a bridge: the `acadrust` crate (MPL-2.0, used
+//! unmodified as a separate library; its DWG code is ported from ACadSharp, MIT, and follows the Open Design Alliance's
+//! published DWG specification) reads the file, and its DXF writer writes what it read as ASCII DXF, which `bimcraft-core`'s
+//! `dxf.rs` reads as it reads any other. Nothing outside this crate sees `acadrust`'s types, and the core never depends on
+//! it: the apps hand a `Session` a DWG reader ([`reader`], the core's `cad::DwgReader`), as the window is handed the Revit reader.
 //!
-//! **The guard around it.** The decoder sizes its tables and buffers from what a file claims, and a file may be damaged
-//! or hostile:
-//!
-//! - a file bigger than [`Limits::dwg`] is refused before the decoder is handed anything;
-//! - the DXF it writes is cut off at [`Limits::dxf`] as it is written, not after;
-//! - the whole of it runs inside `catch_unwind`, so a decode that gives up is an error and not the end of the window.
-//!
-//! What this does not bound: a small file that declares a huge table inside itself can still make the decoder allocate
-//! before any size of ours is known. Bounding that needs the decode to run where an operating system can cap its
-//! memory — a worker of its own — which is work this does not do yet. The limits here keep what it can cost in reach.
+//! A file is hostile. Its size is held to [`Limits`] before the decoder runs, the DXF it becomes while it is written, and the
+//! decoder runs under `catch_unwind`. That isn't enough on its own: a small file that declares a huge table can make the
+//! decoder allocate until the process aborts, which nothing in the process can catch. So the apps read a DWG in a child
+//! process of their own ([`in_child`], answered by [`child_main`]): a file that brings the decoder down takes the child with
+//! it, and the window, or the command line, says the file couldn't be read.
 
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::process::{Command, ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
-/// How big a drawing may be, in bytes, in each form. A DWG is compressed and the DXF it becomes is several times
-/// larger, so the two are not the same number.
-#[derive(Clone, Copy, Debug)]
+/// The argument that makes an app the child that reads one DWG: `<app> --dwg-to-dxf <path>`.
+pub const CHILD_ARG: &str = "--dwg-to-dxf";
+/// The argument that makes an app the child that writes one DWG: `<app> --dxf-to-dwg`, the DXF on its standard input and the
+/// DWG on its standard output.
+pub const WRITE_ARG: &str = "--dxf-to-dwg";
+
+/// How large a DWG, and the DXF it becomes, may be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// The DWG read in.
-    pub dwg: usize,
-    /// The DXF written out.
-    pub dxf: usize,
+    /// The largest DWG file read at all, checked before the decoder runs.
+    pub dwg_bytes: usize,
+    /// The largest DXF a DWG may become, checked while it is written: a DWG is compressed, and its DXF is several times
+    /// larger (about six in CADCraft's measures).
+    pub dxf_bytes: usize,
 }
 
-impl Default for Limits {
-    fn default() -> Self {
-        Limits { dwg: 64 << 20, dxf: 512 << 20 }
-    }
+impl Limits {
+    /// 64 MB of DWG, and 128 MB of DXF, which is the most the core's DXF reader reads (`dxf::MAX_BYTES`).
+    pub const DEFAULT: Limits = Limits { dwg_bytes: 64 << 20, dxf_bytes: 128 << 20 };
 }
 
-/// Whether `bytes` begin as a DWG does: `AC10` and two digits, the version code Autodesk writes first.
+/// A DWG read: the DXF it became, and notes on what the read left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Converted {
+    pub dxf: Vec<u8>,
+    pub notes: Vec<String>,
+}
+
+/// Whether `bytes` begin as a DWG does: `AC10` and two digits, its version (AC1015 is 2000, AC1032 is 2018).
 pub fn is_dwg(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"AC10") && bytes.get(4..6).is_some_and(|v| v.iter().all(u8::is_ascii_digit))
+    bytes.len() > 6 && bytes.starts_with(b"AC10") && bytes.get(4..6).is_some_and(|v| v.iter().all(u8::is_ascii_digit))
 }
 
-/// The version code of a DWG — `AC1032` — or none where `bytes` are no DWG.
-pub fn version(bytes: &[u8]) -> Option<String> {
-    is_dwg(bytes).then(|| String::from_utf8_lossy(&bytes[0..6]).into_owned())
-}
-
-/// What the version code of a DWG is called, for saying which drawing could not be read.
-pub fn release(code: &str) -> &'static str {
-    match code {
-        "AC1009" => "AutoCAD R11/R12",
-        "AC1012" => "AutoCAD R13",
-        "AC1014" => "AutoCAD R14",
-        "AC1015" => "AutoCAD 2000",
-        "AC1018" => "AutoCAD 2004",
-        "AC1021" => "AutoCAD 2007",
-        "AC1024" => "AutoCAD 2010",
-        "AC1027" => "AutoCAD 2013",
-        "AC1032" => "AutoCAD 2018 or later",
-        _ => "an unknown release",
+/// The DXF the DWG `bytes` hold, within `limits`.
+pub fn to_dxf(bytes: &[u8], limits: Limits) -> Result<Converted, String> {
+    if bytes.len() > limits.dwg_bytes {
+        return Err(format!("the file is {}, larger than the {} of DWG BIMCraft reads", mb(bytes.len()), mb(limits.dwg_bytes)));
     }
+    if !is_dwg(bytes) {
+        return Err("it isn't a DWG file (a DWG begins with its version, AC1015 to AC1032)".into());
+    }
+    // Failsafe: an object the decoder can't read is left out and counted, rather than failing the whole file.
+    let read = std::panic::catch_unwind(|| {
+        acadrust::DwgReader::from_stream_with_options(Cursor::new(bytes), acadrust::DwgReadOptions::failsafe()).read_with_stats()
+    })
+    .map_err(|_| "the DWG reader failed on this file".to_string())?
+    .map_err(|e| format!("the DWG couldn't be read: {e}"))?;
+    if !read.stats.record_stream_read {
+        let why = read.stats.diagnostics.first().map(|d| d.message.trim_start_matches("Failsafe: ").to_string());
+        return Err(format!("the DWG couldn't be read: {}", why.unwrap_or_else(|| "its objects couldn't be read".into())));
+    }
+    let notes = skipped(&read.stats);
+    let mut out = Capped { buf: Vec::new(), limit: limits.dxf_bytes, over: false };
+    let written = std::panic::catch_unwind(AssertUnwindSafe(|| acadrust::DxfWriter::new(&read.document).write_to_writer(&mut out)))
+        .map_err(|_| "the DWG reader failed writing this file as DXF".to_string())?;
+    if out.over {
+        return Err(format!(
+            "this {} DWG became more than {} of DXF, the most BIMCraft reads; the file may be damaged",
+            mb(bytes.len()),
+            mb(limits.dxf_bytes)
+        ));
+    }
+    written.map_err(|e| format!("the DWG couldn't be written as DXF: {e}"))?;
+    Ok(Converted { dxf: out.buf, notes })
 }
 
-/// A writer that stops at `cap` bytes, so a drawing that unfolds without end is cut off while it is written and not
-/// after it has filled the machine.
+/// The DXF the DWG file at `path` holds, read in this process.
+pub fn read_file(path: &Path, limits: Limits) -> Result<Converted, String> {
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len > limits.dwg_bytes as u64 {
+        return Err(format!("the file is {}, larger than the {} of DWG BIMCraft reads", mb(len as usize), mb(limits.dwg_bytes)));
+    }
+    to_dxf(&std::fs::read(path).map_err(|e| e.to_string())?, limits)
+}
+
+/// The note on what a failsafe read left out: how many object records, of which kinds; none when it read them all.
+fn skipped(stats: &acadrust::ReadStats) -> Vec<String> {
+    let n = stats.skipped_source_records;
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut kinds: Vec<String> =
+        stats.diagnostics.iter().filter(|d| d.record_handle.is_some()).filter_map(|d| d.record_type.clone()).collect();
+    kinds.sort();
+    kinds.dedup();
+    kinds.truncate(6);
+    let of = if stats.source_records > 0 { format!(" of {}", stats.source_records) } else { String::new() };
+    let which = if kinds.is_empty() { String::new() } else { format!(" (of types {})", kinds.join(", ")) };
+    vec![format!("{n}{of} of the DWG's object records couldn't be read and were left out{which}")]
+}
+
+/// The DXF as it's written, refused once it would pass `limit`.
 struct Capped {
-    out: Vec<u8>,
-    cap: usize,
+    buf: Vec<u8>,
+    limit: usize,
+    over: bool,
 }
 
 impl Write for Capped {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.out.len() + buf.len() > self.cap {
-            return Err(std::io::Error::other(format!("the DXF it makes is past {} bytes", self.cap)));
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.over || self.buf.len().saturating_add(b.len()) > self.limit {
+            self.over = true;
+            return Err(std::io::Error::other("the DXF limit"));
         }
-        self.out.extend_from_slice(buf);
-        Ok(buf.len())
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
     }
+
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
 
-/// `bytes`, a DWG, as the bytes of an ASCII DXF, and what the reader said about the drawing on the way: how much of it
-/// it could not read, in its own words, the first few.
-pub fn to_dxf(bytes: &[u8], limits: &Limits) -> Result<(Vec<u8>, Vec<String>), String> {
-    let Some(code) = version(bytes) else {
-        return Err("this is no DWG: it does not begin with a version code".into());
-    };
-    if bytes.len() > limits.dwg {
-        return Err(format!("it holds {} bytes; a DWG is read up to {}", bytes.len(), limits.dwg));
-    }
-    let read = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        acadrust::DwgReader::from_stream_with_options(Cursor::new(bytes), acadrust::DwgReadOptions::failsafe()).read_with_stats()
-    }));
-    let outcome = match read {
-        Ok(Ok(got)) => got,
-        Ok(Err(e)) => return Err(format!("{} ({code}) could not be read: {e}", release(&code))),
-        Err(_) => return Err(format!("{} ({code}) stopped the reader", release(&code))),
-    };
-    let (doc, stats) = (outcome.document, outcome.stats);
-    let mut out = Capped { out: Vec::new(), cap: limits.dxf };
-    let written = std::panic::catch_unwind(AssertUnwindSafe(|| acadrust::DxfWriter::new(&doc).write_to_writer(&mut out)));
-    match written {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(format!("{} ({code}) could not be written as DXF: {e}", release(&code))),
-        Err(_) => return Err(format!("{} ({code}) stopped the writer", release(&code))),
-    }
-    Ok((out.out, notes(&stats)))
+fn mb(n: usize) -> String {
+    format!("{:.1} MB", n as f64 / f64::from(1u32 << 20))
 }
 
-/// What the reader said it could not read, in its own words, the first few: a drawing says how much of itself it lost
-/// on the way in, rather than losing it quietly.
-fn notes(stats: &acadrust::ReadStats) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for d in stats.diagnostics.iter().take(8) {
-        out.push(format!("{d:?}"));
+// ---------- The child process ----------
+
+/// The longest a child may read one DWG for.
+pub const CHILD_TIME: Duration = Duration::from_secs(300);
+
+/// The most a child says on its error stream.
+const MAX_SAID: u64 = 64 << 10;
+
+/// What an app does when it's started as the child that reads a DWG (`args`, its arguments after its own name, are
+/// [`CHILD_ARG`] and a path): the DXF on its standard output, each note on its error stream as `note: ` and a line, and why on
+/// its error stream when it can't. `None` when `args` aren't a child's, and the app goes on as itself.
+pub fn child_main(args: &[String]) -> Option<ExitCode> {
+    if let [arg] = args
+        && arg == WRITE_ARG
+    {
+        return Some(write_child());
     }
-    if stats.diagnostics.len() > out.len() {
-        out.push(format!("and {} more", stats.diagnostics.len() - out.len()));
+    let [arg, path] = args else { return None };
+    if arg != CHILD_ARG {
+        return None;
     }
-    out
+    let mut err = std::io::stderr();
+    match read_file(Path::new(path), Limits::DEFAULT) {
+        Ok(read) => {
+            for note in &read.notes {
+                let _ = writeln!(err, "note: {}", note.replace(['\r', '\n'], " "));
+            }
+            let mut out = std::io::stdout().lock();
+            match out.write_all(&read.dxf).and_then(|()| out.flush()) {
+                Ok(()) => Some(ExitCode::SUCCESS),
+                Err(e) => {
+                    let _ = writeln!(err, "{e}");
+                    Some(ExitCode::FAILURE)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// The DWG file at `path` read by `exe` started as a child ([`child_main`]), within [`Limits::DEFAULT`] and `time`. A child
+/// that aborts, runs past `time` or says more than the limits allow is stopped, and the reply says the file couldn't be read.
+pub fn in_child(exe: &Path, path: &Path, time: Duration) -> Result<Converted, String> {
+    let cap = Limits::DEFAULT.dxf_bytes as u64 + 1;
+    let ran = run_child(exe, &[CHILD_ARG.as_ref(), path.as_os_str()], None, cap, time, &|| false)
+        .map_err(|e| format!("the DWG reader couldn't start: {e}"))?;
+    let (notes, why) = ran.said();
+    match ran.status {
+        None => Err(format!("the DWG reader took longer than {} s on this file and was stopped", time.as_secs())),
+        Some(s) if s.success() && ran.out.len() as u64 >= cap => {
+            Err(format!("this DWG became more than {} of DXF, the most BIMCraft reads", mb(Limits::DEFAULT.dxf_bytes)))
+        }
+        Some(s) if s.success() => Ok(Converted { dxf: ran.out, notes }),
+        Some(_) if !why.is_empty() => Err(why.join("; ")),
+        Some(s) => Err(format!("the DWG reader stopped on this file ({s}); the file may be damaged")),
+    }
+}
+
+/// What a child did: how it ended (none: it was stopped), what it wrote, and what it said on its error stream.
+struct Ran {
+    status: Option<std::process::ExitStatus>,
+    out: Vec<u8>,
+    said: Vec<u8>,
+}
+
+impl Ran {
+    /// Its notes (`note: ` lines) and the rest of what it said, why it failed.
+    fn said(&self) -> (Vec<String>, Vec<String>) {
+        let said = String::from_utf8_lossy(&self.said);
+        let (notes, why): (Vec<&str>, Vec<&str>) = said.lines().filter(|l| !l.trim().is_empty()).partition(|l| l.starts_with("note: "));
+        (notes.iter().map(|l| l.trim_start_matches("note: ").to_string()).collect(), why.iter().map(|l| l.to_string()).collect())
+    }
+}
+
+/// `exe args` run as a child: `input` on its standard input, what it writes taken up to `cap` bytes, for at most `time`, and
+/// stopped as soon as `stop` says so. Both streams are read while the child runs, so neither fills and stalls it; past its
+/// limit a stream is dropped, and the child, its writes refused, stops.
+fn run_child(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    input: Option<Vec<u8>>,
+    cap: u64,
+    time: Duration,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<Ran> {
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Fed on a thread of its own: a child that writes before it has read all it is given would otherwise wait on us.
+    let feed = child.stdin.take().zip(input).map(|(mut stdin, bytes)| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+        })
+    });
+    let out = child.stdout.take().map(|s| std::thread::spawn(move || drain(s, cap)));
+    let said = child.stderr.take().map(|s| std::thread::spawn(move || drain(s, MAX_SAID)));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() < time && !stop() => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    if let Some(f) = feed {
+        let _ = f.join();
+    }
+    let out = out.and_then(|t| t.join().ok()).unwrap_or_default();
+    let said = said.and_then(|t| t.join().ok()).unwrap_or_default();
+    Ok(Ran { status, out, said })
+}
+
+/// The DWG reader an app hands its `Session`: this app itself, started as the child that reads one ([`in_child`]). None when
+/// the app can't say where its own program is.
+pub fn reader() -> Option<bimcraft_core::cad::DwgReader> {
+    let exe = std::env::current_exe().ok()?;
+    Some(std::sync::Arc::new(move |path: &Path| in_child(&exe, path, CHILD_TIME).map(|read| (read.dxf, read.notes))))
+}
+
+/// What `stream` gives, up to `cap` bytes.
+fn drain(stream: impl Read, cap: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = stream.take(cap).read_to_end(&mut buf);
+    buf
+}
+
+// ---------- Writing ----------
+
+/// The oldest DWG written: AutoCAD 2004 (AC1018). A 2000 DWG has no true colours, which every drawing BIMCraft writes uses.
+const OLDEST: acadrust::DxfVersion = acadrust::DxfVersion::AC1018;
+
+/// The DWG the DXF `dxf` becomes, within `limits` (the DXF's size checked before the library reads it, the DWG's after it
+/// is written), at least AutoCAD 2004's, with the drawing variables dictionary AutoCAD writes ([`variables`]). The library
+/// runs under `catch_unwind`; an allocation it can't make still ends the process, so the apps write in a child
+/// ([`write_in_child`]).
+pub fn to_dwg(dxf: &[u8], limits: Limits) -> Result<Vec<u8>, String> {
+    if dxf.len() > limits.dxf_bytes {
+        return Err(format!("the drawing is {} of DXF, more than the {} BIMCraft writes as DWG", mb(dxf.len()), mb(limits.dxf_bytes)));
+    }
+    let data = dxf.to_vec();
+    let mut doc = std::panic::catch_unwind(move || acadrust::DxfReader::from_reader(Cursor::new(data)).and_then(acadrust::DxfReader::read))
+        .map_err(|_| "the DWG writer failed reading the drawing".to_string())?
+        .map_err(|e| format!("the drawing couldn't be read for DWG: {e}"))?;
+    if doc.version < OLDEST {
+        doc.version = OLDEST;
+    }
+    std::panic::catch_unwind(AssertUnwindSafe(|| variables(&mut doc))).map_err(|_| "the DWG writer failed on this drawing".to_string())?;
+    let dwg = std::panic::catch_unwind(AssertUnwindSafe(|| acadrust::DwgWriter::write_to_vec(&doc)))
+        .map_err(|_| "the DWG writer failed on this drawing".to_string())?
+        .map_err(|e| format!("the DWG couldn't be written: {e}"))?;
+    if dwg.len() > limits.dwg_bytes {
+        return Err(format!("the DWG would be {}, more than the {} BIMCraft writes", mb(dwg.len()), mb(limits.dwg_bytes)));
+    }
+    Ok(dwg)
+}
+
+/// The drawing variables dictionary (`AcDbVariableDictionary`) AutoCAD writes in every drawing's named objects, with the
+/// variables of a drawing in standard styles at 1:1, when the drawing has none. A reader may take a 2004 DWG without it for
+/// an empty drawing, as CADCraft found Vectric Aspire does.
+fn variables(doc: &mut acadrust::CadDocument) {
+    use acadrust::objects::{Dictionary, DictionaryVariable, ObjectType};
+    const NAME: &str = "AcDbVariableDictionary";
+    let root = doc.header.named_objects_dict_handle;
+    match doc.objects.get(&root) {
+        Some(ObjectType::Dictionary(d)) if d.entries.iter().all(|(key, _)| !key.eq_ignore_ascii_case(NAME)) => {}
+        _ => return,
+    }
+    let handle = doc.allocate_handle();
+    let mut dictionary = Dictionary::new();
+    dictionary.handle = handle;
+    dictionary.owner = root;
+    for (name, value) in
+        [("CANNOSCALE", "1:1"), ("CMLEADERSTYLE", "Standard"), ("CTABLESTYLE", "Standard"), ("DIMASSOC", "2"), ("HIDETEXT", "1")]
+    {
+        let h = doc.allocate_handle();
+        let mut variable = DictionaryVariable::new(name, value);
+        variable.handle = h;
+        variable.owner_handle = handle;
+        dictionary.add_entry(name, h);
+        doc.objects.insert(h, ObjectType::DictionaryVariable(variable));
+    }
+    doc.objects.insert(handle, ObjectType::Dictionary(dictionary));
+    if let Some(ObjectType::Dictionary(r)) = doc.objects.get_mut(&root) {
+        r.add_entry(NAME, handle);
+    }
+}
+
+/// What an app does as the child that writes a DWG ([`WRITE_ARG`]): the DXF from its standard input, the DWG on its standard
+/// output, and why on its error stream when it can't.
+fn write_child() -> ExitCode {
+    let mut err = std::io::stderr();
+    let mut dxf = Vec::new();
+    let read = std::io::stdin().lock().take(Limits::DEFAULT.dxf_bytes as u64 + 1).read_to_end(&mut dxf);
+    let written = read.map_err(|e| e.to_string()).and_then(|_| to_dwg(&dxf, Limits::DEFAULT));
+    match written {
+        Ok(dwg) => {
+            let mut out = std::io::stdout().lock();
+            match out.write_all(&dwg).and_then(|()| out.flush()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    let _ = writeln!(err, "{e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The DWG the DXF `dxf` becomes, written by `exe` started as the child that writes one ([`WRITE_ARG`]) within `time`, and
+/// stopped when `stop` says so.
+pub fn write_in_child(exe: &Path, dxf: &[u8], time: Duration, stop: &dyn Fn() -> bool) -> Result<Vec<u8>, String> {
+    let cap = Limits::DEFAULT.dwg_bytes as u64 + 1;
+    let ran = run_child(exe, &[WRITE_ARG.as_ref()], Some(dxf.to_vec()), cap, time, stop)
+        .map_err(|e| format!("the DWG writer couldn't start: {e}"))?;
+    let (_, why) = ran.said();
+    match ran.status {
+        None if stop() => Err("cancelled".to_string()),
+        None => Err(format!("the DWG writer took longer than {} s and was stopped", time.as_secs())),
+        Some(s) if s.success() && ran.out.len() as u64 >= cap => Err("the DWG came out larger than BIMCraft writes".to_string()),
+        Some(s) if s.success() && is_dwg(&ran.out) => Ok(ran.out),
+        Some(s) if s.success() => Err("the DWG writer gave back no DWG".to_string()),
+        Some(_) if !why.is_empty() => Err(why.join("; ")),
+        Some(s) => Err(format!("the DWG writer stopped on this drawing ({s})")),
+    }
+}
+
+/// DWG, as the export engine takes a format: the core's DXF of the view or sheet, written as DWG by this program started as
+/// a child. Experimental: acadrust writes it, and DWG has no public specification to hold it to.
+pub struct Dwg {
+    exe: std::path::PathBuf,
+}
+
+impl bimcraft_core::export::Format for Dwg {
+    fn id(&self) -> &'static str {
+        "dwg"
+    }
+    fn label(&self) -> &'static str {
+        "DWG"
+    }
+    fn extension(&self) -> &'static str {
+        "dwg"
+    }
+    fn family(&self) -> bimcraft_core::export::Family {
+        bimcraft_core::export::Family::Line
+    }
+    fn status(&self) -> bimcraft_core::export::Status {
+        bimcraft_core::export::Status::Experimental
+    }
+    fn takes(&self) -> &'static [bimcraft_core::export::Takes] {
+        &[bimcraft_core::export::Takes::Drawing]
+    }
+    fn write(
+        &self,
+        items: &[bimcraft_core::export::Prepared],
+        options: &bimcraft_core::export::Options,
+        ctx: &bimcraft_core::export::Ctx,
+    ) -> Result<Vec<bimcraft_core::export::Out>, String> {
+        let dxf = bimcraft_core::export::formats::Dxf.write(items, options, ctx)?;
+        dxf.into_iter()
+            .map(|out| {
+                let bytes = write_in_child(&self.exe, &out.bytes, CHILD_TIME, ctx.cancelled)?;
+                Ok(bimcraft_core::export::Out { suffix: out.suffix, bytes })
+            })
+            .collect()
+    }
+}
+
+/// The DWG writer an app registers with its `Session`'s exports: this app itself, started as the child that writes one. None
+/// when the app can't say where its own program is.
+pub fn writer() -> Option<std::sync::Arc<dyn bimcraft_core::export::Format>> {
+    let exe = std::env::current_exe().ok()?;
+    Some(std::sync::Arc::new(Dwg { exe }))
+}
+
+/// The DWG a DXF becomes, written by the same library: tests make their DWG files with it, since Autodesk's own are never
+/// committed.
+#[cfg(any(test, feature = "testing"))]
+pub fn dwg_from_dxf(dxf: &str) -> Result<Vec<u8>, String> {
+    let doc = acadrust::DxfReader::from_reader(Cursor::new(dxf.as_bytes().to_vec()))
+        .and_then(acadrust::DxfReader::read)
+        .map_err(|e| format!("the DXF couldn't be read: {e}"))?;
+    acadrust::DwgWriter::write_to_vec(&doc).map_err(|e| format!("the DWG couldn't be written: {e}"))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn what_is_no_dwg_is_said_to_be_none() {
-        assert!(!is_dwg(b"0\nSECTION\n"));
-        assert!(!is_dwg(b"AC10"));
-        assert_eq!(version(b"ACXXXX\0"), None);
-        assert!(to_dxf(b"hello", &Limits::default()).is_err());
-    }
-
-    #[test]
-    fn a_dwg_says_which_release_it_is() {
-        assert!(is_dwg(b"AC1032\0\0\0"));
-        assert_eq!(version(b"AC1032\0\0\0").as_deref(), Some("AC1032"));
-        assert_eq!(release("AC1032"), "AutoCAD 2018 or later");
-        assert_eq!(release("AC1015"), "AutoCAD 2000");
-        assert_eq!(release("AC9999"), "an unknown release");
-    }
-
-    #[test]
-    fn a_file_past_the_limit_is_refused_before_the_decoder_sees_it() {
-        let big = [b"AC1032".as_slice(), &[0u8; 64]].concat();
-        let err = to_dxf(&big, &Limits { dwg: 16, dxf: 1 << 20 }).expect_err("refused");
-        assert!(err.contains("70 bytes") && err.contains("up to 16"), "{err}");
-    }
-
-    #[test]
-    fn a_dwg_that_is_only_a_header_comes_out_as_a_drawing_of_nothing() {
-        // The reader is a failsafe one: a file cut short gives back what it could make of it rather than an error, and
-        // what it could make of this is a drawing with nothing in it. What matters here is that it is DXF our own
-        // reader reads, and that nothing crashed on the way.
-        let (dxf, _notes) = to_dxf(b"AC1032\0\0\0\0\0\0\0\0\0\0\0", &Limits::default()).expect("it makes a DXF of it");
-        assert!(
-            dxf.starts_with(b"  0\r\nSECTION") || dxf.starts_with(b"0\nSECTION"),
-            "{:?}",
-            String::from_utf8_lossy(&dxf[..40.min(dxf.len())])
-        );
-        let drawing = bimcraft_core::dxf::read(&dxf, &bimcraft_core::dxf::Options::default()).expect("our own reader reads it");
-        assert_eq!(drawing.shapes(), 0, "a header alone draws nothing");
-    }
-
-    /// A real drawing, which this repository holds none of: `BIMCRAFT_DWG_SAMPLE` names one, as `BIMCRAFT_RVT_SAMPLES`
-    /// names Revit's. `cargo test -p bimcraft-dwg a_real_drawing -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn a_real_drawing_comes_through_as_a_drawing_our_own_reader_reads() {
-        let Ok(path) = std::env::var("BIMCRAFT_DWG_SAMPLE") else {
-            eprintln!("no sample: set BIMCRAFT_DWG_SAMPLE to a .dwg");
-            return;
-        };
-        let bytes = std::fs::read(&path).expect("the file");
-        let started = std::time::Instant::now();
-        let (dxf, notes) = to_dxf(&bytes, &Limits::default()).expect("it converts");
-        let took = started.elapsed();
-        let drawing = bimcraft_core::dxf::read(&dxf, &bimcraft_core::dxf::Options::default()).expect("our own reader reads it");
-        eprintln!("{} ({}): {} bytes of DWG -> {} of DXF in {took:?}", path, version(&bytes).unwrap_or_default(), bytes.len(), dxf.len());
-        eprintln!("  unit: {} mm, extent: {:?}", drawing.scale, drawing.extent);
-        for layer in &drawing.layers {
-            eprintln!("  layer {:<24} {:>6} shapes", layer.name, layer.shapes.len());
-        }
-        eprintln!("  left out: {:?}", drawing.left_out);
-        eprintln!("  the reader's own notes: {notes:?}");
-        assert!(drawing.shapes() > 0, "a real drawing holds something this reads");
-    }
-
-    #[test]
-    fn the_dxf_it_writes_is_cut_off_where_it_is_told_rather_than_filling_the_machine() {
-        let err = to_dxf(b"AC1032\0\0\0\0\0\0\0\0\0\0\0", &Limits { dwg: 1 << 20, dxf: 64 }).expect_err("cut off");
-        assert!(err.contains("past 64 bytes"), "{err}");
-    }
-}
+mod tests;

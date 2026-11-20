@@ -1,5 +1,5 @@
 use super::*;
-use bimcraft_core::autosave::backup_path;
+use bimcraft_core::autosave::{backup_path, old_backup_path};
 use std::time::{Duration, Instant};
 
 fn enable(h: &mut Harness<BimApp>, root: &std::path::Path) {
@@ -41,14 +41,14 @@ fn background_autosave_keeps_the_editing_session_dirty_and_moves_out_of_temp_on_
     until(&mut h, |h| h.state().autosave.discovering == 0);
     h.state_mut().session.execute("wall", &json!({"points": [[0,0],[4000,0]]})).unwrap();
     let model = Arc::clone(&h.state().session.model);
-    let history = h.state().session.history();
+    let history: Vec<String> = h.state().session.history().into_iter().map(str::to_string).collect();
     due(&mut h);
     until(&mut h, |h| !h.state().autosave.busy);
     let temp = h.state().autosave.active.clone().unwrap();
     assert!(temp.starts_with(dir.path().join("temp")) && temp.exists());
     assert!(h.state().dirty());
     assert!(Arc::ptr_eq(&model, &h.state().session.model));
-    assert_eq!(history, h.state().session.history());
+    assert_eq!(history, h.state().session.history().into_iter().map(str::to_string).collect::<Vec<_>>());
     let project = dir.path().join("house.bimcraft");
     assert!(h.state_mut().save_to(&project));
     until(&mut h, |_| !temp.exists());
@@ -229,4 +229,73 @@ fn failed_background_write_reports_an_error_and_can_retry_without_interrupting_e
     due(&mut h);
     until(&mut h, |h| !h.state().autosave.busy);
     assert_ne!(std::fs::read(backup).unwrap(), original);
+}
+
+#[test]
+fn a_project_put_in_the_sessions_place_gets_a_copy_of_its_own_and_the_old_one_stays_until_that_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = app("");
+    enable(&mut h, &dir.path().join("temp"));
+    until(&mut h, |h| h.state().autosave.discovering == 0);
+    h.state_mut().session.execute("wall", &json!({"points": [[0,0],[4000,0]]})).unwrap();
+    due(&mut h);
+    until(&mut h, |h| !h.state().autosave.busy);
+    let old = h.state().autosave.active.clone().unwrap();
+    assert!(old.exists());
+    // New, through the session as a script or an embedder does it (the control port turns an agent's away).
+    h.state_mut().session.execute("new", &json!({})).unwrap();
+    h.run();
+    let fresh = h.state().autosave.active.clone().unwrap();
+    assert_ne!(fresh, old, "the new project does not write over the old one's copy");
+    assert!(old.exists(), "unsaved work nobody was asked about stays until the new project has a copy of its own");
+    h.state_mut().session.execute("wall", &json!({"points": [[0,1000],[4000,1000]]})).unwrap();
+    due(&mut h);
+    until(&mut h, |h| !h.state().autosave.busy && !old.exists());
+    assert!(fresh.exists());
+}
+
+#[test]
+fn a_backup_an_earlier_version_left_is_offered_recovered_and_gone_once_saved() {
+    // Before the short names a backup was `house.bimcraft.autosave.bimcraft`; one left by a crash still counts.
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("house.bimcraft");
+    let backup = old_backup_path(&project);
+    let mut s = Session::new();
+    s.execute("save", &json!({"path": project})).unwrap();
+    s.execute("wall", &json!({"points": [[0,0],[4000,0]]})).unwrap();
+    s.execute("autosave", &json!({"path": backup})).unwrap();
+    let original = std::fs::read(&project).unwrap();
+    let mut h = app("");
+    enable(&mut h, &dir.path().join("temp"));
+    assert!(h.state_mut().open_path(&project));
+    until(&mut h, |h| h.query_by_label("Recover").is_some());
+    press(&mut h, "Recover");
+    assert_eq!(walls(&h).len(), 1);
+    assert!(h.state().dirty());
+    assert_eq!(h.state().session.path.as_ref(), Some(&project));
+    assert_eq!(std::fs::read(&project).unwrap(), original, "recovering opens it as unsaved work, the original untouched");
+    assert!(h.state_mut().save_to(&project));
+    until(&mut h, |_| !backup.exists());
+    // The project now has the new name's backup, not the old.
+    h.state_mut().session.execute("wall", &json!({"points": [[0,1000],[4000,1000]]})).unwrap();
+    due(&mut h);
+    until(&mut h, |h| !h.state().autosave.busy);
+    assert!(backup_path(&project).exists() && !backup.exists());
+}
+
+#[test]
+fn untitled_backups_of_either_name_are_offered_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = old_backup_path(&dir.path().join("untitled-before"));
+    let mut s = Session::new();
+    s.execute("wall", &json!({"points": [[0,0],[4000,0]]})).unwrap();
+    s.execute("autosave", &json!({"path": old})).unwrap();
+    let mut h = app("");
+    enable(&mut h, dir.path());
+    until(&mut h, |h| h.query_by_label("Recover").is_some());
+    press(&mut h, "Recover");
+    assert_eq!(walls(&h).len(), 1);
+    assert!(h.state().dirty() && h.state().session.path.is_none());
+    assert!(h.state_mut().save_to(&dir.path().join("recovered.bimc")));
+    until(&mut h, |_| !old.exists());
 }

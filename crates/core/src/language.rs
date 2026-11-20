@@ -1,9 +1,11 @@
 //! A project's language: the words its drawings print (a stair's UP, a title block's SCALE, a
 //! schedule's headings) and the names commands give what they make (levels, views, sheets, rooms).
-//! English, Brazilian Portuguese, Spanish or Italian. Names already given stay as they are; the core's
-//! messages, which agents read, stay English.
+//! English, Brazilian Portuguese, Spanish, Swedish, Czech, French, German, Dutch, Italian, Polish or Vietnamese. Names
+//! already given stay as they are; the core's messages, which agents read, stay English.
 
 use serde::{Deserialize, Serialize};
+
+include!(concat!(env!("OUT_DIR"), "/catalogs.rs"));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -14,41 +16,93 @@ pub enum Language {
     Portuguese,
     #[serde(rename = "es")]
     Spanish,
+    #[serde(rename = "sv")]
+    Swedish,
+    #[serde(rename = "cs")]
+    Czech,
+    #[serde(rename = "fr")]
+    French,
+    #[serde(rename = "de")]
+    German,
+    #[serde(rename = "nl")]
+    Dutch,
     #[serde(rename = "it")]
     Italian,
+    #[serde(rename = "pl")]
+    Polish,
+    #[serde(rename = "vi")]
+    Vietnamese,
 }
 
 impl Language {
-    pub const ALL: [Language; 4] = [Language::English, Language::Portuguese, Language::Spanish, Language::Italian];
+    pub const ALL: [Language; 11] = [
+        Language::English,
+        Language::Portuguese,
+        Language::Spanish,
+        Language::Swedish,
+        Language::Czech,
+        Language::French,
+        Language::German,
+        Language::Dutch,
+        Language::Italian,
+        Language::Polish,
+        Language::Vietnamese,
+    ];
 
-    /// Its code in commands and files: en, pt, es, it.
+    /// Its code in commands and files: en, pt, es, sv, cs, fr, de, nl, it, pl, vi.
     pub fn code(self) -> &'static str {
-        self.of(["en", "pt", "es", "it"])
+        self.of(["en", "pt", "es", "sv", "cs", "fr", "de", "nl", "it", "pl", "vi"])
     }
 
     /// Its name, in itself.
     pub fn label(self) -> &'static str {
-        self.of(["English", "Português (Brasil)", "Español", "Italiano"])
+        self.of([
+            "English",
+            "Português (Brasil)",
+            "Español",
+            "Svenska",
+            "Čeština",
+            "Français",
+            "Deutsch",
+            "Nederlands",
+            "Italiano",
+            "Polski",
+            "Tiếng Việt",
+        ])
     }
 
     /// Of one thing in each language, English first, this language's.
-    pub fn of<T>(self, [english, portuguese, spanish, italian]: [T; 4]) -> T {
+    pub fn of<T>(self, [english, portuguese, spanish, swedish, czech, french, german, dutch, italian, polish, vietnamese]: [T; 11]) -> T {
         match self {
             Language::English => english,
             Language::Portuguese => portuguese,
             Language::Spanish => spanish,
+            Language::Swedish => swedish,
+            Language::Czech => czech,
+            Language::French => french,
+            Language::German => german,
+            Language::Dutch => dutch,
             Language::Italian => italian,
+            Language::Polish => polish,
+            Language::Vietnamese => vietnamese,
         }
     }
 
-    /// A language by its code or its name, or from a locale as systems give one: pt-BR, es_419.UTF-8.
+    /// A language by its code or its name, or from a locale as systems give one: pt-BR, es_419.UTF-8, sv-SE, cs-CZ, fr-FR, de-DE, nl-BE, it-IT, pl-PL, vi-VN.
     pub fn from_code(code: &str) -> Option<Language> {
         let code = code.trim().to_lowercase();
         Some(match code.split(['-', '_', '.']).next().unwrap_or_default() {
             "en" | "english" => Language::English,
             "pt" | "portuguese" | "português" => Language::Portuguese,
             "es" | "spanish" | "español" => Language::Spanish,
+            "sv" | "swedish" | "svenska" => Language::Swedish,
+            "cs" | "cz" | "czech" | "čeština" | "cestina" => Language::Czech,
+            "fr" | "french" | "français" | "francais" => Language::French,
+            "de" | "german" | "deutsch" => Language::German,
+            "nl" | "dutch" | "nederlands" | "vlaams" | "flemish" => Language::Dutch,
             "it" | "italian" | "italiano" => Language::Italian,
+            "pl" | "polish" | "polski" => Language::Polish,
+            "vi" | "vietnamese" | "tiếng việt" | "tieng viet" => Language::Vietnamese,
             _ => return None,
         })
     }
@@ -63,7 +117,7 @@ impl Language {
         if self == Language::English {
             return None;
         }
-        WORDS.iter().find(|w| w[0] == english).map(|&w| self.of(w))
+        bimcraft_i18n::translated(CATALOGS, self.code(), "", english)
     }
 
     /// Which of `options` (English words) `name` is, in English or in this language.
@@ -72,150 +126,6 @@ impl Language {
         options.iter().copied().find(|o| o.eq_ignore_ascii_case(name) || self.word(o).to_lowercase() == name.to_lowercase())
     }
 }
-
-/// The core's words in English, Brazilian Portuguese, Spanish and Italian.
-const WORDS: &[[&str; 4]] = &[
-    // Phases and the phase filters a project starts with.
-    ["Existing", "Existente", "Existente", "Esistente"],
-    ["New Construction", "Nova construção", "Nueva construcción", "Nuova costruzione"],
-    ["Show All", "Mostrar tudo", "Mostrar todo", "Mostra tutto"],
-    ["Show Complete", "Mostrar completo", "Mostrar completo", "Mostra completo"],
-    ["Show New", "Mostrar novo", "Mostrar nuevo", "Mostra nuovo"],
-    ["Show Previous + Demolished", "Mostrar anterior + demolido", "Mostrar anterior + demolido", "Mostra precedente + demolito"],
-    ["Show Previous + New", "Mostrar anterior + novo", "Mostrar anterior + nuevo", "Mostra precedente + nuovo"],
-    // Names commands give.
-    ["Project", "Projeto", "Proyecto", "Progetto"],
-    ["Level", "Nível", "Nivel", "Livello"],
-    ["Section", "Corte", "Sección", "Sezione"],
-    ["Elevation", "Elevação", "Elevación", "Prospetto"],
-    ["North", "Norte", "Norte", "Nord"],
-    ["South", "Sul", "Sur", "Sud"],
-    ["East", "Leste", "Este", "Est"],
-    ["West", "Oeste", "Oeste", "Ovest"],
-    ["Unnamed", "Sem nome", "Sin nombre", "Senza nome"],
-    ["Room", "Ambiente", "Habitación", "Locale"],
-    ["Mass", "Massa", "Masa", "Massa"],
-    ["Ground", "Terreno", "Terreno", "Terreno"],
-    ["Room Schedule", "Tabela de ambientes", "Tabla de habitaciones", "Abaco dei locali"],
-    ["Door Schedule", "Tabela de portas", "Tabla de puertas", "Abaco delle porte"],
-    ["Window Schedule", "Tabela de janelas", "Tabla de ventanas", "Abaco delle finestre"],
-    ["Wall Schedule", "Tabela de paredes", "Tabla de muros", "Abaco dei muri"],
-    ["Floor Schedule", "Tabela de pisos", "Tabla de pisos", "Abaco dei pavimenti"],
-    ["Level Schedule", "Tabela de níveis", "Tabla de niveles", "Abaco dei livelli"],
-    ["Ceiling Plan", "Planta de forro", "Plano de cielo raso", "Pianta del controsoffitto"],
-    ["Copy", "Cópia", "Copia", "Copia"],
-    ["Dependent", "Dependente", "Dependiente", "Dipendente"],
-    // The materials library a new project has.
-    ["Brick", "Tijolo", "Ladrillo", "Mattone"],
-    ["Insulation", "Isolamento", "Aislamiento", "Isolante"],
-    ["Concrete block", "Bloco de concreto", "Bloque de hormigón", "Blocco di calcestruzzo"],
-    ["Plaster", "Reboco", "Enlucido", "Intonaco"],
-    ["Concrete", "Concreto", "Hormigón", "Calcestruzzo"],
-    ["Screed", "Contrapiso", "Recrecido", "Massetto"],
-    ["Timber", "Madeira", "Madera", "Legno"],
-    ["Gypsum board", "Placa de gesso", "Placa de yeso", "Cartongesso"],
-    ["Ceramic tile", "Cerâmica", "Baldosa cerámica", "Piastrella ceramica"],
-    ["Roof tiles", "Telhas", "Tejas", "Tegole"],
-    ["Membrane", "Manta impermeável", "Lámina impermeable", "Guaina impermeabile"],
-    ["Fabric", "Tecido", "Tela", "Tessuto"],
-    ["Porcelain", "Porcelana", "Porcelana", "Porcellana"],
-    // The families a project starts with, and their parameters.
-    ["Table", "Mesa", "Mesa", "Tavolo"],
-    ["Chair", "Cadeira", "Silla", "Sedia"],
-    ["Bed", "Cama", "Cama", "Letto"],
-    ["Sofa", "Sofá", "Sofá", "Divano"],
-    ["Desk", "Escrivaninha", "Escritorio", "Scrivania"],
-    ["Wardrobe", "Guarda-roupa", "Armario", "Armadio"],
-    ["Base Cabinet", "Armário inferior", "Mueble bajo", "Mobile base"],
-    ["WC", "Vaso sanitário", "Inodoro", "Vaso sanitario"],
-    ["Washbasin", "Lavatório", "Lavabo", "Lavabo"],
-    ["Bathtub", "Banheira", "Bañera", "Vasca da bagno"],
-    // The fixtures of the discipline tabs.
-    ["Kitchen Sink", "Pia de cozinha", "Fregadero de cocina", "Lavello da cucina"],
-    ["Shower", "Chuveiro", "Ducha", "Doccia"],
-    ["Floor Drain", "Ralo", "Sumidero de piso", "Piletta a pavimento"],
-    ["Elbow 90", "Joelho 90", "Codo 90", "Gomito 90"],
-    ["Tee", "Tê", "Te", "Raccordo a T"],
-    ["Gate Valve", "Registro de gaveta", "Válvula de compuerta", "Saracinesca"],
-    ["Diameter", "Diâmetro", "Diámetro", "Diametro"],
-    ["Distribution Board", "Quadro de distribuição", "Cuadro de distribución", "Quadro di distribuzione"],
-    ["Ceiling Luminaire", "Luminária de teto", "Luminaria de techo", "Plafoniera"],
-    ["Recessed Luminaire", "Luminária embutida", "Luminaria empotrada", "Faretto da incasso"],
-    ["Outlet", "Tomada", "Tomacorriente", "Presa"],
-    ["Switch", "Interruptor", "Interruptor", "Interruttore"],
-    ["Mounting Height", "Altura de instalação", "Altura de montaje", "Altezza di installazione"],
-    ["Air Terminal", "Captor", "Terminal aéreo", "Captatore"],
-    ["Earthing Electrode", "Haste de aterramento", "Electrodo de puesta a tierra", "Dispersore di terra"],
-    ["Inspection Box", "Caixa de inspeção", "Caja de inspección", "Pozzetto di ispezione"],
-    ["Data Outlet", "Ponto de dados", "Punto de datos", "Presa dati"],
-    ["Voice Outlet", "Ponto de voz", "Punto de voz", "Presa fonia"],
-    ["Patch Panel", "Patch panel", "Panel de parcheo", "Patch panel"],
-    ["Rack", "Rack", "Rack", "Rack"],
-    ["Single Door", "Porta simples", "Puerta simple", "Porta singola"],
-    ["Double Door", "Porta dupla", "Puerta doble", "Porta doppia"],
-    ["Fixed Window", "Janela fixa", "Ventana fija", "Finestra fissa"],
-    ["Casement Window", "Janela de abrir", "Ventana abatible", "Finestra a battente"],
-    ["Frame Width", "Largura do batente", "Ancho del marco", "Larghezza del telaio"],
-    ["Frame Depth", "Profundidade do batente", "Profundidad del marco", "Profondità del telaio"],
-    ["Frame Material", "Material do batente", "Material del marco", "Materiale del telaio"],
-    ["Leaf Material", "Material da folha", "Material de la hoja", "Materiale anta"],
-    ["Leaf Thickness", "Espessura da folha", "Espesor de la hoja", "Spessore anta"],
-    ["Glass", "Vidro", "Vidrio", "Vetro"],
-    ["Metal", "Metal", "Metal", "Metallo"],
-    ["PVC", "PVC", "PVC", "PVC"],
-    ["Copper", "Cobre", "Cobre", "Rame"],
-    ["Depth", "Profundidade", "Profundidad", "Profondità"],
-    ["Seat Height", "Altura do assento", "Altura del asiento", "Altezza della seduta"],
-    ["Leg Width", "Largura da perna", "Ancho de la pata", "Larghezza della gamba"],
-    ["Arm Width", "Largura do braço", "Ancho del brazo", "Larghezza del bracciolo"],
-    ["Headboard Height", "Altura da cabeceira", "Altura del cabecero", "Altezza della testiera"],
-    ["Worktop", "Bancada", "Encimera", "Piano di lavoro"],
-    // What drawings print.
-    ["UP", "SOBE", "SUBE", "SALE"],
-    ["DN", "DESCE", "BAJA", "SCENDE"],
-    ["NOT ENCLOSED", "NÃO DELIMITADO", "NO DELIMITADA", "NON DELIMITATO"],
-    ["SCALE", "ESCALA", "ESCALA", "SCALA"],
-    ["SCALE AS INDICATED", "ESCALA CONFORME INDICADO", "ESCALA SEGÚN SE INDICA", "SCALA COME INDICATO"],
-    // Schedule headings.
-    ["Number", "Número", "Número", "Numero"],
-    ["Name", "Nome", "Nombre", "Nome"],
-    ["Mark", "Marca", "Marca", "Contrassegno"],
-    ["Type", "Tipo", "Tipo", "Tipo"],
-    ["Width", "Largura", "Ancho", "Larghezza"],
-    ["Height", "Altura", "Altura", "Altezza"],
-    ["Sill", "Peitoril", "Antepecho", "Davanzale"],
-    ["Wall", "Parede", "Muro", "Muro"],
-    ["Length", "Comprimento", "Longitud", "Lunghezza"],
-    ["Thickness", "Espessura", "Espesor", "Spessore"],
-    ["Area", "Área", "Área", "Area"],
-    ["Perimeter", "Perímetro", "Perímetro", "Perimetro"],
-    ["Volume", "Volume", "Volumen", "Volume"],
-    ["Gross Floor Area", "Área bruta de piso", "Superficie bruta de planta", "Superficie lorda di pavimento"],
-    ["Count", "Contagem", "Recuento", "Conteggio"],
-    ["Family", "Família", "Familia", "Famiglia"],
-    ["Offset", "Deslocamento", "Desfase", "Offset"],
-    ["Slope", "Inclinação", "Pendiente", "Pendenza"],
-    ["Plan Area", "Área em planta", "Área en planta", "Area in pianta"],
-    ["Risers", "Espelhos", "Contrahuellas", "Alzate"],
-    ["Riser Height", "Altura do espelho", "Altura de contrahuella", "Altezza alzata"],
-    ["Tread", "Piso", "Huella", "Pedata"],
-    ["Total", "Total", "Total", "Totale"],
-    // What an exported bill of quantities is called, and the parameter that carries a price list's article code.
-    ["Bill of Quantities", "Orçamento", "Presupuesto", "Computo metrico"],
-    // The parameter that carries a price list's article code.
-    ["Article Code", "Código do artigo", "Código de artículo", "Codice articolo"],
-    // The headings of a bill of quantities and of its specification, as `bill.rs` writes them.
-    ["No.", "N.º", "N.º", "N."],
-    ["Code", "Código", "Código", "Codice"],
-    ["Description", "Descrição", "Descripción", "Descrizione"],
-    ["Unit", "Unidade", "Unidad", "U.M."],
-    ["Quantity", "Quantidade", "Cantidad", "Quantità"],
-    ["Unit Price", "Preço unitário", "Precio unitario", "Prezzo unitario"],
-    ["Amount", "Valor", "Importe", "Importo"],
-    ["Specification", "Caderno de encargos", "Pliego de condiciones", "Capitolato"],
-    ["Yes", "Sim", "Sí", "Sì"],
-    ["No", "Não", "No", "No"],
-];
 
 #[cfg(test)]
 mod tests {
@@ -234,8 +144,93 @@ mod tests {
         assert_eq!(es.find("TABLA DE PUERTAS", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
         // Codes as commands write them, and locales as systems give them.
         assert_eq!(
-            ["pt-BR", "pt_BR.UTF-8", "es", "es-419", "Español", "en-US", "en", "de", "C", ""].map(Language::from_code),
-            [Some(pt), Some(pt), Some(es), Some(es), Some(es), Some(Language::English), Some(Language::English), None, None, None]
+            ["pt-BR", "pt_BR.UTF-8", "es", "es-419", "Español", "en-US", "en", "C", ""].map(Language::from_code),
+            [Some(pt), Some(pt), Some(es), Some(es), Some(es), Some(Language::English), Some(Language::English), None, None]
         );
+    }
+
+    #[test]
+    fn german_words_and_locales_are_project_language() {
+        let de = Language::German;
+        assert_eq!([de.word("Level"), de.word("UP"), de.word("Room Schedule")], ["Geschoss", "AUF", "Raumtabelle"]);
+        assert_eq!(de.find("RAUMTABELLE", &["Room Schedule", "Door Schedule"]), Some("Room Schedule"));
+        assert_eq!(["de", "de-DE", "de_DE.UTF-8", "de-AT", "de-CH", "german", "Deutsch"].map(Language::from_code), [Some(de); 7]);
+        assert_eq!((de.code(), de.label()), ("de", "Deutsch"));
+    }
+
+    #[test]
+    fn swedish_words_and_locales_are_project_language() {
+        let sv = Language::Swedish;
+        assert_eq!([sv.word("Level"), sv.word("UP"), sv.word("Room Schedule")], ["Nivå", "UPP", "Rumsförteckning"]);
+        assert_eq!(sv.find("DÖRRFÖRTECKNING", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(
+            ["sv", "sv-SE", "sv_SE.UTF-8", "swedish", "Svenska"].map(Language::from_code),
+            [Some(sv), Some(sv), Some(sv), Some(sv), Some(sv)]
+        );
+    }
+
+    #[test]
+    fn french_words_and_locales_are_project_language() {
+        let fr = Language::French;
+        assert_eq!([fr.word("Level"), fr.word("UP"), fr.word("Room Schedule")], ["Niveau", "MONTE", "Nomenclature des pièces"]);
+        assert_eq!(fr.find("NOMENCLATURE DES PORTES", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(["fr", "fr-FR", "fr_CA.UTF-8", "french", "Français"].map(Language::from_code), [Some(fr); 5]);
+    }
+
+    #[test]
+    fn czech_words_and_locales_are_project_language() {
+        let cs = Language::Czech;
+        assert_eq!([cs.word("Level"), cs.word("UP"), cs.word("Room Schedule")], ["Podlaží", "NAHORU", "Výkaz místností"]);
+        assert_eq!(cs.find("VÝKAZ DVEŘÍ", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(["cs", "cs-CZ", "cs_CZ.UTF-8", "czech", "Čeština"].map(Language::from_code), [Some(cs); 5]);
+    }
+
+    #[test]
+    fn dutch_words_and_locales_are_project_language() {
+        let nl = Language::Dutch;
+        assert_eq!((nl.code(), nl.label()), ("nl", "Nederlands"));
+        assert_eq!([nl.word("Level"), nl.word("UP"), nl.word("Room Schedule")], ["Niveau", "OMHOOG", "Ruimtelijst"]);
+        assert_eq!(nl.find("DEURENLIJST", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(["nl", "nl-BE", "nl-NL", "nl_BE.UTF-8", "dutch", "Nederlands", "NL"].map(Language::from_code), [Some(nl); 7]);
+        assert!(Language::ALL.contains(&nl));
+    }
+
+    #[test]
+    fn italian_words_and_locales_are_project_language() {
+        let it = Language::Italian;
+        assert_eq!((it.code(), it.label()), ("it", "Italiano"));
+        assert_eq!([it.word("Level"), it.word("UP"), it.word("Room Schedule")], ["Piano", "SU", "Abaco zone"]);
+        assert_eq!(it.find("ABACO PORTE", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(["it", "it-IT", "it_CH.UTF-8", "italian", "Italiano", "IT"].map(Language::from_code), [Some(it); 6]);
+        assert!(Language::ALL.contains(&it));
+    }
+
+    #[test]
+    fn polish_words_and_locales_are_project_language() {
+        let pl = Language::Polish;
+        assert_eq!((pl.code(), pl.label()), ("pl", "Polski"));
+        assert_eq!([pl.word("Level"), pl.word("UP"), pl.word("Room Schedule")], ["Poziom", "W GÓRĘ", "Zestawienie pomieszczeń"]);
+        assert_eq!(pl.find("ZESTAWIENIE POMIESZCZEŃ", &["Room Schedule", "Door Schedule"]), Some("Room Schedule"));
+        assert_eq!(["pl", "pl-PL", "pl_PL.UTF-8", "polish", "Polski", "PL"].map(Language::from_code), [Some(pl); 6]);
+        assert!(Language::ALL.contains(&pl));
+    }
+
+    #[test]
+    fn vietnamese_words_and_locales_are_project_language() {
+        let vi = Language::Vietnamese;
+        assert_eq!((vi.code(), vi.label()), ("vi", "Tiếng Việt"));
+        assert_eq!([vi.word("Level"), vi.word("UP"), vi.word("Room Schedule")], ["Tầng", "LÊN", "Bảng thống kê phòng"]);
+        assert_eq!([vi.word("SCALE"), vi.word("DN"), vi.word("Room Name")], ["TỶ LỆ", "XUỐNG", "Tên phòng"]);
+        assert_eq!(vi.find("BẢNG THỐNG KÊ CỬA ĐI", &["Room Schedule", "Door Schedule"]), Some("Door Schedule"));
+        assert_eq!(["vi", "vi-VN", "vi_VN.UTF-8", "vietnamese", "Tiếng Việt", "VI"].map(Language::from_code), [Some(vi); 6]);
+        assert!(Language::ALL.contains(&vi));
+        // Every word its catalog has, the lettering draws, with no question marks.
+        let catalog = include_str!("../../../translations/project/vi.po");
+        let words: Vec<&str> =
+            catalog.lines().filter_map(|l| l.strip_prefix("msgstr \"")?.strip_suffix('"')).filter(|w| !w.contains('\\')).collect();
+        assert!(words.len() > 150 && words.contains(&"XUỐNG"), "{}", words.len());
+        for word in words {
+            assert!(word.chars().all(|c| c.is_whitespace() || crate::font::has(c)), "{word}");
+        }
     }
 }

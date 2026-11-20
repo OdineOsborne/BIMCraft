@@ -2,12 +2,15 @@
 //! structural floors. A tool that makes a run takes its category (`Tool::Run`), and one that makes a column or a footing
 //! takes its (`Tool::Stand`), so a tab that draws pipes or conduits adds a button and a row to the tables here, not a tool.
 
+use bimcraft_i18n::msg;
+
 use bimcraft_core::geom::P2;
 use bimcraft_core::model::{Element, Id, Justify, Model, TOL};
 use bimcraft_core::{runs_of, stood_of};
 use egui::{ComboBox, TextEdit, Ui};
 use serde_json::{Value, json};
 
+use crate::DimMode;
 use crate::icons::Icon;
 use crate::lang::{t, tf};
 use crate::{BimApp, Status, Tool, big_button, panel, top_params};
@@ -20,17 +23,18 @@ pub(crate) fn command(category: &str) -> &'static str {
 /// The title of the contextual tab while the tool is on.
 pub(crate) fn title(tool: &Tool) -> Option<&'static str> {
     match tool {
-        Tool::Run("beam", _) => Some("Place Beam"),
-        Tool::Run("pipe", _) => Some("Place Pipe"),
-        Tool::Run("conduit", _) => Some("Place Conduit"),
-        Tool::Run("cabletray", _) => Some("Place Cable Tray"),
-        Tool::Run("wire", _) => Some("Place Wire"),
-        Tool::Run("downconductor", _) => Some("Place Down Conductor"),
-        Tool::Run("groundconductor", _) => Some("Place Earthing Conductor"),
-        Tool::Run("cable", _) => Some("Place Cabling"),
-        Tool::Run(_, _) => Some("Place Wall Footing"),
-        Tool::Stand("structuralcolumn") => Some("Place Structural Column"),
-        Tool::Stand(_) => Some("Place Isolated Footing"),
+        Tool::Run("beam", _) => Some(msg!("Place Beam")),
+        Tool::Run("pipe", _) => Some(msg!("Place Pipe")),
+        Tool::Run("duct", _) => Some(msg!("Place Duct")),
+        Tool::Run("conduit", _) => Some(msg!("Place Conduit")),
+        Tool::Run("cabletray", _) => Some(msg!("Place Cable Tray")),
+        Tool::Run("wire", _) => Some(msg!("Place Wire")),
+        Tool::Run("downconductor", _) => Some(msg!("Place Down Conductor")),
+        Tool::Run("groundconductor", _) => Some(msg!("Place Earthing Conductor")),
+        Tool::Run("cable", _) => Some(msg!("Place Cabling")),
+        Tool::Run(_, _) => Some(msg!("Place Wall Footing")),
+        Tool::Stand("structuralcolumn") => Some(msg!("Place Structural Column")),
+        Tool::Stand(_) => Some(msg!("Place Isolated Footing")),
         _ => None,
     }
 }
@@ -38,10 +42,10 @@ pub(crate) fn title(tool: &Tool) -> Option<&'static str> {
 /// What the status bar says to do next with a structure tool on.
 pub(crate) fn hint(tool: &Tool) -> Option<&'static str> {
     match tool {
-        Tool::Run(_, None) => Some("Click the start of the run: a chain of clicks makes one for each step, Esc ends it."),
-        Tool::Run(_, Some(_)) => Some("Click the end of the run. Esc stops the chain."),
-        Tool::Stand("structuralcolumn") => Some("Click to place a structural column, as high as the Options Bar says."),
-        Tool::Stand(_) => Some("Click to place an isolated footing: its top at the Options Bar's offset, as thick as it says."),
+        Tool::Run(_, None) => Some(msg!("Click the start of the run: a chain of clicks makes one for each step, Esc ends it.")),
+        Tool::Run(_, Some(_)) => Some(msg!("Click the end of the run. Esc stops the chain.")),
+        Tool::Stand("structuralcolumn") => Some(msg!("Click to place a structural column, as high as the Options Bar says.")),
+        Tool::Stand(_) => Some(msg!("Click to place an isolated footing: its top at the Options Bar's offset, as thick as it says.")),
         _ => None,
     }
 }
@@ -50,6 +54,9 @@ pub(crate) fn hint(tool: &Tool) -> Option<&'static str> {
 pub(crate) fn same_tool(a: &Tool, b: &Tool) -> bool {
     match (a, b) {
         (Tool::Run(x, _), Tool::Run(y, _)) | (Tool::Stand(x), Tool::Stand(y)) | (Tool::Fixture(x), Tool::Fixture(y)) => x == y,
+        // Aligned is its own tool; Linear lays the others.
+        (Tool::Dimension(x, _), Tool::Dimension(y, _)) => (*x == DimMode::Aligned) == (*y == DimMode::Aligned),
+        (Tool::Round(x, _), Tool::Round(y, _)) => x == y,
         _ => std::mem::discriminant(a) == std::mem::discriminant(b),
     }
 }
@@ -74,11 +81,11 @@ impl BimApp {
         self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
         panel(ui, "Structure", |ui| {
             let tools: [(Icon, &str, &str, Tool); 2] = [
-                (Icon::Column, "Column", "Structural Column (CL): click where it stands", Tool::Stand("structuralcolumn")),
+                (Icon::Column, "Column", msg!("Structural Column (CL): click where it stands"), Tool::Stand("structuralcolumn")),
                 (
                     Icon::Beam,
                     "Beam",
-                    "Beam (BM): click its start and its end; a chain of clicks makes a beam for each step",
+                    msg!("Beam (BM): click its start and its end; a chain of clicks makes a beam for each step"),
                     Tool::Run("beam", None),
                 ),
             ];
@@ -87,18 +94,24 @@ impl BimApp {
                     self.set_tool(tool);
                 }
             }
-            let tip = "Floor: Structural (SB): click inside the walls to floor them with a slab that carries load";
+            let tip = msg!("Floor: Structural (SB): click inside the walls to floor them with a slab that carries load");
             if big_button(ui, Icon::Floor, "Floor: Structural", self.tool == Tool::Floor && self.floor_structural, tip).clicked() {
                 self.structural_floor();
             }
         });
-        panel(ui, "Foundation", |ui| {
+        panel(ui, msg!("Reinforcement"), |ui| {
+            let tip = msg!("Reinforce (RF): bars by rules for the selected beam, column, footing or floor");
+            if big_button(ui, Icon::Rebar, "Reinforce", self.reinforce_dialog.is_some(), tip).clicked() {
+                self.open_reinforce();
+            }
+        });
+        panel(ui, msg!("Foundation"), |ui| {
             let tools: [(Icon, &str, &str, Tool); 2] = [
-                (Icon::Footing, "Isolated Footing", "Isolated Footing (FI): click where the footing goes", Tool::Stand("footing")),
+                (Icon::Footing, "Isolated Footing", msg!("Isolated Footing (FI): click where the footing goes"), Tool::Stand("footing")),
                 (
                     Icon::WallFooting,
                     "Wall Footing",
-                    "Wall Footing (FW): click its start and its end, or a chain of clicks, under a wall",
+                    msg!("Wall Footing (FW): click its start and its end, or a chain of clicks, under a wall"),
                     Tool::Run("stripfooting", None),
                 ),
             ];
@@ -176,14 +189,19 @@ impl BimApp {
         Ok(self.typed(category, p))
     }
 
-    /// The parameters a standing thing made at `at` on `level` has, from the Options Bar.
-    pub(crate) fn stand_params(&self, m: &Model, category: &str, level: Id, at: P2) -> Result<Value, String> {
+    /// The parameters a standing thing made at `at` on `level` has, from the Options Bar; `lift` mm over the level, where it
+    /// stands on a face higher than the level (in the 3D view).
+    pub(crate) fn stand_params(&self, m: &Model, category: &str, level: Id, at: P2, lift: f64) -> Result<Value, String> {
         let command = command(category);
         let mut p = if category == "structuralcolumn" {
-            top_params(m, level, self.column_top, &self.column_height).map_err(|e| tf("{}: {}", &[command, &e]))?
+            let mut p = top_params(m, level, self.column_top, &self.column_height).map_err(|e| tf("{}: {}", &[command, &e]))?;
+            if lift != 0.0 {
+                p["base_offset"] = json!(lift);
+            }
+            p
         } else {
             let height = |text: &str| m.units.parse(text).ok_or_else(|| tf("{}: `{}` is not a height", &[command, text]));
-            json!({"thickness": height(&self.footing_thickness)?, "offset": height(&self.footing_top)?})
+            json!({"thickness": height(&self.footing_thickness)?, "offset": height(&self.footing_top)? + lift})
         };
         p["at"] = json!([at.0, at.1]);
         p["level"] = json!(level);
@@ -192,17 +210,32 @@ impl BimApp {
 
     /// A click of a run's tool at `p`: the start, then the end, which makes it, and with Chain starts the next there.
     pub(crate) fn place_run(&mut self, level: Id, p: P2) {
+        self.place_run_lifted(level, p, (0.0, 0.0));
+    }
+
+    /// A click of a run's tool at `p`, its start `lift.0` mm over `level` and its end `lift.1` (in the 3D view, the faces they
+    /// were clicked on): the Options Bar's offset over each; where they differ, the run climbs from one to the other (a
+    /// brace), and over one point, it stands (a riser).
+    pub(crate) fn place_run_lifted(&mut self, level: Id, p: P2, lift: (f64, f64)) {
         let Tool::Run(category, start) = self.tool.clone() else { return };
         let Some(a) = start else {
             self.tool = Tool::Run(category, Some(p));
             return;
         };
-        if a.dist(p) <= TOL {
+        let climbs = (lift.1 - lift.0).abs() > TOL;
+        if a.dist(p) <= TOL && !climbs {
             return;
         }
         let m = std::sync::Arc::clone(&self.session.model);
         match self.run_params(&m, category, level, a, p) {
-            Ok(params) => {
+            Ok(mut params) => {
+                let offset = params["offset"].as_f64().unwrap_or(0.0);
+                if lift.0 != 0.0 {
+                    params["offset"] = json!(offset + lift.0);
+                }
+                if climbs {
+                    params["end_offset"] = json!(offset + lift.1);
+                }
                 if self.run(command(category), params).is_some() {
                     self.tool = Tool::Run(category, self.chain.then_some(p));
                 }
@@ -213,12 +246,34 @@ impl BimApp {
 
     /// A click of a standing tool at `at`.
     pub(crate) fn place_stand(&mut self, level: Id, at: P2, category: &'static str) {
+        self.place_stand_lifted(level, at, category, 0.0);
+    }
+
+    /// A click of a standing tool at `at`, on a face `lift` mm over `level`.
+    pub(crate) fn place_stand_lifted(&mut self, level: Id, at: P2, category: &'static str, lift: f64) {
         let m = std::sync::Arc::clone(&self.session.model);
-        match self.stand_params(&m, category, level, at) {
+        match self.stand_params(&m, category, level, at, lift) {
             Ok(params) => {
                 self.run(command(category), params);
             }
             Err(e) => self.status = Status { text: e, error: true },
+        }
+    }
+
+    /// A click of the Column tool at `at`: an architectural column on `level`, its base `base` mm over it (on a face in the 3D
+    /// view), as high as the Options Bar says.
+    pub(crate) fn place_column(&mut self, level: Id, at: P2, base: f64) {
+        match top_params(&self.session.model, level, self.column_top, &self.column_height) {
+            Ok(mut p) => {
+                p["at"] = json!([at.0, at.1]);
+                p["level"] = json!(level);
+                if base != 0.0 {
+                    p["base_offset"] = json!(base);
+                }
+                let p = self.typed("column", p);
+                self.run("column", p);
+            }
+            Err(e) => self.status = Status { text: tf("column: {}", &[&e]), error: true },
         }
     }
 
@@ -230,7 +285,7 @@ impl BimApp {
 
     /// What a click would make with a standing tool at `at`.
     pub(crate) fn stand_sketch(&self, m: &Model, category: &str, level: Id, at: P2) -> Option<Element> {
-        self.stand_params(m, category, level, at).ok().and_then(|p| stood_of(m, &p, category).ok())
+        self.stand_params(m, category, level, at, 0.0).ok().and_then(|p| stood_of(m, &p, category).ok())
     }
 }
 

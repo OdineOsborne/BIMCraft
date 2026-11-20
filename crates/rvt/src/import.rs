@@ -14,10 +14,10 @@ use bimcraft_core::ids::Guid;
 use bimcraft_core::import::Imported;
 use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 
-use crate::inventory::{Inventory, Survey, Wants};
+use crate::inventory::{Inventory, OST_LEVELS, Survey, Wants, category_name};
 use crate::records::{Record, TypeRecord};
 use crate::{Limits, Revit};
-use crate::{beams, columns, floors, footings, openings, roofs, rooms, walls};
+use crate::{beams, columns, ducts, floors, footings, framing, generic, openings, pipes, roofs, rooms, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -92,6 +92,8 @@ pub(crate) struct Import {
     /// The model's wall for each Revit wall made, and the walls left out for having no layers (curtain walls): hosts of doors.
     pub walls: HashMap<u32, Id>,
     pub curtain: BTreeSet<u32>,
+    /// The model's roof for each Revit roof made: the walls whose tops follow one name it.
+    pub roofs: HashMap<u32, Id>,
     /// What was left out or noted, by (left out, kind, reason): the ids it concerned. Told as one line each in the end.
     groups: BTreeMap<(bool, String, String), Vec<u32>>,
 }
@@ -105,6 +107,20 @@ impl Import {
     /// Something to say about a `kind` (`wall`) that was made nonetheless.
     pub fn note(&mut self, kind: &str, id: u32, text: &str) {
         self.groups.entry((false, kind.to_string(), text.to_string())).or_default().push(id);
+    }
+
+    /// The ids of the `kind`s left out so far, handed on to another reader: each reason becomes a note that says `then`, and
+    /// what that reader makes of them is told as it tells it.
+    fn hand_on(&mut self, kind: &str, then: &str) -> BTreeSet<u32> {
+        let keys: Vec<(bool, String, String)> = self.groups.keys().filter(|(left, k, _)| *left && k == kind).cloned().collect();
+        let mut ids = BTreeSet::new();
+        for key in keys {
+            let Some(of) = self.groups.remove(&key) else { continue };
+            ids.extend(of.iter().copied());
+            let text = format!("{}; {then}", key.2);
+            self.groups.entry((false, key.1, text)).or_default().extend(of);
+        }
+        ids
     }
 
     /// Element `id` of the model was made and then taken out again, for `why`: left out, as a Revit element of its kind (`Wall 423099`
@@ -198,10 +214,8 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 12] = [
+const CATEGORIES: [i64; 15] = [
     walls::OST_WALLS,
-    beams::OST_STRUCTURAL_FRAMING,
-    footings::OST_STRUCTURAL_FOUNDATION,
     floors::OST_FLOORS,
     floors::OST_CEILINGS,
     floors::OST_SKETCH_LINES,
@@ -211,6 +225,11 @@ const CATEGORIES: [i64; 12] = [
     columns::OST_STRUCTURAL_COLUMNS,
     rooms::OST_ROOMS,
     roofs::OST_ROOFS,
+    pipes::OST_PIPES,
+    ducts::OST_DUCTS,
+    ducts::OST_CABLE_TRAYS,
+    framing::OST_STRUCTURAL_FRAMING,
+    framing::OST_STRUCTURAL_FOUNDATION,
 ];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
@@ -236,7 +255,7 @@ pub fn import_path_with_origins(path: &Path, name: &str) -> Result<(Imported, Ha
 /// The import, and what each element made was in the file.
 pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<Id, String>), String> {
     let e = |e: crate::Error| e.to_string();
-    let survey = revit.survey(&|c| CATEGORIES.contains(&c)).map_err(e)?;
+    let survey = revit.survey(&|c| CATEGORIES.contains(&c) || generic::reads(c)).map_err(e)?;
     let title = revit.document_atom().ok().flatten().and_then(|a| a.title).filter(|t| !t.trim().is_empty());
     let mut m = Model::new(&clip(title.as_deref().unwrap_or(name)));
     m.elements.clear();
@@ -248,11 +267,13 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
         levels: HashMap::new(),
         walls: HashMap::new(),
         curtain: BTreeSet::new(),
+        roofs: HashMap::new(),
         groups: BTreeMap::new(),
     };
     let release = survey.release;
-    let (facts, inv) = Facts::of(survey);
+    let (mut facts, inv) = Facts::of(survey);
     levels(&mut cx, &inv);
+    unread(&mut cx, &inv);
     let mut wants = Wants { materials: facts.materials.clone(), ..Wants::default() };
     walls::wanted(&facts, &mut wants.data);
     floors::wanted(&facts, &mut wants.data);
@@ -262,17 +283,78 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     beams::wanted(&facts, &mut wants);
     footings::wanted(&facts, &mut wants);
     rooms::wanted(&facts, &mut wants);
+    pipes::wanted(&facts, &mut wants.data);
+    ducts::wanted(&facts, &mut wants.data);
     let gathered = revit.gather(release, &facts.tags, &facts.ids, &wants).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
     floors::import(&mut cx, &facts, &gathered);
     roofs::import(&mut cx, &facts, &gathered);
+    attached(&mut cx, &facts);
     openings::import(&mut cx, &facts, &gathered);
     columns::import(&mut cx, &facts, &gathered);
     beams::import(&mut cx, &facts, &gathered);
     footings::import(&mut cx, &facts, &gathered);
     rooms::import(&mut cx, &facts, &gathered);
+    pipes::import(&mut cx, &facts, &gathered);
+    ducts::import(&mut cx, &facts, &gathered);
+    // Beams and footings are read from their data first (`beams`, `footings`); what that leaves out comes in from its box
+    // (`framing`), and nothing comes in twice. The ones read are held back from `framing` alone: the readers after it still
+    // see them (a truss's box holding a beam).
+    let mut boxed = cx.hand_on("beam", "its box is read instead");
+    boxed.extend(cx.hand_on("footing", "its box is read instead"));
+    let read: Vec<u32> = facts
+        .current
+        .values()
+        .filter(|r| r.category == framing::OST_STRUCTURAL_FRAMING || r.category == framing::OST_STRUCTURAL_FOUNDATION)
+        .filter(|r| !boxed.contains(&r.id))
+        .map(|r| r.id)
+        .collect();
+    let held: Vec<(u32, Record)> = read.iter().filter_map(|id| facts.current.remove(id).map(|r| (*id, r))).collect();
+    framing::import(&mut cx, &facts);
+    facts.current.extend(held);
+    generic::import(&mut cx, &facts, &inv);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))
+}
+
+/// Walls whose tops follow a roof: a wall's record names the roof it is attached to with the levels it is constrained to, so its top
+/// is cut by the roof's underside instead of running up to the top of its own box, which a wall under a ridge does.
+fn attached(cx: &mut Import, facts: &Facts) {
+    if cx.roofs.is_empty() {
+        return;
+    }
+    for r in facts.of_category(crate::walls::OST_WALLS) {
+        let Some(id) = cx.walls.get(&r.id).copied() else { continue };
+        let roof = r.refs.iter().filter_map(|v| u32::try_from(*v).ok()).find_map(|n| cx.roofs.get(&n).copied());
+        let Some(roof) = roof else { continue };
+        let guid = cx.model.guid(roof);
+        // The roof must leave it something: one whose underside over the wall's middle is below its base cuts it away, and such a
+        // wall keeps its own box.
+        let Some(bimcraft_core::model::Element::Wall(w)) = cx.model.elements.get(id) else { continue };
+        let axis = bimcraft_core::walls::Axis::of(w);
+        let room = bimcraft_core::walls::underside(&cx.model, roof, axis.at(axis.length() / 2.0, 0.0)).unwrap_or(cx.model.own_top(w));
+        if room <= cx.model.own_base(w) + 1.0 {
+            cx.note("wall", r.id, "the roof it names leaves it no height: it comes in as its own box");
+            continue;
+        }
+        if let Some(bimcraft_core::model::Element::Wall(w)) = cx.model.elements.get_mut(id) {
+            w.attach_top = Some(guid);
+            cx.note("wall", r.id, "its top follows the roof it names: it comes in cut by the roof's underside");
+        }
+    }
+}
+
+/// The highest project level at or below `z` feet (a millimetre of slack), else the lowest, and its elevation in feet.
+pub(crate) fn level_at(cx: &Import, f: &Facts, z: f64) -> Result<(Guid, f64), String> {
+    let (id, elevation) = f
+        .elevations
+        .iter()
+        .filter(|&(_, &e)| e <= z + 1.0 / 304.8)
+        .max_by(|x, y| x.1.total_cmp(y.1))
+        .or_else(|| f.elevations.iter().min_by(|x, y| x.1.total_cmp(y.1)))
+        .map(|(&id, &e)| (id, e))
+        .ok_or("it stands on no level")?;
+    cx.levels.get(&id).map(|&level| (level, elevation)).ok_or_else(|| "it stands on no level".to_string())
 }
 
 /// The project's levels, lowest first. A level of a name another has takes `(2)`; none at all gives the project one at zero.
@@ -300,6 +382,30 @@ fn levels(cx: &mut Import, inv: &Inventory) {
     }
 }
 
+/// The categories of the file the importer has no reader for, one note each, with how many placed elements of it the file holds (the
+/// symbols of a type are no elements). They count as left out, since they are in the file and not in the model.
+fn unread(cx: &mut Import, inv: &Inventory) {
+    let mut by: BTreeMap<i64, Vec<u32>> = BTreeMap::new();
+    for e in inv
+        .elements
+        .iter()
+        .filter(|e| e.placed && e.category != OST_LEVELS && !CATEGORIES.contains(&e.category) && !generic::reads(e.category))
+    {
+        by.entry(e.category).or_default().push(e.id);
+    }
+    let mut by: Vec<(i64, Vec<u32>)> = by.into_iter().collect();
+    by.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+    for (category, mut ids) in by {
+        ids.sort_unstable();
+        let n = ids.len();
+        let name = category_name(category)
+            .map_or_else(|| format!("element{} of category {category}", if n == 1 { "" } else { "s" }), str::to_string);
+        let list: Vec<String> = ids.iter().take(8).map(u32::to_string).collect();
+        let more = if n > list.len() { ", …" } else { "" };
+        cx.skipped.push(format!("{n} {name} left out, the importer has no reader for this category (ids {}{more})", list.join(", ")));
+    }
+}
+
 /// What breaks a rule is left out with the rule (a wall takes its doors and windows along), then the model is checked once more.
 fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
     cx.model.adopt_materials();
@@ -307,6 +413,8 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
     cx.model.sync_library();
     let m = &mut cx.model;
     let mut dropped: Vec<(Id, String)> = Vec::new();
+    // A floor whose shape the model refuses keeps its outline, level, and says why.
+    let mut unshaped: Vec<(Id, String)> = Vec::new();
     let mut checked = false;
     for _ in 0..=m.elements.len() {
         let Err(error) = m.check() else {
@@ -315,6 +423,13 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
         };
         let id = culprit(&error).filter(|id| cx.from.contains_key(id)).ok_or_else(|| error.clone())?;
         let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
+        if let Some(Element::Floor(fl)) = m.elements.get_mut(id)
+            && !fl.shape.is_empty()
+        {
+            fl.shape = Default::default();
+            unshaped.push((id, why.to_string()));
+            continue;
+        }
         dropped.push((id, why.to_string()));
         let gone = m.guid(id);
         m.elements.remove(id);
@@ -336,6 +451,11 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
     }
     for (id, why) in dropped {
         cx.dropped(id, &why);
+    }
+    for (id, why) in unshaped {
+        if let Some((kind, Ok(n))) = cx.from.get(&id).and_then(|f| origin(f)).map(|(k, n)| (k, n.map_err(str::to_string))) {
+            cx.note(&kind, n, &format!("its shape does not build ({why}): it comes in level"));
+        }
     }
     cx.tell();
     Ok(Imported { model: cx.model, schema, skipped: cx.skipped, moved: None })

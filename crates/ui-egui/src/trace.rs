@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bimcraft_core::geom::P2;
 use bimcraft_core::ids::Guid;
-use bimcraft_core::model::{Element, Id, Model, Part, PartKind, Underlay};
+use bimcraft_core::model::{CadPart as Part, Element, Id, Model, PartKind, Underlay};
 use bimcraft_core::render::View;
 use bimcraft_core::trace::How;
 use egui::{
@@ -1061,7 +1061,7 @@ fn walls_tab(ui: &mut Ui, d: &mut TraceDialog, m: &Model, find: &mut bool, build
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        *find = ui.button(t("Find")).clicked();
+        *find = ui.button(t("Find Walls")).clicked();
         let count = d.found.len();
         *build = ui.add_enabled(count > 0, Button::new(tf("Build {}", &[&count.to_string()]))).clicked();
     });

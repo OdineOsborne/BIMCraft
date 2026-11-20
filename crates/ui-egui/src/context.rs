@@ -4,6 +4,8 @@
 //! moment offers, and [`BimApp::act`] does what one says. A new item is an [`Action`] variant, its
 //! label (a row in `lang::WORDS`), the group it joins in `context_items`, and its arm in `act`.
 
+use bimcraft_i18n::msg;
+
 use egui::{Button, Response};
 
 use crate::lang::t;
@@ -14,17 +16,39 @@ use crate::{BimApp, Sheet, Tool};
 pub(crate) enum Action {
     /// Esc: the tool's points, else the tool, else the selection.
     Cancel,
+    /// Enter: a spline or a polyline made of the points clicked so far.
+    Finish,
+    /// Enter: the detail lines selected are a custom fill pattern's (Fill Patterns' New Pattern > Custom).
+    FinishPick,
     ZoomToFit,
     ZoomIn,
     ZoomOut,
     /// The 3D view's default orientation.
     HomeView,
+    /// The Family Editor on the family of what is selected.
+    EditFamily,
     EditType,
     SelectAllInstances,
     HideElement,
     HideCategory,
     OverrideGraphics,
+    CreateGroup,
+    Ungroup,
     Delete,
+    /// The linked CAD drawings selected, read again from their files.
+    ReloadCad,
+    /// The camera selected in a plan: open its 3D view.
+    OpenView,
+    /// The 3D view's Work Plane dialog.
+    WorkPlane,
+    /// The selected walls' and runs' joins refused (Revit's Disallow Join), or taken up again.
+    DisallowJoin,
+    AllowJoin,
+    /// The selected elements pinned where they are, or unpinned.
+    Pin,
+    Unpin,
+    /// Edit Dimension References: the selected dimension's references picked again.
+    EditDimensionReferences,
 }
 
 impl Action {
@@ -32,16 +56,29 @@ impl Action {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Action::Cancel => "Cancel",
+            Action::Finish => msg!("Finish Drawing"),
+            Action::FinishPick => "Finish",
             Action::ZoomToFit => "Zoom to Fit",
             Action::ZoomIn => "Zoom In",
             Action::ZoomOut => "Zoom Out",
             Action::HomeView => "Home View",
+            Action::EditFamily => "Edit Family",
             Action::EditType => "Edit Type",
-            Action::SelectAllInstances => "Select All Instances",
+            Action::SelectAllInstances => msg!("Select All Instances"),
             Action::HideElement => "Hide Element",
             Action::HideCategory => "Hide Category",
             Action::OverrideGraphics => "Override Graphics",
+            Action::CreateGroup => msg!("Create Group"),
+            Action::Ungroup => msg!("Ungroup"),
             Action::Delete => "Delete",
+            Action::ReloadCad => msg!("Reload CAD"),
+            Action::OpenView => msg!("Open Camera View"),
+            Action::WorkPlane => msg!("Set Work Plane…"),
+            Action::DisallowJoin => msg!("Disallow Join"),
+            Action::AllowJoin => msg!("Allow Join"),
+            Action::Pin => msg!("Pin"),
+            Action::Unpin => msg!("Unpin"),
+            Action::EditDimensionReferences => msg!("Edit Dimension References"),
         }
     }
 
@@ -49,11 +86,16 @@ impl Action {
     pub(crate) fn shortcut(self) -> Option<&'static str> {
         match self {
             Action::Cancel => Some("Esc"),
+            Action::Finish | Action::FinishPick => Some("Enter"),
             Action::ZoomToFit => Some("ZF"),
             Action::SelectAllInstances => Some("SA"),
             Action::HideElement => Some("EH"),
             Action::HideCategory => Some("VH"),
+            Action::CreateGroup => Some("GP"),
+            Action::Ungroup => Some("UG"),
             Action::Delete => Some("Del"),
+            Action::Pin => Some("PN"),
+            Action::Unpin => Some("UP"),
             _ => None,
         }
     }
@@ -99,27 +141,87 @@ impl BimApp {
     /// can (zooming, but not in a schedule).
     pub(crate) fn context_items(&self) -> Vec<Vec<Item>> {
         let some = !self.selection.is_empty();
-        let mut groups = vec![vec![Item::new(Action::Cancel, some || self.tool != Tool::Modify)]];
+        let mut first = vec![Item::new(Action::Cancel, some || self.tool != Tool::Modify)];
+        if self.finishable() {
+            first.insert(0, Item::new(Action::Finish, true));
+        }
+        if self.picking_pattern_lines() {
+            first.insert(0, Item::new(Action::FinishPick, true));
+        }
+        let mut groups = vec![first];
         if some {
-            groups.push(vec![
-                Item::new(Action::EditType, self.type_subject().is_some()),
-                Item::new(Action::SelectAllInstances, true),
-                Item::new(Action::Delete, true),
-            ]);
+            let m = &self.session.model;
+            // A camera picked in a plan: open its 3D view, or delete it.
+            let camera =
+                matches!(self.selection.as_slice(), [id] if matches!(m.elements.get(id), Some(bimcraft_core::model::Element::View3D(_))));
+            if camera {
+                groups.push(vec![Item::new(Action::OpenView, true), Item::new(Action::Delete, true)]);
+            } else {
+                // A family instance selected: its family, as Revit offers it.
+                let family = self.selection.iter().any(|id| m.elements.get(id).is_some_and(|e| e.family().is_some()));
+                let mut edits = Vec::new();
+                if family {
+                    edits.push(Item::new(Action::EditFamily, true));
+                }
+                edits.extend([
+                    Item::new(Action::EditType, self.type_subject().is_some()),
+                    Item::new(Action::SelectAllInstances, true),
+                    Item::new(Action::Delete, true),
+                ]);
+                groups.push(edits);
+                // What is pinned stays where it is until it is unpinned.
+                let pinned: Vec<bool> = self.selection.iter().map(|id| m.is_pinned(*id)).collect();
+                groups.push(vec![Item::new(Action::Pin, pinned.iter().any(|p| !*p)), Item::new(Action::Unpin, pinned.iter().any(|p| *p))]);
+                // Detail lines, regions and notes group; a group comes apart.
+                let groupable = self.selection.iter().all(|id| m.elements.get(*id).is_some_and(bimcraft_core::groups::holds));
+                if groupable || self.group_selected() {
+                    groups.push(vec![Item::new(Action::CreateGroup, groupable), Item::new(Action::Ungroup, self.group_selected())]);
+                }
+            }
+            // Walls and runs mitre against what they meet; any of them may refuse (Revit's Disallow
+            // Join). Each item is offered when some selected element would change by taking it.
+            let joins: Vec<bool> = self
+                .selection
+                .iter()
+                .filter_map(|id| match m.elements.get(*id) {
+                    Some(bimcraft_core::model::Element::Wall(w)) => Some(w.join),
+                    Some(e) => e.run().map(|r| r.join),
+                    _ => None,
+                })
+                .collect();
+            if !self.linked_cads().is_empty() {
+                groups.push(vec![Item::new(Action::ReloadCad, true)]);
+            }
             // What the view on screen hides and paints.
-            if self.graphic_view().is_some() {
+            if self.graphic_view().is_some() && !camera {
                 groups.push(vec![
                     Item::new(Action::HideElement, true),
                     Item::new(Action::HideCategory, true),
                     Item::new(Action::OverrideGraphics, true),
                 ]);
             }
+            if !joins.is_empty() {
+                groups.push(vec![
+                    Item::new(Action::DisallowJoin, joins.iter().any(|j| *j)),
+                    Item::new(Action::AllowJoin, joins.iter().any(|j| !*j)),
+                ]);
+            }
+            // A dimension selected alone may have its references edited.
+            if let [id] = self.selection.as_slice()
+                && let Some(bimcraft_core::model::Element::Dimension(d)) = m.elements.get(*id)
+                && !d.alignment
+            {
+                groups.push(vec![Item::new(Action::EditDimensionReferences, true)]);
+            }
         }
         let zoom = vec![Item::new(Action::ZoomToFit, true), Item::new(Action::ZoomIn, true), Item::new(Action::ZoomOut, true)];
         match self.sheet {
             Sheet::Plan(_) | Sheet::Ceiling(_) | Sheet::Section(_) | Sheet::Paper(_) => groups.push(zoom),
-            Sheet::View3D => groups.push([vec![Item::new(Action::HomeView, true)], zoom].concat()),
-            Sheet::Schedule(_) | Sheet::Table(_) => {}
+            Sheet::View3D => {
+                groups.push(vec![Item::new(Action::WorkPlane, self.sketch.is_none())]);
+                groups.push([vec![Item::new(Action::HomeView, true)], zoom].concat());
+            }
+            Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..) => {}
         }
         groups
     }
@@ -128,17 +230,88 @@ impl BimApp {
     pub(crate) fn act(&mut self, action: Action) {
         match action {
             Action::Cancel => self.escape(),
+            Action::Finish => self.finish_open_shape(),
+            Action::FinishPick => self.finish_pattern_lines(),
             Action::ZoomToFit => self.fit(),
             Action::ZoomIn => self.zoom_view(1.25),
             Action::ZoomOut => self.zoom_view(0.8),
-            Action::HomeView => self.orbit.camera = None,
+            Action::HomeView => self.home3d(),
+            Action::EditFamily => {
+                if let Some(f) = self.family_in_hand() {
+                    self.edit_family(&f);
+                }
+            }
             Action::EditType => self.edit_type(),
             Action::SelectAllInstances => self.select_all_instances(),
             Action::HideElement => self.hide_selection(false),
             Action::HideCategory => self.hide_selection(true),
             Action::OverrideGraphics => self.override_selection(),
+            Action::CreateGroup => self.create_group(),
+            Action::Ungroup => self.ungroup(),
             Action::Delete => self.delete(),
+            Action::WorkPlane => self.open_work_plane(),
+            Action::ReloadCad => {
+                for cad in self.linked_cads() {
+                    self.run("reload_cad", serde_json::json!({"cad": cad}));
+                }
+            }
+            Action::OpenView => {
+                if let Some(&id) = self.selection.first() {
+                    self.open_3d(Some(id));
+                }
+            }
+            Action::DisallowJoin => self.set_joins(false),
+            Action::AllowJoin => self.set_joins(true),
+            Action::Pin => self.set_pinned(true),
+            Action::Unpin => self.set_pinned(false),
+            Action::EditDimensionReferences => self.start_dimension_refs_edit(),
         }
+    }
+
+    /// Pin every selected element, or unpin them, as one command; those already as asked are left.
+    pub(crate) fn set_pinned(&mut self, pinned: bool) {
+        let ids: Vec<bimcraft_core::model::Id> =
+            self.selection.iter().copied().filter(|id| self.session.model.is_pinned(*id) != pinned).collect();
+        if !ids.is_empty() {
+            self.run(if pinned { "pin" } else { "unpin" }, serde_json::json!({"ids": ids}));
+        }
+    }
+
+    /// Turn the joins of every selected wall and run off or on, as one command: the flag acts on the
+    /// whole element, both ends alike, and is saved with it.
+    fn set_joins(&mut self, join: bool) {
+        let ids: Vec<bimcraft_core::model::Id> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.session
+                    .model
+                    .elements
+                    .get(*id)
+                    .is_some_and(|e| matches!(e, bimcraft_core::model::Element::Wall(_)) || e.run().is_some())
+            })
+            .collect();
+        if !ids.is_empty() {
+            self.run("modify", serde_json::json!({"ids": ids, "join": join}));
+        }
+    }
+
+    /// The linked CAD drawings the selection places, when all it holds are imports of linked drawings; else none.
+    fn linked_cads(&self) -> Vec<String> {
+        let m = &self.session.model;
+        let mut names = Vec::new();
+        for id in &self.selection {
+            match m.elements.get(*id) {
+                Some(bimcraft_core::model::Element::CadImport(ci)) if m.cads.get(&ci.cad).is_some_and(|c| c.path().is_some()) => {
+                    if !names.contains(&ci.cad) {
+                        names.push(ci.cad.clone());
+                    }
+                }
+                _ => return Vec::new(),
+            }
+        }
+        names
     }
 
     /// The menu on a view's `response`, doing what's chosen from it.

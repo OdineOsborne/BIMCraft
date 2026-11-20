@@ -51,23 +51,180 @@ Third-party dependencies
 
 See each dependency's own licence for its terms.
 
+Plugins run in wasmi, a WebAssembly interpreter in Rust (MIT OR Apache-2.0);
+its own dependencies are wasmi_core, wasmi_ir and wasmi_collections (MIT OR
+Apache-2.0), wasmparser (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT),
+hashbrown (MIT OR Apache-2.0), foldhash (Zlib), spin (MIT), string-interner
+(MIT OR Apache-2.0), leb128fmt (MIT OR Apache-2.0), bumpalo (MIT OR Apache-2.0)
+and libm (MIT). The guest SDK (crates/plugin-sdk) has no runtime of its own.
+
 ==============================================================================
-BIMCraft's DWG bridge (bimcraft-dwg)
+DWG drawings: acadrust and ACadSharp
 ==============================================================================
 
-DWG is Autodesk's own format and has no published specification, so BIMCraft
-does not read one itself: crates/dwg turns a DWG into DXF bytes, which
-BIMCraft's own DXF reader then reads. The turning is done by
+The desktop app and the command line, built with their default `dwg` feature,
+read and write DWG drawings through BIMCraft's bridge (crates/dwg, MIT OR Apache-2.0),
+which uses the acadrust crate, version 0.6.6, unmodified, as a separate
+library:
 
-    acadrust, https://github.com/hakanaktt/acadrust
-    Mozilla Public License 2.0
+  acadrust  MPL-2.0  reads and writes DWG files
+    by Hakan AK (its authors, as its manifest names them)
+    https://github.com/hakanaktt/acadrust
+    https://crates.io/crates/acadrust/0.6.6
 
-used as an unmodified dependency. The MPL covers its own files, not the work
-that depends on them, so BIMCraft's own files stay MIT OR Apache-2.0; anyone
-who modifies acadrust's files must publish those files under the MPL. The
-source of the version used is on crates.io and in the repository above.
+The Mozilla Public License 2.0 applies to acadrust's own files only. Their
+source, unchanged, is at the addresses above; the licence's text is at
+https://mozilla.org/MPL/2.0/. A build without the `dwg` feature
+(`--no-default-features`) holds none of it.
 
-A build without DWG support is `--no-default-features` (the `dwg` feature of
-the two applications), and then a DWG is refused by name, saying so.
+acadrust's DWG reader holds code ported from ACadSharp, which carries this
+notice:
 
-  acadrust  MPL-2.0  turns a DWG into DXF
+    Copyright (c) 2021 Albert Domenech
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+acadrust reads its text encodings through the encoding_rs crate ((Apache-2.0 OR MIT) AND BSD-3-Clause, by Henri Sivonen), whose
+data tables from the WHATWG Encoding Standard carry the BSD 3-Clause licence:
+    Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+    3. Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"AutoCAD" and "DWG" are trademarks of Autodesk, Inc. BIMCraft is not
+affiliated with, endorsed by, or sponsored by Autodesk; the names identify the
+file format read. No Autodesk code or content is used.
+
+==============================================================================
+IBM Plex, the desktop app's lettering
+==============================================================================
+
+The desktop app (bimcraft) letters its windows in two fonts that are built into its executable (crates/ui-egui/src/style.rs
+includes them when it is compiled). They are kept in assets/fonts of the source:
+
+  IBM Plex Sans, the variable font, Version 3.201
+    assets/fonts/ibm-plex-sans/IBMPlexSans-Variable.ttf, 537244 bytes
+    sha256 3b031aa4216174205bd8471f88a49b91f093169e9e87bd5262242bc5967fe2e3
+    its name table says: Copyright 2019 IBM Corp. All rights reserved.
+
+  IBM Plex Mono Regular, Version 2.3
+    assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf, 135580 bytes
+    sha256 6a3412f058c7d8dfd9170c41e85ade48e5156ecb89356110ca57a0a27734af46
+    its name table says: Copyright 2017 IBM Corp. All rights reserved.
+
+The notice that heads the licence file beside each of them reads:
+
+    Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex"
+
+These Font Software files are licensed under the SIL Open Font License, Version 1.1. Its text is in
+assets/fonts/ibm-plex-sans/OFL.txt and assets/fonts/ibm-plex-mono/OFL.txt (the same text, one beside each font), and every
+copy of BIMCraft carries it: in a package the two files are fonts/ibm-plex-sans/OFL.txt and fonts/ibm-plex-mono/OFL.txt
+beside this file (in the Linux packages under /usr/share/doc/bimcraft, in the macOS app in Contents/Resources).
+
+BIMCraft does not change the fonts: it picks a weight of the variable font when it draws, and that is all. "Plex" is a
+Reserved Font Name, so the fonts keep it. "IBM Plex" is a trademark of IBM Corp, registered in many jurisdictions worldwide.
+The place the two files were obtained from was not recorded when they were added.
+
+==============================================================================
+Map coordinate systems: EPSG, crs-definitions and proj4rs
+==============================================================================
+
+The core (bimcraft-core) converts a project's shared coordinates to WGS84
+through two crates, unmodified:
+
+  crs-definitions  CC0-1.0            EPSG's CRS definitions as proj strings
+    https://crates.io/crates/crs-definitions/0.6.0
+  proj4rs          MIT OR Apache-2.0  map projections, a Rust PROJ.4
+    https://crates.io/crates/proj4rs/0.3.0
+
+The definitions come from the EPSG Geodetic Parameter Dataset, maintained by
+the International Association of Oil & Gas Producers (IOGP), https://epsg.org,
+used under its terms of use. BIMCraft names each system by its EPSG code and
+name as the dataset gives them; it does not change the dataset's data.
+
+==============================================================================
+World map: Natural Earth
+==============================================================================
+
+The Coordinates window's offline world map (assets/map/world.bin) is drawn
+from Natural Earth's 1:110m land polygons and land borders, packed smaller and
+rounded to hundredths of a degree. Made with Natural Earth. Free vector and
+raster map data @ naturalearthdata.com. Natural Earth is in the public domain.
+  https://github.com/nvkelso/natural-earth-vector
+
+The places a map system is found by (assets/map/places.tsv) are Natural Earth's
+1:50m countries (with their names in several languages) and 1:10m populated
+places, their names and positions only. Made with Natural Earth.
+
+==============================================================================
+Pictures: jpeg-encoder and zune-jpegxl
+==============================================================================
+
+The core (bimcraft-core) writes JPEG and JPEG XL pictures of views and sheets
+through two crates, unmodified:
+
+  jpeg-encoder  (MIT OR Apache-2.0) AND IJG  JPEG
+    https://crates.io/crates/jpeg-encoder/0.7.1
+  zune-jpegxl   MIT OR Apache-2.0 OR Zlib    JPEG XL, lossless
+    https://crates.io/crates/zune-jpegxl/0.5.2
+
+This software is based in part on the work of the Independent JPEG Group.
+jpeg-encoder's forward DCT (src/fdct.rs, src/avx2/fdct.rs) is ported from
+mozjpeg and carries the IJG's terms; the rest of the crate is MIT OR
+Apache-2.0.
+
+==============================================================================
+PDF: krilla
+==============================================================================
+
+The core (bimcraft-core) writes PDF files, PDF/A among them, through krilla,
+unmodified:
+
+  krilla  MIT OR Apache-2.0  PDF writing and PDF/A checks
+    by Laurenz Stampfl and its contributors
+    https://github.com/LaurenzV/krilla
+    https://crates.io/crates/krilla/0.8.2
+
+Its own dependencies are all permissive: MIT or Apache-2.0 for most
+(pdf-writer, xmp-writer, subsetter, skrifa, png, zune-jpeg, gif, image-webp),
+Zlib, BSD-2-Clause (arrayref), BSD-3-Clause (tiny-skia-path, as tiny-skia
+already is) and Unicode-3.0 (yoke, zerofrom). The sRGB and grey colour profiles it puts in a file's
+output intent are from Compact-ICC-Profiles
+(https://github.com/saucecontrol/Compact-ICC-Profiles), released under CC0 1.0.

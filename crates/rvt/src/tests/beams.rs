@@ -74,20 +74,29 @@ fn a_framing_element_too_steep_for_a_section_is_left_out_with_the_reason() {
 }
 
 #[test]
-fn a_framing_element_whose_box_does_not_fit_its_line_is_left_out() {
+fn a_framing_element_whose_box_does_not_fit_its_line_comes_in_by_its_box() {
     let mut p = project(2024);
-    // A line that leaves its box: the box stops at 5 ft, the line runs to 10.
+    // A line that leaves its box: the box stops at 5 ft, the line runs to 10. The line is not trusted; the box is read
+    // instead, by the reader of framing members from their box, and the note says both.
     beam(&mut p, 100, [0.0, -0.5, -2.0, 5.0, 0.5, 0.0], (0.0, 10.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
     let i = import(&p);
-    assert!(beams(&i).is_empty());
-    assert!(i.skipped.iter().any(|s| s.contains("1 beam") && s.contains("100")), "{:?}", i.skipped);
+    assert_eq!(beams(&i).len(), 1, "{:?}", i.skipped);
+    assert!(
+        i.skipped.iter().any(|s| s.contains("1 beam") && s.contains("100") && s.contains("its box is read instead")),
+        "{:?}",
+        i.skipped
+    );
 }
 
 #[test]
-fn a_framing_element_with_no_bounded_line_is_left_out() {
+fn a_framing_element_with_no_bounded_line_comes_in_by_its_box() {
     let mut p = project(2024);
     p.recs.push(Rec::new(100, FRAMING).at([0.0, -0.5, -2.0, 10.0, 0.5, 0.0], &[10, 11, 660, 100]));
     let i = import(&p);
-    assert!(beams(&i).is_empty());
-    assert!(i.skipped.iter().any(|s| s.contains("1 beam") && s.contains("line") && s.contains("100")), "{:?}", i.skipped);
+    assert_eq!(beams(&i).len(), 1, "{:?}", i.skipped);
+    assert!(
+        i.skipped.iter().any(|s| s.contains("1 beam") && s.contains("line") && s.contains("100") && s.contains("its box is read instead")),
+        "{:?}",
+        i.skipped
+    );
 }

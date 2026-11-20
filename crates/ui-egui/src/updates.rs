@@ -3,11 +3,15 @@
 //! this draws what it says and passes the user's clicks on. A window starts with no updater, so a test never phones home: the
 //! desktop's `main` attaches one.
 
+use crate::popup::Modal;
+
+use bimcraft_i18n::msg;
+
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bimcraft_update::{Note, State};
-use egui::{Button, Color32, Context, Frame, Id, Modal, OpenUrl, ProgressBar, RichText, Stroke, Ui, ViewportCommand, vec2};
+use egui::{Button, Color32, Context, Frame, Id, OpenUrl, ProgressBar, RichText, Stroke, Ui, ViewportCommand, vec2};
 
 use crate::lang::{t, tf};
 use crate::style::pal;
@@ -65,10 +69,12 @@ impl BimApp {
     pub(crate) fn installing_box(&self, ctx: &Context) {
         let Some(State::Installing { release, .. }) = self.updates.as_ref().map(|u| u.state()) else { return };
         let text = tf("Installing BIMCraft {}…", &[&release.version.to_string()]);
-        Modal::new(Id::new("installing")).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new(text).strong());
+        Modal::new(Id::new("installing"), t("Updates")).width(580.0).closable(false).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(text).strong());
+                });
             });
         });
     }
@@ -88,10 +94,10 @@ impl BimApp {
                         RichText::new(tf("BIMCraft {} is available. You have {}.", &[&release.version.to_string(), &current])).strong(),
                     );
                     if release.installer.is_some() {
-                        if primary(ui, "Update now", "Downloads and checks the update; BIMCraft then closes, updates and starts again.") {
+                        if primary(ui, "Update now", msg!("Downloads and checks the update; BIMCraft then closes, updates and starts again.")) {
                             click = Some(Click::Update);
                         }
-                    } else if primary(ui, "Download", "Opens the release page on GitHub. This copy can't update itself.") {
+                    } else if primary(ui, "Download", msg!("Opens the release page on GitHub. This copy can't update itself.")) {
                         click = Some(Click::Page(release.page.clone()));
                     }
                     if ui.button(t("Later")).clicked() {
@@ -119,7 +125,7 @@ impl BimApp {
                     if primary(
                         ui,
                         "Restart and install",
-                        "Asks to save first if there are unsaved changes, then closes BIMCraft, installs the update and starts it again.",
+                        msg!("Asks to save first if there are unsaved changes, then closes BIMCraft, installs the update and starts it again."),
                     ) {
                         click = Some(Click::Restart);
                     }

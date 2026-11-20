@@ -4,7 +4,7 @@ description = "BIMCraft desktop app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.95"
+rust-version.workspace = true
 publish = false
 
 [lints]
@@ -13,18 +13,22 @@ workspace = true
 [features]
 # Reads Revit's .rvt and .rfa files. That code is ported from rvt-rs and is Apache-2.0 only (docs/rvt-provenance.md),
 # so a build without it, which keeps the repository's MIT OR Apache-2.0, is `--no-default-features`.
-# Reads a DWG, Autodesk's own format, by turning it into DXF. That goes through `acadrust`, which is MPL-2.0 (NOTICE):
-# used unmodified it leaves this repository's MIT OR Apache-2.0 alone, and a build without it is `--no-default-features`.
 default = ["rvt", "dwg"]
 rvt = ["dep:bimcraft-rvt"]
+# Reads DWG drawings in `import_cad`, through bimcraft-dwg, which uses acadrust (MPL-2.0, unmodified; NOTICE).
 dwg = ["dep:bimcraft-dwg"]
 
 [dependencies]
+cap = { workspace = true }
+sysinfo = { workspace = true }
+bimcraft-i18n = { workspace = true }
 bimcraft-core = { workspace = true }
+bimcraft-plugin = { workspace = true }
 bimcraft-rvt = { workspace = true, optional = true }
 bimcraft-dwg = { workspace = true, optional = true }
 bimcraft-ui-egui = { workspace = true }
 bimcraft-update = { workspace = true }
+bimcraft-assistant = { workspace = true }
 eframe = { workspace = true }
 rfd = { workspace = true }
 serde_json = { workspace = true }

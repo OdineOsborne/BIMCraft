@@ -5,10 +5,12 @@
 //! the drawing knows who owns each line; the rest of an element's lines (a wall's layers, a door's jambs, a stair's walk
 //! line) keep their own.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::graphics::MODEL;
-use crate::model::Model;
+use crate::graphics::{COMPONENT, COMPONENTS, MODEL};
+use crate::model::{Element, Model};
 use crate::pen::{MAX_PEN, Pen};
 
 /// The pen a drawing draws a line in that is its category's, cut or in projection as the line's part is: not a pen a file
@@ -28,6 +30,7 @@ pub struct ObjectStyle {
 /// as where it's seen, [`Pen::PROJECTION`] both.
 pub fn default_of(category: &str) -> ObjectStyle {
     match category {
+        "propertyline" => ObjectStyle { projection: Pen::MEDIUM, cut: Pen::MEDIUM },
         "mass" => ObjectStyle { projection: Pen::PROJECTION, cut: Pen::PROJECTION },
         "door" | "window" => ObjectStyle { projection: Pen::PROJECTION, cut: Pen::MEDIUM },
         "railing" => ObjectStyle { projection: Pen::MEDIUM, cut: Pen::CUT },
@@ -47,19 +50,57 @@ impl ObjectStyle {
     }
 }
 
-/// An error saying what to fix, unless `category` is one Object Styles has: a model category views draw.
+/// An error saying what to fix, unless `category` is one Object Styles has: a model category views draw, or `component`, which
+/// stands for every family category that has none of its own.
 pub fn known(category: &str) -> Result<(), String> {
-    if MODEL.contains(&category) {
+    if MODEL.contains(&category) || category == COMPONENT || model_sub(category).is_some() {
         Ok(())
     } else {
-        Err(format!("`{category}` isn't a model category; Object Styles has: {}", MODEL.join(", ")))
+        Err(format!(
+            "`{category}` isn't a model category; Object Styles has: {} (and `{COMPONENT}`, for every family category, and the \
+             subcategories {})",
+            MODEL.join(", "),
+            model_subs().collect::<Vec<_>>().join(", ")
+        ))
     }
 }
 
+/// What `category` draws in when `styles` hold nothing of its own: for a family category, what `component` says of them all
+/// (a project from before the rows were split holds only that), else what a category starts with.
+pub fn inherited(styles: &BTreeMap<String, ObjectStyle>, category: &str) -> ObjectStyle {
+    // A subcategory draws in its category's pens until it has its own.
+    if let Some(sub) = model_sub(category) {
+        return styles.get(sub.parent).copied().unwrap_or_else(|| inherited(styles, sub.parent));
+    }
+    match styles.get(COMPONENT) {
+        Some(all) if COMPONENTS.contains(&category) => *all,
+        _ => default_of(category),
+    }
+}
+
+/// The categories whose subcategories Object Styles has rows for, each drawing in its category's pens until it has its own:
+/// a door's and a window's (Doors > Opening). Rooms' are left as they were, Room Separation Lines a kind of element of its own.
+const STYLED_SUBS: [&str; 2] = ["door", "window"];
+
+/// The subcategory `key` is, when Object Styles has a row for it ([`STYLED_SUBS`]).
+pub fn model_sub(key: &str) -> Option<&'static crate::graphics::Sub> {
+    crate::graphics::sub(key).filter(|s| STYLED_SUBS.contains(&s.parent))
+}
+
+/// The keys of the subcategories Object Styles has rows for, in order.
+pub fn model_subs() -> impl Iterator<Item = &'static str> {
+    crate::graphics::SUBCATEGORIES.iter().filter(|s| STYLED_SUBS.contains(&s.parent)).map(|s| s.key)
+}
+
 impl Model {
-    /// The pens `category` draws in: the project's own, or what it starts with.
+    /// The pens `category` draws in: the project's own, or what it starts with (a family category: what `component` says).
     pub fn object_style(&self, category: &str) -> ObjectStyle {
-        self.object_styles.get(category).copied().unwrap_or_else(|| default_of(category))
+        self.object_styles.get(category).copied().unwrap_or_else(|| inherited(&self.object_styles, category))
+    }
+
+    /// The pens element `e` draws in: those of its category, a component's those of its family's.
+    pub fn object_style_of(&self, e: &Element) -> ObjectStyle {
+        self.object_style(crate::graphics::category_of(self, e))
     }
 }
 
@@ -85,7 +126,7 @@ mod tests {
         let mut s = Session::new();
         // Asking says each model category's, and changes nothing.
         let r = s.execute("object_styles", &json!({})).unwrap();
-        assert_eq!(r["categories"].as_array().map(Vec::len), Some(MODEL.len()));
+        assert_eq!(r["categories"].as_array().map(Vec::len), Some(MODEL.len() + model_subs().count()));
         assert_eq!(r["categories"][0], json!({"category": "wall", "projection": 4, "cut": 10, "own": false}));
         assert!(s.history().is_empty());
         // Given, by category, a pen or both, in one undo step.
@@ -132,8 +173,9 @@ mod tests {
         .unwrap();
         let (west, floor, section) = (100005, 100006, 100007);
         assert!(matches!(s.model.elements.get(floor), Some(crate::model::Element::Floor(_))));
-        let plan =
-            |s: &Session| crate::render::draw(&s.model, 100000, View { scale: 0.1, cx: 4000.0, cy: 2500.0, width: 1000, height: 800 });
+        let plan = |s: &Session| {
+            crate::render::draw(&s.model, 100000, View { angle: 0.0, scale: 0.1, cx: 4000.0, cy: 2500.0, width: 1000, height: 800 })
+        };
         let cut = |s: &Session| {
             let view = crate::render::section_fit(&s.model, section, 800, 600);
             crate::render::section(&s.model, section, view)

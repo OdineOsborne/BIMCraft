@@ -3,7 +3,10 @@
 //! parameters; or calculated, worked out from the others by a formula, as a family's are. Its
 //! filters keep the elements every one of them holds for; its rows sort by its sort fields in turn
 //! (a phase by its place in the project's order, not its name) and, grouped, come together into one
-//! row for each set of their values.
+//! row for each set of their values. A multi-category schedule (`MULTI`) lists the elements of several
+//! categories, with the fields they share.
+
+use bimcraft_i18n::{msg, ui_msg};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,11 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::commands::{category, element_json};
+use crate::commands::{category, element_json_with};
 use crate::family::{self, MAX_FORMULA};
 use crate::language::Language;
 use crate::model::{Element, Id, MAX_COORD, MAX_TEXT, Model, ParameterKind, Schedule};
 use crate::phasing;
+use crate::rooms::Rooms;
 use crate::units::Units;
 
 /// What a field holds, and so how a schedule shows it and a formula reads it: text, a number, a
@@ -110,13 +114,14 @@ pub struct Table {
 
 /// The schedules every project has, as views: each one's category, and its name. Each is the
 /// project's own once it's placed on a sheet or changed.
-pub const VIEWS: [(&str, &str); 6] = [
-    ("room", "Room Schedule"),
-    ("door", "Door Schedule"),
-    ("window", "Window Schedule"),
-    ("wall", "Wall Schedule"),
-    ("floor", "Floor Schedule"),
-    ("level", "Level Schedule"),
+pub const VIEWS: [(&str, &str); 7] = [
+    ("room", msg!("Room Schedule")),
+    ("door", msg!("Door Schedule")),
+    ("window", msg!("Window Schedule")),
+    ("wall", msg!("Wall Schedule")),
+    ("floor", msg!("Floor Schedule")),
+    ("level", msg!("Level Schedule")),
+    ("sheet", msg!("Sheet List")),
 ];
 
 /// One of the schedules every project has, by its name (in any of the languages, in any case) or,
@@ -136,10 +141,10 @@ pub fn builtin(name: Option<&str>, cat: Option<&str>) -> Option<(&'static str, &
 /// else the one of that name.
 pub fn named(m: &Model, name: &str) -> Option<Id> {
     let twin = builtin(Some(name), None);
-    m.elements.iter().find_map(|(id, e)| match e {
-        Element::Schedule(sc) if twin.is_some() && builtin(Some(&sc.name), None) == twin => Some(*id),
-        Element::Schedule(sc) if twin.is_none() && sc.name == name => Some(*id),
-        _ => None,
+    m.lookup().rare("schedule").find(|id| match m.elements.get(*id) {
+        Some(Element::Schedule(sc)) if twin.is_some() => builtin(Some(&sc.name), None) == twin,
+        Some(Element::Schedule(sc)) => sc.name == name,
+        _ => false,
     })
 }
 
@@ -169,54 +174,110 @@ enum From {
     Flag(&'static str),
     /// A value among the element's parameters, under the field's own name (its phases, its design option).
     Param,
+    /// How a door or a window opens, in the project's language.
+    Operation,
+    /// Its element's category, as elements name theirs: `wall`.
+    Category,
+    /// What its element is made of: its type's structure layer's material (or its thickest's), a run's type's, or a
+    /// family's first material parameter's.
+    Material,
+    /// Its element's own category's field of the same name, holding the same; for an area, a wall's length by its
+    /// height, a door's or a window's width by its height, a roof's plan area.
+    Shared,
 }
 
 type Own = (&'static str, Kind, From);
 
 const ID: Own = ("Id", Kind::Number, From::Key("id"));
 const TYPE: Own = ("Type", Kind::Text, From::Key("type"));
-const FAMILY: Own = ("Family", Kind::Text, From::Key("family"));
+const FAMILY: Own = (msg!("Family"), Kind::Text, From::Key("family"));
 const LEVEL: Own = ("Level", Kind::Text, From::Level);
-const AREA: Own = ("Area", Kind::Area, From::Key("area_m2"));
+const AREA: Own = (msg!("Area"), Kind::Area, From::Key("area_m2"));
 /// A wall's area less the doors and windows in it: what a bill of quantities measures.
-const NET_AREA: Own = ("Net Area", Kind::Area, From::Key("net_area_m2"));
+const NET_AREA: Own = (msg!("Net Area"), Kind::Area, From::Key("net_area_m2"));
 const WIDTH: Own = ("Width", Kind::Length, From::Key("width"));
 const HEIGHT: Own = ("Height", Kind::Length, From::Key("height"));
 const LENGTH: Own = ("Length", Kind::Length, From::Key("length"));
 const THICKNESS: Own = ("Thickness", Kind::Length, From::Key("thickness"));
 const DEPTH: Own = ("Depth", Kind::Length, From::Key("depth"));
-const SYSTEM: Own = ("System", Kind::Text, From::Key("system"));
-const OFFSET: Own = ("Offset", Kind::Length, From::Key("offset"));
+const SYSTEM: Own = (ui_msg!("System"), Kind::Text, From::Key("system"));
+const OFFSET: Own = (msg!("Offset"), Kind::Length, From::Key("offset"));
 const MARK: Own = ("Mark", Kind::Text, From::Key("mark"));
+const OPERATION: Own = (msg!("Operation"), Kind::Text, From::Operation);
 const NAME: Own = ("Name", Kind::Text, From::Key("name"));
 const HOST: Own = ("Wall", Kind::Number, From::Ref("host"));
-const COUNT: Own = ("Count", Kind::Number, From::Count);
+const COUNT: Own = (msg!("Count"), Kind::Number, From::Count);
 const PHASE_CREATED: Own = ("Phase Created", Kind::Text, From::Param);
 const PHASE_DEMOLISHED: Own = ("Phase Demolished", Kind::Text, From::Param);
 const DESIGN_OPTION: Own = ("Design Option", Kind::Text, From::Param);
-const VOLUME: Own = ("Volume", Kind::Number, From::Key("volume_m3"));
+// A steel member's take-off: its section's name, its area (cm²), its weight per metre (kg/m) and its weight (kg).
+const PROFILE: Own = (msg!("Profile"), Kind::Text, From::Key("profile"));
+const SECTION_AREA: Own = (msg!("Section Area"), Kind::Number, From::Key("section_area_cm2"));
+const WEIGHT_PER_METRE: Own = (msg!("Weight per Metre"), Kind::Number, From::Key("weight_kg_m"));
+const WEIGHT: Own = (msg!("Weight"), Kind::Number, From::Key("weight_kg"));
+
+/// The room a component stands in (`room_number`, `room_name` in its JSON), as Revit's Room: Number and Room: Name.
+const ROOM_NUMBER: Own = (msg!("Room Number"), Kind::Text, From::Key("room_number"));
+const ROOM_NAME: Own = (msg!("Room Name"), Kind::Text, From::Key("room_name"));
+const VOLUME: Own = (msg!("Volume"), Kind::Number, From::Key("volume_m3"));
 /// A wall's volume less the doors and windows in it: what a bill of quantities measures masonry by.
-const NET_VOLUME: Own = ("Net Volume", Kind::Number, From::Key("net_volume_m3"));
+const NET_VOLUME: Own = (msg!("Net Volume"), Kind::Number, From::Key("net_volume_m3"));
+/// Where it stands in the active location's shared coordinates: its point, at its base.
+const SHARED_EAST: Own = (msg!("Shared East"), Kind::Length, From::Key("shared_east"));
+const SHARED_NORTH: Own = (msg!("Shared North"), Kind::Length, From::Key("shared_north"));
+const SHARED_ELEVATION: Own = (msg!("Shared Elevation"), Kind::Length, From::Key("shared_elevation"));
+
+/// A multi-category schedule's category: a row for each element of the categories it lists (`Schedule::categories`),
+/// or of every built one (`built`) where it lists none.
+pub const MULTI: &str = "multicategory";
+
+/// The fields a multi-category schedule's categories share, and how many it shows unless it chooses.
+const SHARED: (&str, usize, &[Own]) = (
+    MULTI,
+    11,
+    &[
+        (msg!("Category"), Kind::Text, From::Category),
+        FAMILY,
+        TYPE,
+        LEVEL,
+        COUNT,
+        ("Width", Kind::Length, From::Shared),
+        ("Height", Kind::Length, From::Shared),
+        ("Length", Kind::Length, From::Shared),
+        ("Thickness", Kind::Length, From::Shared),
+        (msg!("Area"), Kind::Area, From::Shared),
+        (msg!("Material"), Kind::Text, From::Material),
+        ID,
+        MARK,
+        NAME,
+        PHASE_CREATED,
+        PHASE_DEMOLISHED,
+        DESIGN_OPTION,
+    ],
+);
 
 /// Each category's own fields, and how many of them, from the first, its schedule shows unless it
 /// chooses.
 const OWN: &[(&str, usize, &[Own])] = &[
+    ("propertyline", 4, &[NAME, LEVEL, AREA, (msg!("Perimeter"), Kind::Length, From::Metres("perimeter_m")), COUNT]),
     (
         "room",
         5,
         &[
-            ("Number", Kind::Text, From::Key("number")),
+            (msg!("Number"), Kind::Text, From::Key("number")),
             NAME,
             LEVEL,
             AREA,
-            ("Perimeter", Kind::Length, From::Metres("perimeter_m")),
+            (msg!("Perimeter"), Kind::Length, From::Metres("perimeter_m")),
             COUNT,
+            (msg!("Unbounded Height"), Kind::Length, From::Key("unbounded_height")),
+            VOLUME,
             PHASE_CREATED,
             PHASE_DEMOLISHED,
             DESIGN_OPTION,
         ],
     ),
-    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, FAMILY, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, FAMILY, OPERATION, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "window",
         7,
@@ -225,10 +286,11 @@ const OWN: &[(&str, usize, &[Own])] = &[
             TYPE,
             WIDTH,
             HEIGHT,
-            ("Sill", Kind::Length, From::Key("sill")),
+            (msg!("Sill"), Kind::Length, From::Key("sill")),
             LEVEL,
             HOST,
             FAMILY,
+            OPERATION,
             COUNT,
             PHASE_CREATED,
             PHASE_DEMOLISHED,
@@ -266,7 +328,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             THICKNESS,
             OFFSET,
             COUNT,
-            ("Structural", Kind::YesNo, From::Flag("structural")),
+            (ui_msg!("Structural"), Kind::YesNo, From::Flag("structural")),
             PHASE_CREATED,
             PHASE_DEMOLISHED,
             DESIGN_OPTION,
@@ -280,8 +342,8 @@ const OWN: &[(&str, usize, &[Own])] = &[
             ID,
             TYPE,
             LEVEL,
-            ("Slope", Kind::Number, From::Key("slope")),
-            ("Plan Area", Kind::Area, From::Key("area_m2")),
+            (msg!("Slope"), Kind::Number, From::Key("slope")),
+            (msg!("Plan Area"), Kind::Area, From::Key("area_m2")),
             OFFSET,
             COUNT,
             PHASE_CREATED,
@@ -303,9 +365,34 @@ const OWN: &[(&str, usize, &[Own])] = &[
             PHASE_CREATED,
             PHASE_DEMOLISHED,
             DESIGN_OPTION,
+            SHARED_EAST,
+            SHARED_NORTH,
+            SHARED_ELEVATION,
         ],
     ),
-    ("structuralcolumn", 6, &[ID, TYPE, LEVEL, WIDTH, DEPTH, HEIGHT, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "structuralcolumn",
+        6,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            WIDTH,
+            DEPTH,
+            HEIGHT,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+            PROFILE,
+            SECTION_AREA,
+            WEIGHT_PER_METRE,
+            WEIGHT,
+            SHARED_EAST,
+            SHARED_NORTH,
+            SHARED_ELEVATION,
+        ],
+    ),
     (
         "footing",
         6,
@@ -320,9 +407,47 @@ const OWN: &[(&str, usize, &[Own])] = &[
             PHASE_CREATED,
             PHASE_DEMOLISHED,
             DESIGN_OPTION,
+            SHARED_EAST,
+            SHARED_NORTH,
+            SHARED_ELEVATION,
         ],
     ),
-    ("beam", 6, &[ID, TYPE, LEVEL, LENGTH, WIDTH, DEPTH, SYSTEM, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "beam",
+        6,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            LENGTH,
+            WIDTH,
+            DEPTH,
+            SYSTEM,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+            PROFILE,
+            SECTION_AREA,
+            WEIGHT_PER_METRE,
+            WEIGHT,
+        ],
+    ),
+    (
+        "rebar",
+        7,
+        &[
+            ID,
+            LEVEL,
+            ("Grade", Kind::Text, From::Key("grade")),
+            ("Diameter", Kind::Length, From::Key("diameter")),
+            LENGTH,
+            COUNT,
+            (msg!("Weight"), Kind::Number, From::Key("weight_kg")),
+            ("Host", Kind::Number, From::Ref("host")),
+            ("Layer", Kind::Text, From::Key("layer")),
+        ],
+    ),
     ("stripfooting", 6, &[ID, TYPE, LEVEL, LENGTH, WIDTH, DEPTH, SYSTEM, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "pipe",
@@ -357,6 +482,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
         ],
     ),
     ("cabletray", 7, &[ID, TYPE, LEVEL, SYSTEM, LENGTH, WIDTH, DEPTH, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("duct", 7, &[ID, TYPE, LEVEL, SYSTEM, LENGTH, WIDTH, DEPTH, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "cable",
         6,
@@ -391,7 +517,51 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
-    ("component", 4, &[FAMILY, TYPE, LEVEL, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "circuit",
+        6,
+        &[
+            ("Number", Kind::Number, From::Key("number")),
+            NAME,
+            ("Panel", Kind::Number, From::Ref("panel")),
+            ("Rating", Kind::Number, From::Key("rating_a")),
+            ("Poles", Kind::Number, From::Key("poles")),
+            ("Load", Kind::Number, From::Key("installed_va")),
+            ("Demand Load", Kind::Number, From::Key("demand_va")),
+            ("Current", Kind::Number, From::Key("current_a")),
+            ("Voltage", Kind::Number, From::Key("voltage_v")),
+            ("Classification", Kind::Text, From::Key("classification")),
+            COUNT,
+        ],
+    ),
+    (
+        "component",
+        4,
+        &[
+            FAMILY,
+            TYPE,
+            LEVEL,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+            ROOM_NUMBER,
+            ROOM_NAME,
+            // Its height over its level (its Schedule Level, for one on a plane), what it is on, and how far off that.
+            ("Elevation from Level", Kind::Length, From::Key("offset")),
+            ("Work Plane", Kind::Text, From::Key("work_plane")),
+            ("Offset from Host", Kind::Length, From::Key("offset_from_host")),
+            ("Host", Kind::Number, From::Ref("host_element")),
+            // A distribution board's, by the names of Revit's parameters.
+            ("Distribution System", Kind::Text, From::Key("distribution_system")),
+            ("Mains", Kind::Number, From::Key("mains")),
+            ("Max #1 Pole Breakers", Kind::Number, From::Key("slots")),
+            ("Supply From", Kind::Number, From::Ref("supply_from")),
+            SHARED_EAST,
+            SHARED_NORTH,
+            SHARED_ELEVATION,
+        ],
+    ),
     (
         "stair",
         7,
@@ -400,9 +570,9 @@ const OWN: &[(&str, usize, &[Own])] = &[
             LEVEL,
             WIDTH,
             HEIGHT,
-            ("Risers", Kind::Number, From::Key("risers")),
-            ("Riser Height", Kind::Length, From::Key("riser_height")),
-            ("Tread", Kind::Length, From::Key("tread")),
+            (msg!("Risers"), Kind::Number, From::Key("risers")),
+            (msg!("Riser Height"), Kind::Length, From::Key("riser_height")),
+            (msg!("Tread"), Kind::Length, From::Key("tread")),
             LENGTH,
             COUNT,
             PHASE_CREATED,
@@ -440,7 +610,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             HEIGHT,
             AREA,
             VOLUME,
-            ("Gross Floor Area", Kind::Area, From::Key("gross_floor_area_m2")),
+            (msg!("Gross Floor Area"), Kind::Area, From::Key("gross_floor_area_m2")),
             COUNT,
             PHASE_CREATED,
             PHASE_DEMOLISHED,
@@ -453,7 +623,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
         5,
         &[("Mass", Kind::Text, From::Key("mass")), LEVEL, AREA, ("Perimeter", Kind::Length, From::Metres("perimeter_m")), VOLUME, COUNT],
     ),
-    ("level", 2, &[("Elevation", Kind::Length, From::Key("elevation")), NAME, COUNT]),
+    ("level", 2, &[("Elevation", Kind::Length, From::Key("elevation_shown")), NAME, COUNT]),
     // The ground: what it covers seen from above, the land itself, which slopes, and how far it falls.
     (
         "ground",
@@ -461,13 +631,30 @@ const OWN: &[(&str, usize, &[Own])] = &[
         &[
             NAME,
             AREA,
-            ("Surface Area", Kind::Area, From::Key("surface_m2")),
-            ("Lowest", Kind::Length, From::Key("lowest")),
-            ("Highest", Kind::Length, From::Key("highest")),
-            ("Points", Kind::Number, From::Key("points")),
+            (msg!("Surface Area"), Kind::Area, From::Key("surface_m2")),
+            (msg!("Lowest"), Kind::Length, From::Key("lowest")),
+            (msg!("Highest"), Kind::Length, From::Key("highest")),
+            (msg!("Points"), Kind::Number, From::Key("points")),
             COUNT,
         ],
     ),
+    ("sheet", 2, &[("Number", Kind::Text, From::Key("number")), NAME]),
+];
+
+/// The fields of what schedules aren't of: annotation and views, what Filter on a selection goes by
+/// (`selection::common`) and a tag may show. Each one's count is 0: no schedule shows them.
+const MORE: &[(&str, usize, &[Own])] = &[
+    ("line", 0, &[("Line Style", Kind::Text, From::Key("style")), LENGTH]),
+    ("region", 0, &[TYPE, ("Line Style", Kind::Text, From::Key("line_style"))]),
+    ("detailgroup", 0, &[TYPE]),
+    ("repeatingdetail", 0, &[TYPE, LENGTH]),
+    ("text", 0, &[("Text", Kind::Text, From::Key("text"))]),
+    ("tag", 0, &[("Text", Kind::Text, From::Key("text"))]),
+    ("dimension", 0, &[("Kind", Kind::Text, From::Key("kind"))]),
+    ("grid", 0, &[NAME]),
+    ("section", 0, &[NAME]),
+    ("elevation", 0, &[NAME]),
+    ("viewport", 0, &[(ui_msg!("Title"), Kind::Text, From::Key("title"))]),
 ];
 
 /// The categories schedules are of, as `OWN` lists them.
@@ -475,8 +662,28 @@ pub fn categories() -> Vec<&'static str> {
     OWN.iter().map(|(c, _, _)| *c).collect()
 }
 
+/// Every category with fields: schedules' own, then what schedules aren't of (`MORE`).
+pub fn all_categories() -> Vec<&'static str> {
+    categories().into_iter().chain(MORE.iter().map(|(c, _, _)| *c)).collect()
+}
+
+/// The categories a multi-category schedule lists where it names none: what's built, not rooms, levels, masses
+/// and sheets.
+pub fn built() -> Vec<&'static str> {
+    categories().into_iter().filter(|c| !matches!(*c, "room" | "level" | "mass" | "massfloor" | "propertyline" | "sheet")).collect()
+}
+
+/// The categories multi-category schedule `sc` lists, as elements name theirs.
+pub fn listed(sc: &Schedule) -> Vec<String> {
+    if sc.categories.is_empty() {
+        built().into_iter().map(String::from).collect()
+    } else {
+        sc.categories.iter().map(|c| category(c)).collect()
+    }
+}
+
 fn own(cat: &str) -> (usize, &'static [Own]) {
-    OWN.iter().find(|(c, _, _)| *c == cat).map_or((0, &[][..]), |(_, n, f)| (*n, *f))
+    OWN.iter().chain(MORE).chain(std::iter::once(&SHARED)).find(|(c, _, _)| *c == cat).map_or((0, &[][..]), |(_, n, f)| (*n, *f))
 }
 
 /// What a price list gives an element that carries an article code: the item's wording and its unit as the list writes
@@ -509,8 +716,9 @@ pub fn fields(m: &Model, cat: &str) -> Vec<(String, Kind)> {
             n,
             match p.kind {
                 ParameterKind::Text => Kind::Text,
-                ParameterKind::Number => Kind::Number,
+                ParameterKind::Number | ParameterKind::Integer | ParameterKind::Volume | ParameterKind::Angle => Kind::Number,
                 ParameterKind::Length => Kind::Length,
+                ParameterKind::Area => Kind::Area,
                 ParameterKind::YesNo => Kind::YesNo,
             },
         );
@@ -526,9 +734,10 @@ pub fn fields(m: &Model, cat: &str) -> Vec<(String, Kind)> {
                 &p.name,
                 match p.kind {
                     family::Kind::Length => Kind::Length,
-                    family::Kind::Number | family::Kind::Angle => Kind::Number,
+                    family::Kind::Number | family::Kind::Angle | family::Kind::Integer | family::Kind::Volume => Kind::Number,
+                    family::Kind::Area => Kind::Area,
                     family::Kind::YesNo => Kind::YesNo,
-                    family::Kind::Material => Kind::Text,
+                    family::Kind::Material | family::Kind::Text | family::Kind::Url | family::Kind::FamilyType => Kind::Text,
                 },
             );
         }
@@ -539,16 +748,30 @@ pub fn fields(m: &Model, cat: &str) -> Vec<(String, Kind)> {
 /// Field `name` of element `id` as its category's schedule shows it (a length or an area in the project's units, a yes or no as
 /// `Yes` or `No`): what a tag shows. None where the element has no such field, or no value for it.
 pub fn field_text(m: &Model, id: impl crate::ids::Key, name: &str) -> Option<String> {
+    field_text_with(m, id, name, &Rooms::new(m))
+}
+
+/// Field `name` of element `id`, and what it holds, as its category's schedule works it out: a
+/// length in mm, an area in m², a yes or no as a boolean. None where the element has no such
+/// field, or no value for it.
+pub(crate) fn field_value_with(m: &Model, id: impl crate::ids::Key, name: &str, rooms: &Rooms) -> Option<(Kind, Value)> {
     let id = m.elements.id(id)?;
     let e = m.elements.get(id)?;
     let cat = e.category();
     let kind = fields(m, cat).into_iter().find(|(n, _)| n == name)?.1;
     let formulas = BTreeMap::new();
-    let mut row = Row { m, e, cat, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+    let mut row = Row { m, e, cat, json: element_json_with(m, id, rooms), formulas: &formulas, done: BTreeMap::new() };
     match row.get(name) {
         Value::Null => None,
-        v => Some(shown(m.units, kind, &v)),
+        v => Some((kind, v)),
     }
+}
+
+/// [`field_value_with`] as its category's schedule shows it (a length or an area in the project's
+/// units, a yes or no as `Yes` or `No`): what a tag shows.
+pub fn field_text_with(m: &Model, id: impl crate::ids::Key, name: &str, rooms: &Rooms) -> Option<String> {
+    let (kind, v) = field_value_with(m, id, name, rooms)?;
+    Some(shown(m.units, kind, &v))
 }
 
 /// The fields a schedule of category `cat` shows unless it chooses.
@@ -563,7 +786,7 @@ fn chosen(sc: &Schedule, cat: &str) -> Vec<Field> {
 }
 
 /// What `what` holds, said: `text`, `a number`…
-fn holding(k: Kind) -> &'static str {
+pub(crate) fn holding(k: Kind) -> &'static str {
     match k {
         Kind::Text => "text",
         Kind::Number => "a number",
@@ -579,7 +802,21 @@ fn holding(k: Kind) -> &'static str {
 pub fn check(m: &Model, sc: &Schedule) -> Result<(), String> {
     let cat = category(&sc.of);
     if own(&cat).1.is_empty() {
-        return Err(format!("there's no schedule of `{}`; there are schedules of: {}", sc.of, categories().join(", ")));
+        return Err(format!("there's no schedule of `{}`; there are schedules of: {}, {MULTI}", sc.of, categories().join(", ")));
+    }
+    if cat != MULTI && !sc.categories.is_empty() {
+        return Err(format!("a schedule of {cat}s lists no categories; only a multi-category one (`{MULTI}`) does"));
+    }
+    if sc.categories.len() > MAX_FIELDS {
+        return Err(format!("it lists {} categories; a schedule lists up to {MAX_FIELDS}", sc.categories.len()));
+    }
+    if let Some(c) = sc
+        .categories
+        .iter()
+        .find(|c| !categories().contains(&category(c).as_str()) || matches!(category(c).as_str(), "massfloor" | "sheet"))
+    {
+        let there: Vec<&str> = categories().into_iter().filter(|c| !matches!(*c, "massfloor" | "sheet")).collect();
+        return Err(format!("`{c}` isn't a category a multi-category schedule lists; there are: {}", there.join(", ")));
     }
     if let Some((of, name)) = builtin(Some(&sc.name), None).filter(|(of, _)| *of != cat) {
         return Err(format!("`{}` is the {of}s' {name} every project has; call a schedule of {cat}s something else", sc.name));
@@ -713,13 +950,14 @@ pub fn picks(m: &Model, cats: &[String], rules: &[Filter]) -> BTreeSet<Id> {
     let formulas = BTreeMap::new();
     let index = crate::walls::Index::new(m);
     let mut out = BTreeSet::new();
+    let rooms = Rooms::new(m);
     for (&id, e) in &m.elements {
         let Some(of) = kinds.get(e.category()) else { continue };
         let mut row = Row {
             m,
             e,
             cat: e.category(),
-            json: crate::commands::element_json_indexed(m, id, Some(&index)),
+            json: crate::commands::element_json_full(m, id, &rooms, Some(&index)),
             formulas: &formulas,
             done: BTreeMap::new(),
         };
@@ -818,8 +1056,13 @@ impl Row<'_> {
 
     /// One of its category's fields: its own, a project parameter's, or its family's.
     fn field(&self, name: &str) -> Value {
+        self.field_of(self.cat, name)
+    }
+
+    /// One of category `cat`'s fields, of its element.
+    fn field_of(&self, cat: &str, name: &str) -> Value {
         let (m, j) = (self.m, &self.json);
-        if let Some((_, kind, from)) = own(self.cat).1.iter().find(|(n, _, _)| *n == name) {
+        if let Some((_, kind, from)) = own(cat).1.iter().find(|(n, _, _)| *n == name) {
             let number = |v: Option<&Value>| v.and_then(Value::as_f64).unwrap_or(0.0);
             return match *from {
                 From::Key(k) if matches!(kind, Kind::Text) => match j.get(k) {
@@ -844,6 +1087,11 @@ impl Row<'_> {
                 }
                 From::Count => serde_json::json!(1.0),
                 From::Flag(k) => Value::Bool(j.get(k).and_then(Value::as_bool).unwrap_or(false)),
+                From::Operation => j
+                    .get("operation")
+                    .and_then(Value::as_str)
+                    .and_then(crate::model::Operation::parse)
+                    .map_or(Value::Null, |op| Value::String(m.language.word(op.label()).to_string())),
                 // Its parameter of that name, or its wall's for a door or window with none; a phase it holds none of
                 // is the project's first.
                 From::Param => match phasing::value(m, self.e, name) {
@@ -851,11 +1099,28 @@ impl Row<'_> {
                     _ if name == phasing::CREATED => m.phases.first().map_or(Value::Null, |p| Value::String(p.clone())),
                     _ => Value::Null,
                 },
+                From::Category => Value::String(self.e.category().to_string()),
+                From::Material => self.material(),
+                From::Shared => self.shared(name, *kind),
+            };
+        }
+        // A family's own first: where a project parameter has the name too, the family's is tied to it, and is its value here.
+        if let Some((family, _)) = self.e.family()
+            && let Some(p) = m.families.get(family).and_then(|f| f.parameters.iter().find(|p| p.name == name))
+        {
+            let v = j.get("values").and_then(|v| v.get(name)).cloned().unwrap_or(Value::Null);
+            return match (p.kind, v.as_f64()) {
+                (family::Kind::YesNo, Some(x)) => Value::Bool(x != 0.0),
+                // A family's areas and volumes are in mm² and mm³; schedules show m² and m³.
+                (family::Kind::Area, Some(x)) => serde_json::json!(fine(x / 1e6)),
+                (family::Kind::Volume, Some(x)) => serde_json::json!(fine(x / 1e9)),
+                (k, _) if k.text() && v.as_str() == Some("") => Value::Null,
+                _ => v,
             };
         }
         let cat = self.cat;
         if let Some(p) = m.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == cat)) {
-            return match self.e.params().and_then(|ps| ps.get(name)) {
+            return match crate::parameters::value_of(m, self.e, name, p) {
                 Some(v) => v.clone(),
                 // Unset, a yes or no is no, as the palette shows it.
                 None if p.kind == ParameterKind::YesNo => Value::Bool(false),
@@ -875,17 +1140,59 @@ impl Row<'_> {
                 _ => Value::Null,
             };
         }
-        if let Some((family, _)) = self.e.family()
-            && let Some(p) = m.families.get(family).and_then(|f| f.parameters.iter().find(|p| p.name == name))
-        {
-            let v = j.get("values").and_then(|v| v.get(name)).cloned().unwrap_or(Value::Null);
-            return match (p.kind, v.as_f64()) {
-                (family::Kind::YesNo, Some(x)) => Value::Bool(x != 0.0),
-                (family::Kind::Material, _) if v.as_str() == Some("") => Value::Null,
-                _ => v,
-            };
-        }
         Value::Null
+    }
+
+    /// Field `name`, holding `kind`, as its element's own category has it; else an area worked out from its sizes.
+    fn shared(&self, name: &str, kind: Kind) -> Value {
+        let cat = self.e.category();
+        let name = if (cat, name) == ("roof", "Area") { "Plan Area" } else { name };
+        if own(cat).1.iter().any(|(n, k, _)| *n == name && *k == kind) {
+            return self.field_of(cat, name);
+        }
+        let by = |a: &str, b: &str| match (self.field_of(cat, a).as_f64(), self.field_of(cat, b).as_f64()) {
+            (Some(x), Some(y)) => serde_json::json!(fine(x * y / 1e6)),
+            _ => Value::Null,
+        };
+        match (cat, name) {
+            ("wall", "Area") => by("Length", "Height"),
+            ("door" | "window", "Area") => by("Width", "Height"),
+            _ => Value::Null,
+        }
+    }
+
+    /// What its element is made of: its type's structure layer's material, or its thickest's; a run's type's; or its
+    /// family's first material parameter's value. `null` where it says none.
+    fn material(&self) -> Value {
+        let (m, e) = (self.m, self.e);
+        let ty = self.json.get("type").and_then(Value::as_str).unwrap_or_default();
+        let layers = match e.category() {
+            "wall" => m.types.wall.get(ty).map(|t| &t.layers),
+            "floor" => m.types.floor.get(ty).map(|t| &t.layers),
+            "roof" => m.types.roof.get(ty).map(|t| &t.layers),
+            "ceiling" => m.types.ceiling.get(ty).map(|t| &t.layers),
+            _ => None,
+        };
+        let named = |l: &&crate::model::Layer| !l.material.trim().is_empty();
+        let name = match layers {
+            Some(ls) => ls
+                .iter()
+                .filter(named)
+                .find(|l| matches!(l.function, crate::model::Function::Structure))
+                .or_else(|| ls.iter().filter(named).max_by(|a, b| a.thickness.total_cmp(&b.thickness)))
+                .map(|l| l.material.clone()),
+            None => match (m.run_type(e), e.family()) {
+                (Some(t), _) => Some(t.material.clone()),
+                (None, Some((family, _))) => m.families.get(family).and_then(|f| {
+                    f.parameters
+                        .iter()
+                        .filter(|p| p.kind == family::Kind::Material)
+                        .find_map(|p| self.json.get("values")?.get(&p.name)?.as_str().map(String::from))
+                }),
+                _ => None,
+            },
+        };
+        name.filter(|n| !n.trim().is_empty()).map_or(Value::Null, Value::String)
     }
 }
 
@@ -895,16 +1202,28 @@ fn fine(x: f64) -> f64 {
     if r.is_finite() { r } else { x }
 }
 
-/// What a schedule of category `cat` has a row for, each with its JSON: an element of the category. Of mass floors, a mass
-/// at each level it crosses, with its floor area there, its perimeter and the volume up to the next such level or its top.
-fn sources<'a>(m: &'a Model, cat: &str) -> Vec<(Id, &'a Element, Value)> {
+/// What schedule `sc` of category `cat` has a row for, each with its JSON: an element of the category, or of the categories
+/// a multi-category one lists. Of mass floors, a mass at each level it crosses, with its floor area there, its perimeter
+/// and the volume up to the next such level or its top.
+fn sources<'a>(m: &'a Model, sc: &Schedule, cat: &str) -> Vec<(Id, &'a Element, Value)> {
+    if cat == MULTI {
+        let cats = listed(sc);
+        let rooms = Rooms::new(m);
+        return m
+            .elements
+            .iter()
+            .filter(|(_, e)| cats.iter().any(|c| c == e.category()))
+            .map(|(id, e)| (*id, e, element_json_with(m, *id, &rooms)))
+            .collect();
+    }
     if cat != "massfloor" {
+        let rooms = Rooms::new(m);
         let index = crate::walls::Index::new(m);
         return m
             .elements
             .iter()
             .filter(|(_, e)| e.category() == cat)
-            .map(|(id, e)| (*id, e, crate::commands::element_json_indexed(m, *id, Some(&index))))
+            .map(|(id, e)| (*id, e, crate::commands::element_json_full(m, *id, &rooms, Some(&index))))
             .collect();
     }
     let mut out = Vec::new();
@@ -932,7 +1251,7 @@ fn sources<'a>(m: &'a Model, cat: &str) -> Vec<(Id, &'a Element, Value)> {
 pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
     let cat = category(&sc.of);
     if own(&cat).1.is_empty() {
-        return Err(format!("no schedule of `{}`; there are schedules of: {}", sc.of, categories().join(", ")));
+        return Err(format!("no schedule of `{}`; there are schedules of: {}, {MULTI}", sc.of, categories().join(", ")));
     }
     let available = fields(m, &cat);
     let fields = chosen(sc, &cat);
@@ -955,7 +1274,7 @@ pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
     };
     // Each element its filters keep: its cells, its sort fields' values, and itself.
     let mut rows: Vec<(Vec<Value>, Vec<Value>, Id)> = Vec::new();
-    for (id, e, json) in sources(m, &cat) {
+    for (id, e, json) in sources(m, sc, &cat) {
         let mut row = Row { m, e, cat: &cat, json, formulas: &formulas, done: BTreeMap::new() };
         if sc.filters.iter().all(|f| keeps(f, &row.get(&f.field), kind_of(&f.field), m.units)) {
             let cells = fields.iter().map(|f| row.get(&f.name)).collect();
@@ -1068,7 +1387,7 @@ fn keeps(f: &Filter, v: &Value, kind: Option<Kind>, units: Units) -> bool {
 /// A column's heading as a schedule shows it in `units`: an area's says m² or ft².
 pub fn heading(units: Units, column: &Column) -> String {
     match column.kind {
-        Kind::Area => format!("{} ({})", column.heading, units.area(0.0).1),
+        Kind::Area => format!(ui_msg!("{} ({})"), column.heading, units.area(0.0).1),
         _ => column.heading.clone(),
     }
 }
@@ -1078,12 +1397,17 @@ pub fn heading(units: Units, column: &Column) -> String {
 /// for the caller to say in its language); text as it is.
 pub fn shown(units: Units, kind: Kind, v: &Value) -> String {
     match (v, kind) {
-        (Value::Bool(b), _) => (if *b { "Yes" } else { "No" }).into(),
+        (Value::Bool(b), _) => (if *b { msg!("Yes") } else { msg!("No") }).into(),
         (v, Kind::Length) if v.is_number() => units.length(v.as_f64().unwrap_or(0.0)),
         (v, Kind::Area) if v.is_number() => format!("{:.2}", units.area(v.as_f64().unwrap_or(0.0) * 1e6).0),
         (Value::Number(x), _) => format!("{}", (x.as_f64().unwrap_or(0.0) * 100.0).round() / 100.0 + 0.0),
         (v, _) => cell(v),
     }
+}
+
+/// Two texts in the order `natural` puts them.
+pub fn natural_text(a: &str, b: &str) -> Ordering {
+    natural(&Value::String(a.into()), &Value::String(b.into()))
 }
 
 /// Numbers (and numeric text such as marks "2" and "10") by value first, then other text, in any
@@ -1122,6 +1446,40 @@ pub fn to_csv(t: &Table) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The table as a workbook of one sheet named `name`: its headings (in metric) in bold, its rows, then its totals. Numbers
+/// go in as numbers, so the spreadsheet sums them; text as text, never a formula.
+pub fn to_xlsx(t: &Table, name: &str) -> Vec<u8> {
+    let (headings, rows) = cells(t);
+    crate::xlsx::workbook(name, &headings, &rows)
+}
+
+/// The table as an OpenDocument spreadsheet (`.ods`) of one sheet named `name`, as [`to_xlsx`] writes it.
+pub fn to_ods(t: &Table, name: &str) -> Vec<u8> {
+    let (headings, rows) = cells(t);
+    crate::ods::spreadsheet(name, &headings, &rows)
+}
+
+/// The table's headings, and its rows and totals as a spreadsheet's cells: numbers as numbers, in millimetres.
+fn cells(t: &Table) -> (Vec<String>, Vec<Vec<crate::xlsx::Cell>>) {
+    use crate::xlsx::Cell;
+    let headings: Vec<String> = t.columns.iter().map(|c| heading(Units::Millimetres, c)).collect();
+    let rows: Vec<Vec<Cell>> = t
+        .rows
+        .iter()
+        .chain(&t.totals)
+        .map(|row| {
+            row.iter()
+                .map(|v| match v {
+                    Value::Number(x) => x.as_f64().map_or(Cell::Empty, Cell::Number),
+                    Value::Null => Cell::Empty,
+                    v => Cell::Text(cell(v)),
+                })
+                .collect()
+        })
+        .collect();
+    (headings, rows)
 }
 
 #[cfg(test)]
@@ -1213,6 +1571,95 @@ mod tests {
             totals: None,
         };
         assert_eq!(to_csv(&t), "Name,Offset\n'=1+1,-5.0\n'@SUM(A1),5.0\n");
+    }
+
+    #[test]
+    fn a_schedule_goes_to_a_workbook_with_its_numbers_as_numbers() {
+        let t = table(&house().model, &of("rooms")).unwrap();
+        let parts = crate::xlsx::unzip(&to_xlsx(&t, "Room Schedule"));
+        assert!(parts["xl/workbook.xml"].contains(r#"name="Room Schedule""#));
+        let sheet = &parts["xl/worksheets/sheet1.xml"];
+        assert!(sheet.contains(r#"<t xml:space="preserve">Area (m²)</t>"#), "{sheet}");
+        assert!(sheet.contains(r#"<t xml:space="preserve">Kitchen</t></is></c><c r="C2" t="inlineStr"><is><t xml:space="preserve">Level 1</t></is></c><c r="D2"><v>18</v></c><c r="E2"><v>18000</v></c>"#), "{sheet}");
+    }
+
+    fn multi(cats: &[&str], fields: &[&str]) -> Schedule {
+        Schedule {
+            of: MULTI.into(),
+            categories: cats.iter().map(|c| c.to_string()).collect(),
+            fields: fields.iter().map(|f| Field { name: f.to_string(), ..Field::default() }).collect(),
+            ..Schedule::default()
+        }
+    }
+
+    #[test]
+    fn a_multi_category_schedule_lists_its_categories_elements_with_the_fields_they_share() {
+        let m = house().model;
+        let sc = multi(&["walls", "door"], &["Category", "Type", "Width", "Height", "Length", "Area", "Count"]);
+        check(&m, &sc).unwrap();
+        let t = table(&m, &sc).unwrap();
+        assert_eq!(headings(&t), ["Category", "Type", "Width", "Height", "Length", "Area (m²)", "Count"]);
+        assert_eq!(t.rows.len(), 7, "five walls and two doors, no rooms");
+        let doors: Vec<&Vec<Value>> = t.rows.iter().filter(|r| r[0] == "door").collect();
+        assert_eq!(doors.len(), 2, "sorted by its first column, the doors first");
+        assert_eq!((&doors[0][2], &doors[0][3], &doors[0][4]), (&json!(900.0), &json!(2100.0), &Value::Null), "a door has no length");
+        assert_eq!(doors[0][5], json!(1.89), "a door's area is its width by its height");
+        for wall in t.rows.iter().filter(|r| r[0] == "wall") {
+            assert_eq!(wall[2], Value::Null, "a wall has a thickness, not a width");
+            let (l, h) = (wall[4].as_f64().unwrap(), wall[3].as_f64().unwrap());
+            assert!(l > 0.0 && h > 0.0, "{wall:?}");
+            assert_eq!(wall[5], json!(fine(l * h / 1e6)), "a wall's area is its length by its height");
+        }
+    }
+
+    #[test]
+    fn a_multi_category_schedule_filters_groups_and_totals_as_any_other() {
+        let m = house().model;
+        let mut sc = multi(&[], &["Category", "Type", "Count"]);
+        sc.sort = vec![Sort { field: "Category".into(), descending: false }];
+        sc.grouped = true;
+        let t = table(&m, &sc).unwrap();
+        assert_eq!(
+            t.rows,
+            [vec![json!("door"), json!("Single 900 x 2100"), json!(2.0)], vec![json!("wall"), Value::Null, json!(5.0)]],
+            "rooms aren't built"
+        );
+        assert_eq!(t.ids.iter().map(Vec::len).collect::<Vec<_>>(), [2, 5]);
+        sc.grouped = false;
+        sc.filters = vec![Filter { field: "Category".into(), op: Op::Equals, value: json!("Door") }];
+        assert_eq!(table(&m, &sc).unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn a_multi_category_schedule_reads_its_materials_from_its_types() {
+        let mut s = house();
+        s.script(
+            r#"type {"category": "wall", "name": "Cavity", "layers": [{"function": "finish", "material": "Brick", "thickness": 100}, {"function": "structure", "material": "Concrete block", "thickness": 140}]}
+               type {"category": "wall", "name": "Lined", "layers": [{"function": "finish", "material": "Plaster", "thickness": 10}, {"function": "finish", "material": "Brick", "thickness": 100}]}
+               wall {"points": [[0,-2000],[4000,-2000]], "type": "Cavity"}
+               wall {"points": [[0,-4000],[4000,-4000]], "type": "Lined"}"#,
+        )
+        .unwrap();
+        let mut sc = multi(&["wall"], &["Type", "Material"]);
+        sc.grouped = true;
+        sc.sort = vec![Sort { field: "Type".into(), descending: false }];
+        let t = table(&s.model, &sc).unwrap();
+        let material = |ty: &str| t.rows.iter().find(|r| r[0] == ty).map(|r| r[1].clone());
+        assert_eq!(material("Cavity"), Some(json!("Concrete block")), "its structure layer's");
+        assert_eq!(material("Lined"), Some(json!("Brick")), "with none, its thickest layer's");
+        assert_eq!(material("Interior - 100mm"), Some(Value::Null), "a type of no layers says none");
+    }
+
+    #[test]
+    fn only_a_multi_category_schedule_lists_categories_and_only_their_shared_fields() {
+        let m = house().model;
+        let e = check(&m, &Schedule { categories: vec!["door".into()], ..of("wall") }).unwrap_err();
+        assert!(e.contains("multi-category"), "{e}");
+        let e = check(&m, &multi(&["door", "clouds"], &[])).unwrap_err();
+        assert!(e.contains("cloud") && e.contains("stair"), "{e}");
+        let e = check(&m, &multi(&["door"], &["Sill"])).unwrap_err();
+        assert!(e.contains("Sill") && e.contains("Category"), "{e}");
+        assert_eq!(defaults(MULTI).len(), 11);
     }
 
     #[test]

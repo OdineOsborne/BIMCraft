@@ -27,9 +27,48 @@ Moved from the root `CLAUDE.md`, word for word: the root keeps the rules and the
   a column is its box's rectangle (a turned one: its symbol's size and the placement's angle); a beam is the bounded line in its
   data, its section what the record box leaves once that line's own extent is taken out of it (the third extent is the check), its
   line the top of the section; an isolated footing is its box's rectangle laid flat, as thick as the box is deep,
-  hanging from its level with no top constraint; a floor, ceiling or roof is the loops
-  of its `OST_SketchLines`; a roof by footprint only when flat, one by extrusion only where its box confirms it. The notes are part of
-  the product: a change that leaves something out says so.
+  hanging from its level with no top constraint (a beam or a footing that this leaves out comes in from its box, `framing.rs`, with
+  the reason as a note, and nothing comes in twice); a floor, ceiling or roof is the loops
+  of its `OST_SketchLines` (the owner of a curve is the one id among its second reference list's that is a floor, a ceiling or a
+  roof, first, middle or last; a curve's record reads as both a line and an arc, and the box it carries says which it is);
+  a floor edited with Revit's shape tools comes in shaped by its top's vertices, which its data holds, its top at the height most
+  of them have (the creases between them are BIMCraft's own, and a variable layer's level underside is not read); a sketch that
+  does not close is tried again without the lines that cannot bound it (another sketch's, past the element's box, and a line
+  drawn twice); a roof by footprint comes in level (one that rises is a stand-in, its slopes unread), one by extrusion only where its box
+  confirms it, and a wall that names a flat roof or one by extrusion has its top cut by it. A room tries the
+  middle of its box and then a grid of points over it, and making the arrangement of a level's walls is what costs (`geom::faces`
+  splits and matches every segment), so the faces of a level are made once and every point of every room of that level is asked of
+  them (`geom::region_in`): the Snowdon sample's import went from 133 s to 2.4 s in a release build when the rooms stopped remaking
+  their level's plan for each point. The notes are part of the product: a change that leaves something out says so.
+
+  A workshared (central) file up to 2023 differs in two ways the survey allows for. A record's header tag is followed by a counted
+  list of 14-byte items, empty in a file that is not workshared, so `records::id_before` finds a record's id back from its category
+  (14 bytes, and 14 more for each item) instead of at a fixed distance from the marker; and the element table's two id columns differ in
+  many records, an element's record carrying either, so `elem_table::parse` lists both. A real 128 MB central model inflates its one
+  partition to 664 MiB, which is why `Limits::max_inflated` is 2 GiB. Such a file imports what the importer has a reader for (its
+  levels, walls, floors, pipes, ducts and cable trays as runs, and its fittings, fixtures, equipment and terminals as boxes of a family of their category, `generic.rs`). A category the name table has no name for (`inventory::category_name`) is not
+  guessed at: its placed elements come in as boxes too, of a family named by the category's id (`Category -2008123`), and the note
+  says its category has no name here; one whose box is the box of an element of a named category is that element's companion (every
+  pipe, fitting and duct has one in such a file), so it is left out and listed. The categories that have a name and no reader (model
+  lines, rebar, areas, assemblies, wall reveals) are listed in the notes with how many there are.
+
+  The categories the name table knows that had no reader come in from the survey's own records, their category and box, with no
+  new finding in an element's data (`framing.rs`, `generic.rs`'s `KINDS`). Structural framing that `beams.rs` could not read from its
+  data's line is a beam along its box's longer side,
+  through the middle of the box across it, its top the box's top on the level at or below it, its section the box across it; a member
+  whose box runs across the axes in plan (wider than a third of its length) or stands (as deep as it is long) is left out, since its
+  line is not read and its box would make a beam of another width and direction. Structural foundations `footings.rs` could not read are isolated footings of their
+  box (a wall foundation or a mat too). Stairs' runs, landings and supports, railings, curtain panels and mullions, wall sweeps, slab
+  edges, conduits, furniture systems (of the furniture category), site pads, masses, trusses, beam systems, stiffeners and
+  connections come in as boxes of a family of their category, as fittings do, each saying so (a model group, class
+  `ElementGroup`, and terrain, class `Toposolid` or `SiteSurface`, are left out instead: a group's members come in on their
+  own, and terrain's box is a solid block over the site), but a box is a fair stand-in only for
+  some (`generic::Shape`): a path's (a railing, a mullion, a sweep, a slab edge, a conduit) only where it runs along an axis, so one
+  that turns a corner or runs across the axes, whose box is a block where there is none, is left out with that; and a whole (a stair,
+  a truss, a beam system) is left out where its box holds a box of its parts' categories, which come in on their own. Conduits come
+  in as boxes and not as runs: the finding that a duct's or a cable tray's data holds its line (below) was made on those two
+  categories, and no conduit was looked at. A curtain wall still comes in as the plane of its box, its panels and mullions as boxes
+  over it.
 
   Every note of an element left out reads `N kinds left out, why (ids …)` (`Import::left_out`; an element the model's rules drop
   after it was made goes through `Import::dropped`), because the desktop adds those numbers up for its status line

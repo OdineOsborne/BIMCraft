@@ -8,34 +8,21 @@ and MCP server, and milestone 2, the egui desktop app, are done. What works and 
 
 - **Never crash.** No `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!` or `unreachable!` outside tests (the workspace
   lints deny them), and no `unsafe`. Parameters, files and MCP input are hostile: check that numbers are finite and in range,
-  and cap sizes (`MAX_POINTS`, `MAX_TEXT`, `MAX_COORD`, `MAX_FILE`). `Session::execute` runs every command under
+  and cap sizes (`MAX_POINTS`, `MAX_TEXT`, `MAX_COORD`); a whole file read is held to the memory the machine has free
+  (`memory.rs`), since running out of it is a crash nothing catches. `Session::execute` runs every command under
   `catch_unwind` and restores the model on any failure; `hostile_params_never_panic_or_break_the_model` sweeps every command.
 - **Everything is a command** (`ALL` in `crates/core/src/commands.rs`): an id after Revit's tool name, a Revit-style shortcut,
   a params doc written for agents, and a JSON `run`. The CLI, scripts and MCP all go through `Session::execute`, so new
   behaviour is a new command or parameter, with a test.
-- **Every element has an id and a GUID** (`ids.rs`), as Revit's ElementId and UniqueId: the id, six digits from `FIRST_ID`
-  (100000) up, is what people, agents and schedules use, and may be given anew when an element comes in from another file
-  (`insert`, `Elements::insert_as`); the GUID is made once and never changes. Anything that points at an element holds its
-  `Guid`, never its `Id`: a new element kind lists its references in `visit_refs!` (`Element::refs_mut`), and new code finds
-  elements by either (`Key`, `Model::same`, `Model::guid`). A command takes an element by id or GUID (`Guid` reads a number
-  as the id it names, `Model::resolve` swaps it for the GUID after the command, and `Model::check` refuses one left over).
-  A copy is a new element: a new id and a new GUID. IFC writes the GUID as the GlobalId and reads it back. The library has
-  ids and GUIDs too (`library.rs`): each type, material, picture, family, parameter, view filter and template, phase, phase
-  filter, option set and option is an `Entry` of `Model::library`, its id counting down from `LAST_ID` (999999) in the same
-  id space; code names entries as it always has, and a file holds their GUIDs (`Model::to_json`, `names_from_file`). So a
-  new name reference goes in `Element::lib_refs_mut` or `Model::lib_refs_mut`, a new kind of entry in `Kind` and
-  `library_names` (and `copy_definition` for Insert from File), and a new rename calls `Library::renamed`;
-  `Model::sync_library` (after every command) gives new entries theirs. Parts hold their own `id` and `guid` (`Layer`,
-  `Form`, `Symbol`; the `HasPart` trait, listed in `Library::parts` by `parts_now`): an edit that gives a list again keeps
-  them by place (`keep_parts`), the sync gives new ones (and a copy, which holds another's, its own; the one that held it
-  before keeps it). A family's types and parameters are entries (`family: name`), so a component's type and instance values
-  are GUIDs in a file; inside a family, its parts name its parameters as its formulas do. This is the standard for
-  everything new: a new kind of part implements `HasPart` and goes in `parts_now`, `sync_parts` and `forget_parts`.
+- **Every element has an id and a GUID** (`ids.rs`), as Revit's ElementId and UniqueId: the id (six digits from 100000) is for
+  people and may change when an element comes in from another file; the GUID never changes, and anything that points at an
+  element holds it. Library entries (`library.rs`: types, materials, families, phases, …; ids down from 999999) and parts
+  (`HasPart`) have both too. Everything new follows this standard: what to register where is in
+  [crates/core/CLAUDE.md](crates/core/CLAUDE.md#ids-and-guids).
 - **A file is read kindly, a command strictly.** The model's types keep `deny_unknown_fields`, so a misspelled key in a
-  command's params is an error. `Model::read` leaves out of a file what this version doesn't know (`lenient.rs` walks it as
-  the types would read it) and `open` lists it as `left_out`; a file of a newer `format` is refused. A change to what a file
-  holds that an older version would misread (not just a field it can do without) bumps `FORMAT` and adds its step to
-  `Model::migrate`; a new element category goes in `lenient::element` too (a test names any missing).
+  command's params is an error. `Model::read` leaves out of a file what this version doesn't know (`lenient.rs`) and `open`
+  lists it as `left_out`; a file of a newer `format` is refused. A change an older version would misread bumps `FORMAT` and
+  adds a step to `Model::migrate`.
 - **Validate in one place.** Commands build elements; `Model::check` validates the whole model after each command and the
   engine rolls back when it fails. New rules go there, with an error that says what to fix.
 - **Clean-room.** Never copy Autodesk content: no families (`.rfa`), templates, icons, help text, or anything from inside
@@ -43,20 +30,23 @@ and MCP server, and milestone 2, the egui desktop app, are done. What works and 
   public specifications (IFC4 is ISO 16739). A format with no public specification (Revit's `.rvt` and `.rfa`) may be read
   only under the fence in [docs/rvt-provenance.md](docs/rvt-provenance.md): the code is `crates/rvt`, Apache-2.0 only
   because it holds code ported from rvt-rs, `bimcraft-core` never depends on it, and every module and format finding
-  there names its source. Assets are original or openly licensed; the lettering is drawn in code (`font.rs`).
+  there names its source. Assets are original or openly licensed; the lettering of drawings is drawn in code (`font.rs`), the one exception being
+  IBM Plex under the OFL, the interface's font and one text types letter notes in (`assets/fonts`, read by `text.rs`;
+  `NOTICE` and each OFL.txt go in every package); a text type may also name a font the user's system has, read where it is
+  and never bundled or copied into a project.
 - **The core has no UI.** `bimcraft-core` must not depend on a UI toolkit, so front ends stay swappable.
 - **The UI is thin.** `crates/ui-egui` reads `session.model` and changes it only through `Session::execute`, never by editing
   the model. Logic any front end needs (what a plan shows, what's under the cursor) belongs in the core: the canvas draws
   `render::draw` and picks with `Drawing::pick`. UI behaviour is tested with egui_kittest: clicks at model points
   (`BimApp::screen`), buttons by label, keys (`crates/ui-egui/src/tests.rs`).
-- **Only the desktop app phones home, and only through `crates/update`.** The core, the CLI and the MCP server don't depend on it
-  (a test reads their manifests), and a `BimApp` starts with `updates: None`, so no UI test reaches the network; `apps/bimcraft`'s
-  `main` attaches the updater and starts the check on a thread. What comes from the network is hostile: the reply and the download
-  are capped, the installer's address is built from the release's tag and never read from the reply, an asset is taken only if it is
-  named exactly for the version and the kind of install (`Target::asset_name`), uploaded, with a `sha256:` digest, and nothing runs that
-  failed a check. A new
-  check is a pure function with a test, and the network stays behind `Net` (`testing::Fake` in tests; `net::Ureq` is tested against
-  a server on this machine, never GitHub).
+- **Only the desktop app reaches the network, and only through three crates.** `crates/update` is the updater: GitHub's
+  releases, checked at start unless the user turned it off. `crates/assistant` is the AI chat: the provider the user chose, only
+  once they have given a key and sent a message, and what the assistant reads of the open project goes with it. `crates/cowork` is
+  Co-Work: only the host or guests the user chose, by a code or an address, never a server, and discovery stays on the LAN. None
+  is a dependency of the core, the CLI or the MCP server, no other crate may use `ureq`, and a test reads every manifest. What
+  comes from the network is hostile. A `BimApp` starts with `updates: None` and no assistant network, so no test reaches it, and
+  Co-Work's tests stay on this machine's address. The checks are in [crates/update/CLAUDE.md](crates/update/CLAUDE.md),
+  [crates/assistant/CLAUDE.md](crates/assistant/CLAUDE.md) and [crates/cowork/CLAUDE.md](crates/cowork/CLAUDE.md).
 - **Test first.** Write the failing test, watch it fail, then write the code. Drawings and IFC are tested through their output:
   pixels of the PNG, entity references in the STEP file.
 - **Keep the agent docs layered.** This file stays short: the rules, the checks, the conventions and a map of the modules. A
@@ -74,7 +64,7 @@ cargo test --workspace
 ## Looking at the result
 
 After a change, look at what it makes, as the area says. How to do it for each kind of result is in
-[docs/areas/looking-at-results.md](docs/areas/looking-at-results.md): the desktop in both themes (a screenshot of the window,
+[docs/areas/looking-at-results.md](docs/areas/looking-at-results.md): the desktop in its three looks (a screenshot of the window,
 rendered without a display), plans and ceiling plans, the 3D view, scale, detail level and style, schedules, sheets as PDF,
 IFC with IfcOpenShell, structure and the discipline tabs, IFC import. For Revit files see
 [docs/areas/revit-import.md](docs/areas/revit-import.md); for the packages, [docs/areas/packaging.md](docs/areas/packaging.md).
@@ -85,11 +75,10 @@ Millimetres; x east, y north, z up. A project's units (`Model::units`, `units.rs
 drawings, schedules and the desktop format lengths with `Units::length` and areas with `Units::area`, and read typed
 lengths with `Units::parse`; files, JSON and every command stay in millimetres. A project's language (`Model::language`,
 `language.rs`) is what its drawings print and what new names come in: the core passes the English word through
-`Language::word`. The desktop's own words go through `lang::t` and `lang::tf`, so a new label needs a row in `WORDS` in
-`crates/ui-egui/src/lang.rs`, with its Portuguese and its Spanish (and its Chinese in `lang/zh.rs`, which may wait: the window shows English
-until it has one; the core's words are rows in `language.rs`);
-`nothing_a_translated_interface_shows_is_left_in_english` catches a label the table knows that the window forgot to
-translate. The core's messages stay English, because agents read them.
+`Language::word`. The desktop's words go through `lang::t`, `lang::tf` and `lang::tc`. Translations live in
+`translations/project/*.po` and `translations/ui/*.po`, compiled into the app with English fallback. Mark indirectly
+selected English messages with `bimcraft_i18n::msg!` (`ui_msg!` for core-owned interface labels), and run `cargo i18n update`;
+see [translations](docs/areas/translations.md). The core's messages stay English, because agents read them.
 The selection is the model's, not a view's: opening any view (a plan, a section, the 3D view, a sheet, a schedule) keeps it
 (`BimApp::open_sheet`), each view shows it, and a schedule's rows (`schedule::Table::ids`, `elements` in the command's output)
 highlight what's selected and pick what they list.
@@ -98,33 +87,70 @@ Every view has the right-click menu of `context.rs`: an item is an `Action`, off
 
 ## Module map
 
-One line per module: what it owns. Read the module's file and, for the areas it names, the write-up in `docs/areas/`.
+One line per module: what it owns. Read its file and, for the areas it names, the write-up in `docs/areas/`.
 
 `crates/core` (`bimcraft-core`; its own notes: [crates/core/CLAUDE.md](crates/core/CLAUDE.md)):
 
-- `commands.rs`: every command (`ALL`): what the CLI, scripts and MCP run. `engine.rs`: `Session`, which runs them (rollback, undo). `bridge.rs`: the control port's protocol, which the window and `mcp --connect` share.
+- `commands.rs`: every command (`ALL`): what the CLI, scripts and MCP run. `engine.rs`: `Session`, which runs them (rollback, undo). `bridge.rs`: the control port's protocol, which the window and `mcp --connect` share. `cowork.rs`: what Co-Work needs of the engine: the deltas that keep a guest's copy the host's model, a guest's command on the host, each person undoing their own edits ([Co-Work](docs/areas/cowork.md)).
 - `model.rs`: the model: elements, types, `Model::check` and the queries on it. `ids.rs`: element ids and GUIDs. `library.rs`: types, materials and families as entries with ids and GUIDs.
-- `walls.rs` (`walls/index.rs`): wall axes, faces, mitred caps, outlines. `skeleton.rs`: the straight skeleton (roofs by footprint). `ground.rs`: the ground, the surface between the points a survey measured. `stairs.rs`: stairs, ramps, railings. `runs.rs`: beams, pipes, conduits and the other straight runs. `geom.rs`: plan geometry. `snap.rs`: where a picked point lands. Areas: [levels, walls and roofs](docs/areas/levels-walls-roofs.md), [structure and MEP](docs/areas/structure-and-mep.md).
-- `render.rs`: plans (a display list drawn to SVG and PNG, and picking). `view3d.rs`: the 3D scene, its software rasterizer and picking; `view3d/gpu.rs`: its mesh and picking for the graphics card. `sheet.rs`, `pdf.rs`: sheets and their PDF. `font.rs`: our own lettering. Area: [views and graphics](docs/areas/views-and-graphics.md).
-- `graphics.rs`: Visibility/Graphics, view filters and templates (`Look`). `pen.rs`: line weights as pens and the project's Line Weights, widths on paper (paper space and model space: [views and graphics](docs/areas/views-and-graphics.md)). `styles.rs`: Object Styles, each model category's pens cut and seen. `schedule.rs`: schedules ([schedules](docs/areas/schedules.md)). `phasing.rs`: phases and design options ([phasing](docs/areas/phasing.md)). `massing.rs`: what an element made from a mass remembers ([masses](docs/areas/massing.md)).
-- `link.rs`: linked models, the project with other projects' built elements drawn in and never edited ([views and graphics](docs/areas/views-and-graphics.md)).
-- `family.rs`, `csg.rs`, `fixtures.rs`, `favorites.rs`: families, solids cut from solids, the starter fixtures, the user's favorites. `texture.rs`, `paint.rs`: textures and paint. Area: [families](docs/areas/families.md).
-- `ifc.rs`, `import.rs`, `step.rs`: IFC export, IFC import, the STEP files they use. `lenient.rs`: what a file holds that this version doesn't know, found so it can be left out. `cloud.rs`: point clouds read from PTS, XYZ, PLY and LAS ([point clouds](docs/areas/point-clouds.md)). `dxf.rs`, `underlay.rs`, `trace.rs`: CAD drawings read from DXF, one under a plan, and the walls and openings found in it ([CAD drawings](docs/areas/cad-drawings.md)). `insert.rs`, `inquiry.rs`: Insert from File, Select by ID and IDs of Selection. `autosave.rs`: background snapshots. `units.rs`, `language.rs`: units and a project's language. `sample.rs`, `sample/highrise.rs`: the sample house and the benchmark tower. `component_geometry.rs`: family geometry reused within an operation.
-- `tests.rs`, `mep_tests.rs`, `structure_tests.rs`, `autosave_tests.rs`: the engine driven through commands, as a front end drives it.
+- `doors.rs`: generated sectional and roller equipment, using the model's operations and shared opening pieces ([families](docs/areas/families.md)).
+- `walls.rs` (`walls/index.rs`): wall axes, faces, mitred caps, outlines; `walls/compound.rs`: which core runs through a square corner of compound walls. `skeleton.rs`: the straight skeleton (roofs by footprint). `stairs.rs`: stairs, ramps, railings. `rebar.rs`: reinforcing bars, their lengths, weights and tubes. `reinforce.rs`: bars by rules for a beam, a column, a footing and a floor (`reinforce/norm.rs`: NBR 6118's usual limits, as notes). `runs.rs`: beams, pipes, conduits and the other straight runs. `glue.rs`: a strip footing glued to the wall over it, read from their lines and heights. `profiles.rs`: steel sections and catalogue sizes ([structure and MEP](docs/areas/structure-and-mep.md#steel-sections)). `geom.rs`: plan geometry. `align.rs`: pickable alignment edges and the motion between lines. `alignment.rs`: the temporary guides a point being drawn lines up with (smart snapping). `standards.rs`: technical standards (NBR, ISO, ANSI, EU, JIS): line weights, sheets, object styles; their numbers are the contributor's and unchecked. `snap.rs`: where a picked point lands. `sketch.rs`: sketches, lines solved into outlines and holes for floors, ceilings, roofs and shafts. `curves.rs`: the shapes a line takes (polylines, circles, ellipses, splines), split and joined. `draw.rs`: the Draw panel's shapes, what clicks make. Areas: [levels, walls and roofs](docs/areas/levels-walls-roofs.md), [structure and MEP](docs/areas/structure-and-mep.md). `triangulation.rs`: constrained Delaunay triangulation in plan, exact on a 0.01 mm grid (shaped floors' tops: [shape editing](docs/shape-editing.md)).
+- `memory.rs`: what reading a file may take of the machine's memory: a budget from what's free (the apps' meter, `install`),
+  refused up front by the file's size and checked as the reader goes; without a meter, the fixed sizes.
+- `site.rs`: property boundary bearings and validation ([property boundaries](docs/areas/property-boundaries.md)).
+- `background_grid.rs`: view-owned canvas lattices, rotated drawing and grid snapping ([the desktop](docs/areas/desktop.md)).
+- `handles.rs`: the handles a selected wall or column has in a 3D view: where they stand, the command a drag makes, how it would stand meanwhile ([the desktop](docs/areas/desktop.md)).
+- `workplane.rs`: what the 3D view draws on: its work plane (a level, a reference plane, a surface or three points, at any angle) and the face under the cursor. `triad.rs`: the 3D view's axis triad, its picks and turns. `hosting.rs`: hosted components, reference planes ([families](docs/areas/families.md#where-the-code-lives)).
+- `render.rs`: plans (a display list drawn to SVG and PNG, and picking); `render/regions.rs`: region and model foreground compositing; `render/dimensions.rs`: dimensions, as their types say. `dims.rs`: dimension types, and how the Dimension tool lays one. `dims3d.rs`: dimensions in 3D views. `constraints.rs`: locked and equal dimensions kept after each command. `view3d.rs`: the 3D scene, its software rasterizer and picking; `view3d/gpu.rs`: its mesh and picking for the graphics card; `view3d/caps.rs`: what a section box cuts, filled. `gltf.rs`: the scene as glTF 2.0 binary (.glb). `sheet.rs`, `pdf.rs`: sheets and their PDF. `titleblock.rs`: title blocks of the project's own, their fields filled in, and read from DXF. `font.rs`: our own lettering. `text.rs`: text types, their fonts (the system's, IBM Plex and our lettering), a note's formatting runs and its layout; `text/system.rs`: the system's fonts, listed from their headers. Area: [views and graphics](docs/areas/views-and-graphics.md).
+- `graphics.rs`: Visibility/Graphics, view filters and templates (`Look`). `pen.rs`: line weights as pens and the project's Line Weights, widths on paper (paper space and model space: [views and graphics](docs/areas/views-and-graphics.md)). `styles.rs`: Object Styles, each model category's pens cut and seen. `lines.rs`: line patterns, line styles and detail lines. `fills.rs`: fill patterns, filled region types and filled regions; `fills/make.rs`: a pattern made of lines drawn; `pat.rs`: PAT files. `groups.rs`: detail groups and repeating details. `schedule.rs`: schedules ([schedules](docs/areas/schedules.md)); `xlsx.rs`: a one-sheet workbook they export to. `selection.rs`: Filter on a selection, by category or a parameter they share. `phasing.rs`: phases and design options ([phasing](docs/areas/phasing.md)). `massing.rs`: what an element made from a mass remembers ([masses](docs/areas/massing.md)).
+- `export/`: the export engine, which `export` and `save` go through: each format behind one trait (`export/formats/`), pages laid out (`page.rs`), file names from templates (`naming.rs`); tests in `export_tests.rs` ([export](docs/areas/export.md)). `printset.rs`: print sets, Revit's View/Sheet Sets. `publish.rs`: publishing sets, the Publisher's presets, and `publish`. `ods.rs`: OpenDocument spreadsheets, a schedule as one. `ifc/v2x3.rs`: IFC2x3, the IFC4 writer's file turned as it is written.
+- `link.rs`: linked models, other projects' built elements drawn in, never edited; `elevation.rs`: elevations looking at a picked edge ([views and graphics](docs/areas/views-and-graphics.md)).
+- `dxf.rs`: DXF drawings read from the public reference; `underlay.rs`, `trace.rs`: one under a plan, traced ([CAD drawings](docs/areas/cad-drawings.md)). `ground.rs`: surveyed ground. `bill.rs`: bills of quantities ([schedules](docs/areas/schedules.md)). `cad.rs`: the drawings a project holds, and how an import colours, pens and dashes them ([CAD import](docs/areas/cad-import.md)). `mesh_in.rs`: OBJ and glTF read as families ([families](docs/areas/families.md#imported-3d-models)).
+- `family.rs`, `family/*.rs`, `csg.rs`, `fixtures.rs`, `favorites.rs`, `shared_parameters.rs`: families, their checks, solids cut from solids, starter fixtures, favorites, shared parameters ([each module](docs/areas/families.md#where-the-code-lives)). `texture.rs`, `paint.rs`: textures and paint.
+- `parameters.rs`, `parameters/table.rs`: project parameters' kinds, scopes and types' values, `.bimparams` dictionaries, and parameter tables read and written (CSV, .xlsx) ([parameters](docs/areas/parameters.md)). `project_info.rs`: the project's information (Revit's Project Information), an element of category `project` that title blocks and IFC read.
+- `adaptive/`: adaptive families ([each module](docs/areas/adaptive-families.md)).
+- `files.rs`: the extensions of BIMCraft's files: `.bimc` projects, `.bimb` backups, `.bimt` templates, `.bimf` families, and the older `.bimcraft` and `.json` still read ([packaging](docs/areas/packaging.md)).
+- `ifc.rs`, `import.rs`, `step.rs`: IFC export, IFC import, the STEP files they use ([grid exchange](docs/areas/ifc-exchange.md)); `import/shapes.rs`: turned and swept solids and advanced B-reps ([IFC import](docs/areas/ifc-import.md)); `ifc/classes.rs`: IFC4's element classes, which a generic family from IFC goes back out as ([families](docs/areas/families.md)). `lenient.rs`: what a file holds that this version doesn't know, found so it can be left out. `cloud.rs`: point clouds read from PTS, XYZ, PLY and LAS, and E57 (`cloud/e57.rs`) ([point clouds](docs/areas/point-clouds.md)). `insert.rs`, `inquiry.rs`: Insert from File, Select by ID and IDs of Selection. `autosave.rs`: background snapshots. `units.rs`, `language.rs`: units and a project's language. `sample.rs`, `sample/highrise.rs`, `sample/tower.rs`: the sample house and the benchmark towers. `component_geometry.rs`: family geometry reused within an operation.
+- The spatial core ([plan](docs/spatial-core-plan.md); each module in [crates/core/CLAUDE.md](crates/core/CLAUDE.md)): `derived.rs`, `rooms.rs`, `shared.rs`, `bounds.rs`, `family/bounds.rs`, `ids/revisions.rs`, `view3d/update.rs`, `view3d/fragments.rs`, `oracle_tests.rs`, `crosscheck.rs`.
+- `symbol_set.rs`: symbol sets, families of plan symbols loaded on demand by the `symbol_set` command (the AREI/RGIE's, `data/arei-symbols.json`; [families](docs/areas/families.md)).
+- `hydrant.rs`: the `hydrant_size` command, hydrants and hose reels by IT 22/2025 (Tabelas 1 to 3, Hazen-Williams).
+- `loads.rs`: the `load_points` command, a dwelling's lighting and outlets by room, by rule sets in `data/load-points.json` (NBR 5410 item 9.5.2 first).
+- `dr.rs`: the `dr_check` command, which circuits NBR 5410 asks a 30 mA residual-current device for.
+- `bath.rs`: the `bath_volumes` command, the volumes around a bathtub or a shower and what may stand in each (NBR 5410 item 9.1, `data/bath-volumes.json`).
+- `demand.rs`: the `demand` command, an installation's demand and service category by a utility's own standard (CPFL's GED 13; Enel's ET 1569 and Celesc's N-321.0001 by installed load).
+- `dps.rs`: the `dps_check` command, surge protection of a power line by NBR 5410 (when, where, connection, currents).
+- `water.rs`, `reservoir.rs`: `water_size`, cold water by NBR 5626, and `reservoir_size`, its reservation. `plumbing.rs`: the fixtures library (`data/plumbing.json`) they and `drain_size` read.
+- `storm.rs`: the `storm_size` command, storm drains by NBR 10844 (Manning, the downpipe abacuses).
+- `drainage.rs`: the `drain_size` and `vent_size` commands, sanitary drains and vents by NBR 8160's tables.
+- `network.rs`: the `network` command, the pipe network worked out from pipes' ends and pipe connectors, never stored (nodes, edges, open ends, warnings).
+- `conduit.rs`: the `conduit_fill` command, a conduit's fill by NBR 5410 (makers' catalogues in `conduit/tables.rs`).
+- `panel_schedule.rs`, `sheet/panel.rs`: panel schedules, drawn on sheets.
+- `electrical.rs`: the electrical settings: voltages, distribution systems, wire types, panels and circuits (the `voltage`, `distribution_system`, `wire_type`, `panel` and `circuit` commands; starter set in `data/electrical.json`; [structure and MEP](docs/areas/structure-and-mep.md)).
+- `nbr5410.rs`: the `circuit` command's sizing by NBR 5410 (tables in `nbr5410/tables.rs`; [structure and MEP](docs/areas/structure-and-mep.md)).
+- `timber.rs`: the `timber_framing` command, a straight isolated wall's studs, plates and clear bays round one window, read and never built ([structure and MEP](docs/areas/structure-and-mep.md)).
+- `coordinates.rs`: the Project Base Point, the Survey Point and the project's locations, and the transform to shared coordinates ([coordinates](docs/areas/coordinates.md)).
+- `tests.rs`, `mep_tests.rs`, `structure_tests.rs`, `eberick_tests.rs`, `reinforce_tests.rs`, `autosave_tests.rs`, `*_tests.rs`: the engine driven through commands, as a front end drives it.
+
+Plugins: [notes](crates/plugin/CLAUDE.md), [sdk](crates/plugin-sdk/CLAUDE.md), [area](docs/areas/plugins.md), one `unsafe`.
 
 `crates/ui-egui` (`bimcraft-ui-egui`, a thin shell over the core; notes: [crates/ui-egui/CLAUDE.md](crates/ui-egui/CLAUDE.md); area: [the desktop](docs/areas/desktop.md)):
 
-- `lib.rs`: the app: ribbon, menus, tools, tabs, files. `canvas.rs`: the plan canvas (picks, tools, grips). `orbit.rs`: the 3D view; `gpu.rs` and `gpu.wgsl`: drawing it on the graphics card. `section.rs`, `paper.rs`: sections and sheets. `properties.rs`: the Properties palette. `browser.rs`: the Project Browser. `dock.rs`: docking palettes and floating views. `settings.rs`: File > Settings. `lineweights.rs`, `objectstyles.rs`: Manage > Line Weights and Object Styles. `start.rs`: the start page. `context.rs`: the right-click menu. `dialog.rs`: the file dialogs, on a thread of their own. `window.rs`: the window's size, kept and fitted to its screen. `control.rs`: the control port, agents working on the window's project.
-- `graphics.rs`, `footer.rs`, `phasing.rs`: Visibility/Graphics, the view control bar, Phasing. `inquiry.rs`, `recent.rs`, `autosave.rs`, `updates.rs`, `revit.rs`: Manage > Inquiry, Open Recent, autosave and recovery, the update banner, Revit files.
-- `links.rs`, `trace.rs`: Link Model and Link CAD; Trace Walls, where a drawing's layers are put right and its walls are found and built ([CAD drawings](docs/areas/cad-drawings.md)). `prices.rs`: Price List, a published price list as the project's data ([schedules](docs/areas/schedules.md)). `structure.rs`, `mep.rs`: the Structure tab and the discipline tabs. `editor.rs`, `favorites.rs`: the Family Editor and Favorites. `style.rs`: look and feel, light and dark. `icons.rs`: the icons, drawn in code (`--example icon_catalog` exports them). `lang.rs`: every label's Portuguese and Spanish (`WORDS`), `lang/zh.rs` its Chinese. `tests.rs`, `tests/`: the app driven as a user does.
+- Its module map, a line for each file, is in [crates/ui-egui/CLAUDE.md](crates/ui-egui/CLAUDE.md): a new module of the window adds its line there.
+
+`crates/i18n` (`bimcraft-i18n`; [notes](crates/i18n/CLAUDE.md)): embedded lookup, build-time PO compilation and the
+`cargo i18n` extraction, merge and validation tools. Area: [translations](docs/areas/translations.md).
 
 `crates/update` (the updater, the only code that phones home; notes: [crates/update/CLAUDE.md](crates/update/CLAUDE.md); area: [updates](docs/areas/updates.md)): `updater.rs` the state the banner draws; `net.rs` HTTPS to GitHub; `detect.rs` which install this is; `install.rs` Windows, `appimage.rs` Linux, `macos.rs` macOS; `exec.rs`, `prefs.rs`, `testing.rs`.
 
-`crates/dwg` (`bimcraft-dwg`, the DWG bridge; notes: [crates/dwg/CLAUDE.md](crates/dwg/CLAUDE.md): it turns a DWG into DXF bytes through `acadrust`, MPL-2.0 and unmodified, and holds that dependency alone — the core never depends on it, and the applications hand it to `Session::dwg` behind their `dwg` feature; [CAD drawings](docs/areas/cad-drawings.md), `NOTICE`).
+`crates/assistant` (`bimcraft-assistant`, the AI chat, which the core never depends on; notes: [crates/assistant/CLAUDE.md](crates/assistant/CLAUDE.md); area: [the assistant](docs/areas/assistant.md)): `anthropic.rs`, `openai.rs`, `gemini.rs` the provider clients (pure: a conversation to a request, a reply to a `Reply`); `net.rs` HTTPS to the three API hosts; `seal.rs` the saved key, scrambled under a secret built in; `tools.rs` the model's tools, run through `bridge::run`; `chat.rs` the turn loop on a `Session`; `testing.rs` a fake network.
 
-`crates/rvt` (the Revit file reader, Apache-2.0 only; notes: [crates/rvt/CLAUDE.md](crates/rvt/CLAUDE.md); area: [Revit files](docs/areas/revit-import.md)): one module for each part of a file (`container`, `gzip`, `records`, `schema`, `inventory`) and for each element kind it imports (`walls`, `floors`, `roofs`, `columns`, `openings`, `rooms`), joined by `import.rs`.
+`crates/cowork` (`bimcraft-cowork`, Co-Work's transport, which the core never depends on; notes: [crates/cowork/CLAUDE.md](crates/cowork/CLAUDE.md); area: [Co-Work](docs/areas/cowork.md)): `code.rs` the join code; `noise.rs` the handshake and the ciphers; `wire.rs` frames and the writer thread; `host.rs` and `guest.rs` the two sides; `discovery.rs` finding hosts on the LAN; `knock.rs` asking to join without the code, by six digits both compare; `live.rs` a session on a `Session`, the host's and a guest's, which the window pumps.
 
-`apps/bimcraft` (the desktop: `main.rs`, `startup.rs`: the log and the graphics fallback) and `apps/bimcraft-cli` (`main.rs`; `mcp.rs` the MCP server; `window.rs`: `mcp --connect`; `revit.rs`); notes: [apps/CLAUDE.md](apps/CLAUDE.md). More: `packaging/` (installers and packages: [packaging](docs/areas/packaging.md)), `docs/` (design notes), `.github/workflows/` (CI on every pull request, and the release).
+`crates/dwg` (`bimcraft-dwg`, the DWG bridge, which the core never depends on; notes: [crates/dwg/CLAUDE.md](crates/dwg/CLAUDE.md); area: [CAD import](docs/areas/cad-import.md)): a DWG as the DXF the core reads, through acadrust (MPL-2.0, unmodified), in a child process of the app (`in_child`, `child_main`); the apps hand a `Session` its `reader`.
+
+`crates/rvt` (the Revit file reader, Apache-2.0 only; notes: [crates/rvt/CLAUDE.md](crates/rvt/CLAUDE.md); area: [Revit files](docs/areas/revit-import.md)): one module for each part of a file (`container`, `gzip`, `records`, `schema`, `inventory`) and for each element kind it imports (`walls`, `floors`, `roofs`, `columns`, `openings`, `rooms`, `pipes`, `ducts`, `beams`, `footings`, `framing`, `generic`), joined by `import.rs`.
+
+`apps/bimcraft` (the desktop: `main.rs`, `startup.rs`: the log and the graphics fallback) and `apps/bimcraft-cli` (`main.rs`; `mcp.rs` the MCP server; `window.rs`: `mcp --connect`; `revit.rs`); notes: [apps/CLAUDE.md](apps/CLAUDE.md). More: `packaging/` (installers: [packaging](docs/areas/packaging.md)), `docs/` (design notes), `.github/workflows/` (CI on every pull request, and the release).
 
 ## Keep the agent docs layered
 

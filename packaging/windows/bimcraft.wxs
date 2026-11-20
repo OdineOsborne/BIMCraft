@@ -9,7 +9,8 @@
 
   It works as CADCraft's installer does. It installs for every user into Program Files\BIMCraft, or into the
   folder chosen on the wizard's folder page (silent: INSTALLFOLDER="D:\Apps\BIMCraft"), which an upgrade keeps:
-  the app, the CLI and the licences, a Start menu shortcut, .bimcraft projects opening in BIMCraft, and
+  the app, the CLI and the licences, a Start menu shortcut, projects (.bimc, .bimt, .bimb and the earlier
+  .bimcraft) and families (.bimf) opening in BIMCraft, and
   BIMCraft offered under "Open with" for .ifc files, without taking over the user's default app. A
   newer version upgrades an older one in place, and so does a rebuild of the same version.
 
@@ -34,7 +35,15 @@
     <Property Id="ARPHELPLINK" Value="https://github.com/IPedrax/BIMCraft/issues" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="BIMCraft" />
+      <Directory Id="INSTALLFOLDER" Name="BIMCraft">
+        <!-- The fonts' licence, where NOTICE says it is: fonts\ibm-plex-sans\OFL.txt and fonts\ibm-plex-mono\OFL.txt.
+             Not "FontsFolder": that Id is Windows Installer's own for the system Fonts folder, and a directory of that name
+             is taken for it, so the licences did not land in the folder that was chosen. -->
+        <Directory Id="LicenceFontsFolder" Name="fonts">
+          <Directory Id="PlexSansFolder" Name="ibm-plex-sans" />
+          <Directory Id="PlexMonoFolder" Name="ibm-plex-mono" />
+        </Directory>
+      </Directory>
     </StandardDirectory>
 
     <!-- Where the previous install put BIMCraft, from the key the app component writes, so an upgrade (the wizard's, or an
@@ -65,8 +74,25 @@
         <File Id="BimcraftExe" Source="$(var.BinDir)\bimcraft.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BIMCraft" Description="Building information modeling" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon.ico" Advertise="yes" />
         </File>
+        <!-- A project is a .bimc. A .bimt (a template) and a .bimb (a backup) open the same way,
+             and so does the .bimcraft of versions before the short names. A content type is registered once, with the
+             first extension. -->
         <ProgId Id="BIMCraft.Project" Description="BIMCraft project" Icon="BIMCraftIcon.ico" Advertise="yes">
-          <Extension Id="bimcraft" ContentType="application/x-bimcraft">
+          <Extension Id="bimc" ContentType="application/x-bimcraft">
+            <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
+          </Extension>
+          <Extension Id="bimt">
+            <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
+          </Extension>
+          <Extension Id="bimb">
+            <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
+          </Extension>
+          <Extension Id="bimcraft">
+            <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="BIMCraft.Family" Description="BIMCraft family" Icon="BIMCraftIcon.ico" Advertise="yes">
+          <Extension Id="bimf" ContentType="application/x-bimcraft-family">
             <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
           </Extension>
         </ProgId>
@@ -89,6 +115,12 @@
       </Component>
       <Component Id="NoticeFile" Directory="INSTALLFOLDER">
         <File Id="Notice" Source="NOTICE" KeyPath="yes" />
+      </Component>
+      <Component Id="PlexSansLicence" Directory="PlexSansFolder">
+        <File Id="PlexSansOfl" Source="assets\fonts\ibm-plex-sans\OFL.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="PlexMonoLicence" Directory="PlexMonoFolder">
+        <File Id="PlexMonoOfl" Source="assets\fonts\ibm-plex-mono\OFL.txt" KeyPath="yes" />
       </Component>
       <!-- A shortcut that isn't advertised needs a registry key path, and in a profile folder (the
            desktop, which per-machine is the Public one) that key must be under HKCU (ICE38, ICE43, ICE57). -->

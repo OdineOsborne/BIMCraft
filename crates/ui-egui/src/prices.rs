@@ -126,7 +126,7 @@ impl BimApp {
     pub(crate) fn price_read(&mut self) {
         let Some(mut d) = self.price_dialog.take() else { return };
         d.error.clear();
-        match self.session.execute("price_columns", &json!({"path": d.path.trim(), "separator": d.separator})) {
+        match self.exec("price_columns", &json!({"path": d.path.trim(), "separator": d.separator})) {
             Ok(r) => {
                 d.separator = r["separator"].as_str().unwrap_or(";").to_string();
                 d.columns = strings(&r["columns"]);
@@ -433,7 +433,7 @@ impl BimApp {
     }
     /// The bill of quantities, read again from the project: on opening it and after anything that changes it.
     pub(crate) fn bill_read(&mut self) {
-        let reply = self.session.execute("bill_of_quantities", &json!({}));
+        let reply = self.exec("bill_of_quantities", &json!({}));
         if let Some(d) = &mut self.price_dialog {
             match reply {
                 Ok(b) => d.bill = Some(b),
@@ -515,7 +515,7 @@ impl BimApp {
             let dialog = rfd::AsyncFileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name);
             self.ask_file(ctx, dialog, true, move |app, path| {
                 let shown = path.to_string_lossy().into_owned();
-                match app.session.execute("bill_of_quantities", &json!({key: shown})) {
+                match app.exec("bill_of_quantities", &json!({key: shown})) {
                     Ok(_) => app.status = crate::Status { text: tf("Saved {}.", &[&shown]), error: false },
                     Err(why) => {
                         if let Some(d) = &mut app.price_dialog {

@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use bimcraft_i18n::msg;
+
 use crate::model::{Id, Model};
 
 /// How many codes one element carries at most: more is a typing accident, not an estimate.
@@ -261,13 +263,13 @@ pub fn bill_csv(m: &Model, b: &Bill) -> String {
     let w = |e: &str| m.language.word(e).to_string();
     let c = Csv::of(m);
     let mut out = c.row(&[
-        w("No."),
-        w("Code"),
-        w("Description"),
-        w("Unit"),
-        w("Quantity"),
-        format!("{} ({})", w("Unit Price"), b.currency),
-        format!("{} ({})", w("Amount"), b.currency),
+        w(msg!("No.")),
+        w(msg!("Code")),
+        w(msg!("Description")),
+        w(msg!("Unit")),
+        w(msg!("Quantity")),
+        format!("{} ({})", w(msg!("Unit Price")), b.currency),
+        format!("{} ({})", w(msg!("Amount")), b.currency),
     ]);
     for (n, l) in b.lines.iter().enumerate() {
         out.push_str(&c.row(&[
@@ -303,7 +305,7 @@ pub fn bill_csv(m: &Model, b: &Bill) -> String {
     out.push_str(&c.row(&[
         String::new(),
         String::new(),
-        c.text(&w("Total")),
+        c.text(&w(msg!("Total"))),
         String::new(),
         String::new(),
         String::new(),
@@ -316,7 +318,13 @@ pub fn bill_csv(m: &Model, b: &Bill) -> String {
 pub fn spec_csv(m: &Model, b: &Bill) -> String {
     let w = |e: &str| m.language.word(e).to_string();
     let c = Csv::of(m);
-    let mut out = c.row(&[w("No."), w("Code"), w("Description"), w("Unit"), format!("{} ({})", w("Unit Price"), b.currency)]);
+    let mut out = c.row(&[
+        w(msg!("No.")),
+        w(msg!("Code")),
+        w(msg!("Description")),
+        w(msg!("Unit")),
+        format!("{} ({})", w(msg!("Unit Price")), b.currency),
+    ]);
     for (n, l) in b.lines.iter().enumerate() {
         out.push_str(&c.row(&[(n + 1).to_string(), c.text(&l.code), c.text(&l.description), c.text(&l.unit), c.num(l.price, 2)]));
     }

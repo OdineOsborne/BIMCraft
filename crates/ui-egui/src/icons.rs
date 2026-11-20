@@ -28,8 +28,10 @@ icon_names! {
     Door,
     Window,
     Room,
+    RoomSeparator,
     Level,
     Grid,
+    BackgroundGrid,
     Undo,
     Redo,
     Open,
@@ -38,8 +40,6 @@ icon_names! {
     ZoomIn,
     ZoomOut,
     ThinLines,
-    LineWeights,
-    ObjectStyles,
     Schedule,
     CloseInactive,
     Interface,
@@ -64,10 +64,12 @@ icon_names! {
     View3D,
     Section,
     Elevation,
+    Camera,
     Sheet,
     PlaceView,
     Column,
     Beam,
+    Rebar,
     Footing,
     WallFooting,
     Pipe,
@@ -95,8 +97,16 @@ icon_names! {
     Theme,
     Text,
     Spot,
+    Coordinates,
+    ProjectNorth,
+    SpotSlope,
+    SpotCoordinate,
+    ConvertLines,
     Angular,
     Radial,
+    Linear,
+    Diameter,
+    ArcLength,
     Crop,
     Units,
     Line,
@@ -104,11 +114,18 @@ icon_names! {
     Flip,
     Attach,
     Detach,
+    Ai,
     Floor,
+    WorkPlane,
+    RefPlane,
     Ceiling,
     Shaft,
     Mass,
     SlopeArrow,
+    ModifySubElements,
+    AddPoint,
+    AddSplitLine,
+    ResetShape,
     Ramp,
     Railing,
     ExtrusionRoof,
@@ -118,7 +135,11 @@ icon_names! {
     Component,
     LoadFamily,
     Link,
+    PointCloud,
+    ImportCad,
+    LinkCad,
     Parameters,
+    ProjectInfo,
     Measure,
     Snaps,
     Visibility,
@@ -141,10 +162,52 @@ icon_names! {
     Search,
     Legend,
     Home,
-    Back,
     NewFile,
     Code,
     Check,
+    Keyboard,
+    Back,
+    LineWeights,
+    ObjectStyles,
+    Rectangle,
+    FilledRegion,
+    MaskingRegion,
+    FillPatterns,
+    AnnotationSettings,
+    LinePatterns,
+    Circle,
+    Inscribed,
+    Circumscribed,
+    CentreArc,
+    TangentArc,
+    Fillet,
+    Spline,
+    FitSpline,
+    Ellipse,
+    PartialEllipse,
+    Polyline,
+    PickLines,
+    JoinPolyline,
+    ExplodePolyline,
+    TrimSingle,
+    TrimMultiple,
+    Insulation,
+    RevisionCloud,
+    Linework,
+    DetailGroup,
+    CreateGroup,
+    RepeatingDetail,
+    PickFaces,
+    AddVertex,
+    DeleteVertex,
+    ConvertSpline,
+    PointElement,
+    MakeAdaptive,
+    CreateForm,
+    FamilyTypes,
+    LoadIntoProject,
+    LoadIntoProjectClose,
+    Cowork,
 }
 
 /// A single unfilled contour in grid coordinates, shared by egui and the catalog.
@@ -199,10 +262,26 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(8.0, 10.0), (16.0, 10.0)]);
             g.line(&[(10.0, 14.0), (14.0, 14.0)]);
         }
+        Icon::RoomSeparator => {
+            // Two rooms' corners, and the separation line between them, dashed.
+            g.line(&[(4.0, 4.0), (20.0, 4.0)]);
+            g.line(&[(4.0, 20.0), (20.0, 20.0)]);
+            g.line(&[(4.0, 4.0), (4.0, 20.0)]);
+            g.line(&[(20.0, 4.0), (20.0, 20.0)]);
+            for (a, b) in [(4.5, 7.5), (10.5, 13.5), (16.5, 19.5)] {
+                g.line(&[(12.0, a), (12.0, b)]);
+            }
+        }
         Icon::Level => {
             // The level head is clear of the datum until its tip, with a balanced line.
             g.line(&[(3.0, 16.0), (21.0, 16.0)]);
             g.closed(&[(12.0, 7.0), (20.0, 7.0), (16.0, 16.0)]);
+        }
+        Icon::BackgroundGrid => {
+            for at in [4.0, 12.0, 20.0] {
+                g.line(&[(at, 4.0), (at, 20.0)]);
+                g.line(&[(4.0, at), (20.0, at)]);
+            }
         }
         Icon::Grid => {
             // A centered grid bubble on its datum axis.
@@ -262,18 +341,6 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(3.0, 6.0), (21.0, 6.0)]);
             g.line(&[(3.0, 12.0), (21.0, 12.0)]);
             g.line(&[(3.0, 18.0), (21.0, 18.0)]);
-        }
-        Icon::LineWeights => {
-            // Three pens, each heavier than the one above: a line, a thin bar and a thick one (one pen, so weight is drawn as height).
-            g.line(&[(3.0, 5.0), (21.0, 5.0)]);
-            g.closed(&[(3.0, 9.0), (21.0, 9.0), (21.0, 12.0), (3.0, 12.0)]);
-            g.closed(&[(3.0, 15.0), (21.0, 15.0), (21.0, 21.0), (3.0, 21.0)]);
-        }
-        Icon::ObjectStyles => {
-            // A wall cut, hatched, and a lighter one seen beyond it.
-            g.closed(&[(4.0, 4.0), (10.0, 4.0), (10.0, 20.0), (4.0, 20.0)]);
-            g.line(&[(4.0, 20.0), (10.0, 4.0)]);
-            g.closed(&[(14.0, 8.0), (20.0, 8.0), (20.0, 20.0), (14.0, 20.0)]);
         }
         Icon::Schedule => {
             g.closed(&[(3.0, 4.0), (21.0, 4.0), (21.0, 20.0), (3.0, 20.0)]);
@@ -387,6 +454,112 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(5.0, 21.0), (5.0, 5.0), (21.0, 5.0)]);
             g.line(&[(5.0, 5.0), (2.0, 2.0)]);
         }
+        Icon::RevisionCloud => {
+            // A cloud: scallops bulging out round a rectangle, each arc from one corner of the last.
+            for x in [6.0, 10.0, 14.0, 18.0] {
+                g.arc((x, 6.0), 2.0, 180.0, 360.0);
+                g.arc((x, 18.0), 2.0, 0.0, 180.0);
+            }
+            for y in [8.0, 12.0, 16.0] {
+                g.arc((20.0, y), 2.0, -90.0, 90.0);
+                g.arc((4.0, y), 2.0, 90.0, 270.0);
+            }
+        }
+        Icon::DetailGroup | Icon::CreateGroup => {
+            // Lines and a note, held in a dashed frame; to create one, a plus at its corner.
+            for (a, b) in [((3.0, 3.0), (21.0, 3.0)), ((21.0, 3.0), (21.0, 21.0)), ((21.0, 21.0), (3.0, 21.0)), ((3.0, 21.0), (3.0, 3.0))] {
+                let (dx, dy) = ((b.0 - a.0) / 7.0, (b.1 - a.1) / 7.0);
+                for k in [0.0, 2.0, 4.0, 6.0] {
+                    g.line(&[(a.0 + dx * k, a.1 + dy * k), (a.0 + dx * (k + 1.0), a.1 + dy * (k + 1.0))]);
+                }
+            }
+            g.line(&[(7.0, 16.0), (13.0, 8.0)]);
+            g.line(&[(7.0, 8.0), (13.0, 8.0)]);
+            if icon == Icon::CreateGroup {
+                g.line(&[(17.0, 13.0), (17.0, 21.0)]);
+                g.line(&[(13.0, 17.0), (21.0, 17.0)]);
+            } else {
+                g.line(&[(15.0, 16.0), (18.0, 16.0)]);
+            }
+        }
+        Icon::PickFaces => {
+            // A mass in plan, one of its faces picked: a wall standing on it, its two faces along the edge.
+            g.closed(&[(4.0, 8.0), (20.0, 8.0), (20.0, 20.0), (4.0, 20.0)]);
+            g.closed(&[(4.0, 3.0), (20.0, 3.0), (20.0, 6.0), (4.0, 6.0)]);
+            g.line(&[(12.0, 11.0), (12.0, 17.0)]);
+            g.line(&[(9.0, 14.0), (15.0, 14.0)]);
+        }
+        Icon::RepeatingDetail => {
+            // A brick course: the same block again and again along a line.
+            g.line(&[(2.0, 19.0), (22.0, 19.0)]);
+            for x in [3.0, 10.0, 17.0] {
+                g.closed(&[(x, 9.0), (x + 4.5, 9.0), (x + 4.5, 16.0), (x, 16.0)]);
+            }
+        }
+        Icon::Linework => {
+            // A wall in plan, its top edge drawn heavy and its bottom one dashed: each edge in a style of the view's own.
+            g.closed(&[(3.0, 6.0), (21.0, 6.0), (21.0, 9.0), (3.0, 9.0)]);
+            g.line(&[(3.0, 9.0), (3.0, 18.0)]);
+            g.line(&[(21.0, 9.0), (21.0, 18.0)]);
+            for x in [3.0, 10.0, 17.0] {
+                g.line(&[(x, 18.0), (x + 4.0, 18.0)]);
+            }
+        }
+        Icon::Insulation => {
+            // Batt insulation: loops across, between its two faces.
+            g.line(&[(2.0, 4.0), (22.0, 4.0)]);
+            g.line(&[(2.0, 20.0), (22.0, 20.0)]);
+            let steps = if compact { 2 } else { 3 };
+            let pitch = 16.0 / steps as f32;
+            let loops: Vec<(f32, f32)> = (0..=steps * 24)
+                .map(|k| {
+                    let th = TAU * k as f32 / 24.0;
+                    (4.0 + pitch * th / TAU - pitch * 0.6 * th.sin(), 12.0 + 6.0 * th.cos())
+                })
+                .map(|(x, y)| (x.clamp(2.0, 22.0), y))
+                .collect();
+            g.line(&loops);
+        }
+        Icon::AddVertex => {
+            // A polyline, and a grip with a plus where a corner goes.
+            g.line(&[(3.0, 19.0), (10.0, 9.0), (21.0, 15.0)]);
+            g.closed(&[(8.0, 7.0), (12.0, 7.0), (12.0, 11.0), (8.0, 11.0)]);
+            g.line(&[(17.0, 3.0), (17.0, 9.0)]);
+            g.line(&[(14.0, 6.0), (20.0, 6.0)]);
+        }
+        Icon::DeleteVertex => {
+            // A polyline straightened where a corner was, and a minus.
+            g.line(&[(3.0, 19.0), (21.0, 15.0)]);
+            g.closed(&[(8.0, 15.0), (12.0, 15.0), (12.0, 19.0), (8.0, 19.0)]);
+            g.line(&[(14.0, 6.0), (20.0, 6.0)]);
+            if !compact {
+                g.line(&[(5.5, 15.0), (10.0, 9.0), (13.0, 10.5)]);
+            }
+        }
+        Icon::ConvertSpline => {
+            // A spline, and arrows turning one way and back: from points on it to points off it.
+            g.cubic([(3.0, 15.0), (7.0, 6.0), (11.0, 22.0), (15.0, 13.0)]);
+            g.circle((3.0, 15.0), 1.5);
+            g.closed(&[(13.5, 11.5), (16.5, 11.5), (16.5, 14.5), (13.5, 14.5)]);
+            g.arc((18.0, 7.0), 3.5, 180.0, 450.0);
+            g.line(&[(14.5, 4.5), (14.5, 7.0), (17.0, 7.0)]);
+        }
+        Icon::TrimSingle => {
+            // A boundary, and a line reaching to it.
+            g.line(&[(19.5, 3.0), (19.5, 21.0)]);
+            g.line(&[(3.0, 12.0), (16.5, 12.0)]);
+            g.line(&[(13.5, 9.0), (16.5, 12.0), (13.5, 15.0)]);
+        }
+        Icon::TrimMultiple => {
+            // A boundary, and two lines reaching to it.
+            g.line(&[(19.5, 3.0), (19.5, 21.0)]);
+            g.line(&[(3.0, 7.0), (16.5, 7.0)]);
+            g.line(&[(3.0, 17.0), (16.5, 17.0)]);
+            if !compact {
+                g.line(&[(13.5, 4.0), (16.5, 7.0), (13.5, 10.0)]);
+                g.line(&[(13.5, 14.0), (16.5, 17.0), (13.5, 20.0)]);
+            }
+        }
         Icon::Split => {
             // Two separated segments with a narrow cut mark.
             g.closed(&[(3.0, 8.0), (9.0, 8.0), (9.0, 16.0), (3.0, 16.0)]);
@@ -444,6 +617,12 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(7.0, 10.0), (12.0, 3.0), (17.0, 10.0)]);
             g.circle((12.0, 16.0), 5.0);
         }
+        Icon::Camera => {
+            // A camera body with its lens, and the viewfinder hump on top.
+            g.closed(&[(3.0, 8.0), (7.5, 8.0), (9.5, 4.5), (14.5, 4.5), (16.5, 8.0), (21.0, 8.0), (21.0, 19.0), (3.0, 19.0)]);
+            g.circle((12.0, 13.75), 3.6);
+            g.circle((12.0, 13.75), 1.6);
+        }
         Icon::Sheet => {
             // A drawing sheet and title block; shared edges are drawn once.
             g.closed(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)]);
@@ -494,6 +673,13 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
                 (10.0, 7.0),
                 (4.0, 7.0),
             ]);
+        }
+        Icon::Rebar => {
+            // A stirrup round four bars.
+            g.closed(&[(5.0, 5.0), (19.0, 5.0), (19.0, 19.0), (5.0, 19.0)]);
+            for (x, y) in [(8.5, 8.5), (15.5, 8.5), (8.5, 15.5), (15.5, 15.5)] {
+                g.circle((x, y), 1.8);
+            }
         }
         Icon::Footing => {
             // A centered column on an isolated pad, with a single joined silhouette.
@@ -707,11 +893,49 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(4.0, 20.0), (12.0, 4.0), (20.0, 20.0)]);
             g.line(&[(7.0, 14.0), (17.0, 14.0)]);
         }
+        Icon::Coordinates => {
+            // A survey mark: a ring on cross hairs, and the north it reads from at its top.
+            g.circle((12.0, 13.0), 5.5);
+            g.line(&[(12.0, 9.5), (12.0, 21.0)]);
+            g.line(&[(3.0, 13.0), (21.0, 13.0)]);
+            g.closed(&[(12.0, 2.0), (14.5, 6.0), (9.5, 6.0)]);
+        }
+        Icon::ProjectNorth => {
+            // A north arrowhead inside a turn arrow open at the top, turning counter-clockwise, as Rotate Project North
+            // turns the model.
+            g.arc((12.0, 12.0), 9.5, -58.0, 238.0);
+            g.line(&[(17.03, 3.94), (21.4, 3.37), (18.43, 8.12)]);
+            g.closed(&[(12.0, 1.5), (15.5, 13.0), (12.0, 10.5), (8.5, 13.0)]);
+        }
         Icon::Spot => {
             g.line(&[(3.0, 16.0), (21.0, 16.0)]);
             g.closed(&[(5.0, 8.0), (13.0, 8.0), (9.0, 16.0)]);
             g.line(&[(15.0, 7.0), (21.0, 7.0)]);
             g.line(&[(15.0, 11.0), (19.0, 11.0)]);
+        }
+        Icon::ConvertLines => {
+            // As Add Split Line's: a slab's top, a crease across it, dashed where it's a folding line, solid where it's
+            // become a split line, its end ringed.
+            g.closed(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)]);
+            g.line(&[(5.0, 17.0), (7.0, 15.6)]);
+            g.line(&[(9.0, 14.2), (11.0, 12.8)]);
+            g.line(&[(13.0, 11.4), (19.0, 7.0)]);
+            g.circle((19.0, 7.0), 1.6);
+        }
+        Icon::SpotCoordinate => {
+            // A cross on the point, a leader up and right to a shoulder, and two lines of numbers over it.
+            g.line(&[(2.0, 19.0), (8.0, 19.0)]);
+            g.line(&[(5.0, 16.0), (5.0, 22.0)]);
+            g.line(&[(5.0, 19.0), (11.0, 11.0), (22.0, 11.0)]);
+            g.line(&[(12.0, 4.0), (21.0, 4.0)]);
+            g.line(&[(12.0, 8.0), (19.0, 8.0)]);
+        }
+        Icon::SpotSlope => {
+            // A falling top, an arrow down it, and its fall written over.
+            g.line(&[(3.0, 13.0), (21.0, 19.0)]);
+            g.line(&[(6.0, 9.0), (18.0, 13.0)]);
+            g.line(&[(14.0, 9.5), (18.0, 13.0), (13.5, 14.0)]);
+            g.line(&[(4.0, 4.0), (9.0, 4.0)]);
         }
         Icon::Angular => {
             // Two rays and their shared-center angular dimension arc.
@@ -726,6 +950,33 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(12.0, 12.0), tip]);
             g.line(&[(tip.0 - 4.0, tip.1), tip, (tip.0, tip.1 + 4.0)]);
             g.circle((12.0, 12.0), 9.0);
+        }
+        Icon::Linear => {
+            // Two points at different heights, measured across: witness lines up from them to a level dimension line.
+            g.circle((5.0, 19.0), 1.5);
+            g.circle((19.0, 12.0), 1.5);
+            g.line(&[(5.0, 17.0), (5.0, 4.0)]);
+            g.line(&[(19.0, 10.0), (19.0, 4.0)]);
+            g.line(&[(3.0, 7.0), (21.0, 7.0)]);
+            g.line(&[(3.0, 9.0), (7.0, 5.0)]);
+            g.line(&[(17.0, 9.0), (21.0, 5.0)]);
+        }
+        Icon::Diameter => {
+            // A line across a circle through its centre, an arrowhead at either edge.
+            let d = 9.0 * std::f32::consts::FRAC_1_SQRT_2;
+            let (a, b) = ((12.0 - d, 12.0 + d), (12.0 + d, 12.0 - d));
+            g.circle((12.0, 12.0), 9.0);
+            g.line(&[a, b]);
+            g.line(&[(b.0 - 4.0, b.1), b, (b.0, b.1 + 4.0)]);
+            g.line(&[(a.0 + 4.0, a.1), a, (a.0, a.1 - 4.0)]);
+        }
+        Icon::ArcLength => {
+            // An arc, and a dimension's arc round the same centre past it, with radial witness lines and ticks at its ends.
+            g.arc((12.0, 20.0), 6.0, -150.0, -30.0);
+            g.arc((12.0, 20.0), 10.0, -150.0, -30.0);
+            let at = |r: f32, deg: f32| (12.0 + r * deg.to_radians().cos(), 20.0 + r * deg.to_radians().sin());
+            g.line(&[at(7.5, -150.0), at(11.5, -150.0)]);
+            g.line(&[at(7.5, -30.0), at(11.5, -30.0)]);
         }
         Icon::Crop => {
             g.line(&[(7.0, 3.0), (7.0, 17.0), (21.0, 17.0)]);
@@ -749,9 +1000,8 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(3.0, 15.0), (7.0, 15.0), (7.0, 19.0), (3.0, 19.0)]);
             g.closed(&[(17.0, 15.0), (21.0, 15.0), (21.0, 19.0), (17.0, 19.0)]);
             g.cubic([(5.0, 15.0), (5.0, 3.0), (19.0, 3.0), (19.0, 15.0)]);
-            if !compact {
-                g.line(&[(10.0, 6.0), (14.0, 6.0)]);
-            }
+            // The third click: a smaller grip at its apex, where the arc passes through.
+            g.closed(&[(10.0, 4.0), (14.0, 4.0), (14.0, 8.0), (10.0, 8.0)]);
         }
         Icon::Flip => {
             // Opposed arrows on either side of the wall centerline.
@@ -768,6 +1018,12 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(12.0, 14.0), (12.0, 7.0)]);
             g.line(&[(9.5, 9.5), (12.0, 7.0), (14.5, 9.5)]);
         }
+        Icon::Ai => {
+            // The letters themselves, A then I, as the one sign everyone reads for this.
+            g.line(&[(2.5, 20.0), (9.0, 4.0), (15.5, 20.0)]);
+            g.line(&[(5.0, 14.5), (13.0, 14.5)]);
+            g.line(&[(20.5, 4.0), (20.5, 20.0)]);
+        }
         Icon::Detach => {
             g.line(&[(3.0, 8.0), (12.0, 3.0), (21.0, 8.0)]);
             g.line(&[(7.0, 15.0), (7.0, 21.0), (17.0, 21.0), (17.0, 15.0)]);
@@ -778,6 +1034,22 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(3.0, 11.0), (13.0, 6.0), (21.0, 10.0), (11.0, 15.0)]);
             g.line(&[(3.0, 11.0), (3.0, 14.0), (11.0, 18.0), (21.0, 13.0), (21.0, 10.0)]);
             g.line(&[(11.0, 15.0), (11.0, 18.0)]);
+        }
+        Icon::WorkPlane => {
+            // A plane seen at an angle, ruled once each way, and the arrow square to it.
+            g.closed(&[(2.0, 16.0), (8.0, 10.0), (22.0, 10.0), (16.0, 16.0)]);
+            g.line(&[(5.0, 13.0), (19.0, 13.0)]);
+            g.line(&[(12.0, 10.0), (9.0, 16.0)]);
+            g.line(&[(12.0, 13.0), (12.0, 3.0)]);
+            g.line(&[(9.5, 5.5), (12.0, 3.0), (14.5, 5.5)]);
+        }
+        Icon::RefPlane => {
+            // A reference plane seen edge on, as a plan draws it: a dashed line, and a grip at its end.
+            let dashes: &[(f32, f32)] = if compact { &[(0.0, 5.0), (7.5, 13.0)] } else { &[(0.0, 3.0), (5.0, 8.0), (10.0, 13.0)] };
+            for &(a, b) in dashes {
+                g.line(&[(3.0 + a, 21.0 - a), (3.0 + b, 21.0 - b)]);
+            }
+            g.closed(&[(17.5, 2.5), (21.5, 2.5), (21.5, 6.5), (17.5, 6.5)]);
         }
         Icon::Ceiling => {
             // A suspended tiled ceiling above a separate floor datum; not a floating pair of bars.
@@ -813,6 +1085,31 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(3.0, 16.0), (21.0, 7.0), (21.0, 11.0), (3.0, 20.0)]);
             g.line(&[(5.0, 11.0), (15.0, 6.0)]);
             g.line(&[(11.5, 5.0), (15.0, 6.0), (13.7, 9.4)]);
+        }
+        Icon::ModifySubElements => {
+            // A slab's folded top, a pointer on its point.
+            g.line(&[(3.0, 9.0), (12.0, 13.0), (21.0, 9.0)]);
+            g.line(&[(3.0, 9.0), (3.0, 19.0), (21.0, 19.0), (21.0, 9.0)]);
+            g.closed(&[(12.0, 13.0), (12.0, 4.0), (15.0, 7.0), (18.0, 6.0)]);
+        }
+        Icon::AddPoint => {
+            // A slab's top folded down to a point, the point ringed.
+            g.line(&[(3.0, 9.0), (12.0, 14.0), (21.0, 9.0)]);
+            g.line(&[(3.0, 9.0), (3.0, 19.0), (21.0, 19.0), (21.0, 9.0)]);
+            g.circle((12.0, 14.0), 2.0);
+        }
+        Icon::AddSplitLine => {
+            // A slab's top in plan, a crease across it from corner to corner, its ends ringed.
+            g.closed(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)]);
+            g.line(&[(5.0, 17.0), (19.0, 7.0)]);
+            g.circle((5.0, 17.0), 1.6);
+            g.circle((19.0, 7.0), 1.6);
+        }
+        Icon::ResetShape => {
+            // A flat slab, and over it an arrow turning back.
+            g.closed(&[(3.0, 14.0), (21.0, 14.0), (21.0, 19.0), (3.0, 19.0)]);
+            g.line(&[(8.0, 10.0), (8.0, 6.0), (16.0, 6.0), (16.0, 10.0)]);
+            g.line(&[(5.5, 8.0), (8.0, 10.5), (10.5, 8.0)]);
         }
         Icon::Ramp => {
             g.closed(&[(3.0, 19.0), (21.0, 19.0), (21.0, 10.0)]);
@@ -879,6 +1176,29 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(5.0, 8.0), (13.0, 8.0), (15.0, 10.0), (15.0, 14.0), (13.0, 16.0), (5.0, 16.0), (3.0, 14.0), (3.0, 10.0)]);
             g.closed(&[(11.0, 8.0), (19.0, 8.0), (21.0, 10.0), (21.0, 14.0), (19.0, 16.0), (11.0, 16.0), (9.0, 14.0), (9.0, 10.0)]);
         }
+        Icon::PointCloud => {
+            // A scanned room's corner: the points of its two walls, either side of where they meet.
+            g.line(&[(12.0, 3.0), (12.0, 21.0)]);
+            for (x, y) in [(4.5, 8.0), (4.5, 13.5), (4.5, 19.0), (8.5, 6.5), (8.5, 12.0), (8.5, 17.5)] {
+                g.circle((x, y), 1.2);
+                g.circle((24.0 - x, y), 1.2);
+            }
+        }
+        Icon::ImportCad => {
+            // A drawing's sheet, its corner folded, with a plan's room and partition on it.
+            g.closed(&[(4.0, 3.0), (15.0, 3.0), (20.0, 8.0), (20.0, 21.0), (4.0, 21.0)]);
+            g.line(&[(15.0, 3.0), (15.0, 8.0), (20.0, 8.0)]);
+            g.closed(&[(7.0, 11.0), (17.0, 11.0), (17.0, 18.0), (7.0, 18.0)]);
+            g.line(&[(12.0, 11.0), (12.0, 14.5)]);
+        }
+        Icon::LinkCad => {
+            // The drawing's sheet, and a chain's link through its foot.
+            g.line(&[(17.0, 12.0), (17.0, 7.0), (13.0, 3.0), (4.0, 3.0), (4.0, 17.0), (6.5, 17.0)]);
+            g.line(&[(13.0, 3.0), (13.0, 7.0), (17.0, 7.0)]);
+            g.line(&[(7.0, 7.0), (13.0, 7.0)]);
+            g.line(&[(7.0, 10.0), (14.0, 10.0)]);
+            g.closed(&[(10.0, 14.0), (19.0, 14.0), (21.0, 16.5), (19.0, 19.0), (10.0, 19.0), (8.0, 16.5)]);
+        }
         Icon::Parameters => {
             // Three independent parameter sliders with a consistent two-point knob radius.
             g.line(&[(3.0, 6.0), (9.0, 6.0)]);
@@ -890,6 +1210,12 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.circle((11.0, 6.0), 2.0);
             g.circle((16.0, 12.0), 2.0);
             g.circle((8.0, 18.0), 2.0);
+        }
+        Icon::ProjectInfo => {
+            // A house's outline with an "i" inside: what the project is.
+            g.closed(&[(4.0, 21.0), (4.0, 9.0), (12.0, 3.0), (20.0, 9.0), (20.0, 21.0)]);
+            g.circle((12.0, 10.5), 1.0);
+            g.line(&[(12.0, 14.0), (12.0, 18.5)]);
         }
         Icon::Measure => {
             // A diagonal ruler with ticks perpendicular to its top edge, distinct from Units.
@@ -1000,6 +1326,50 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
                 (9.2, 8.7),
             ]);
         }
+        Icon::PointElement => {
+            // A reference point: a dot on a work plane seen at an angle, its normal standing up.
+            g.closed(&[(3.0, 15.0), (12.0, 10.5), (21.0, 15.0), (12.0, 19.5)]);
+            g.circle((12.0, 15.0), 2.0);
+            g.line(&[(12.0, 13.0), (12.0, 3.5)]);
+        }
+        Icon::MakeAdaptive => {
+            // A point numbered 1, the number it takes when made adaptive.
+            g.circle((8.0, 16.0), 3.5);
+            g.line(&[(14.5, 6.5), (17.0, 4.0), (17.0, 13.0)]);
+            g.line(&[(15.0, 13.0), (19.0, 13.0)]);
+            g.line(&[(10.5, 13.5), (13.5, 10.5)]);
+        }
+        Icon::CreateForm => {
+            // A closed profile on its plane, extruded up from it.
+            g.closed(&[(3.0, 17.0), (12.0, 13.5), (21.0, 17.0), (12.0, 20.5)]);
+            g.line(&[(3.0, 17.0), (3.0, 10.0)]);
+            g.line(&[(21.0, 17.0), (21.0, 10.0)]);
+            g.line(&[(12.0, 16.0), (12.0, 4.0)]);
+            g.line(&[(9.0, 7.0), (12.0, 4.0), (15.0, 7.0)]);
+        }
+        Icon::FamilyTypes => {
+            // A sheet of a family's types: a table of their values.
+            g.closed(&[(4.0, 3.0), (20.0, 3.0), (20.0, 21.0), (4.0, 21.0)]);
+            g.line(&[(4.0, 8.0), (20.0, 8.0)]);
+            g.line(&[(4.0, 13.0), (20.0, 13.0)]);
+            g.line(&[(4.0, 17.0), (20.0, 17.0)]);
+            g.line(&[(10.0, 8.0), (10.0, 21.0)]);
+        }
+        Icon::LoadIntoProject => {
+            // The family, a small volume, going down into the project below it.
+            g.closed(&[(3.0, 13.0), (21.0, 13.0), (21.0, 21.0), (3.0, 21.0)]);
+            g.closed(&[(8.0, 3.0), (16.0, 3.0), (16.0, 8.0), (8.0, 8.0)]);
+            g.line(&[(12.0, 8.0), (12.0, 18.0)]);
+            g.line(&[(9.0, 15.0), (12.0, 18.0), (15.0, 15.0)]);
+        }
+        Icon::LoadIntoProjectClose => {
+            // The same, with the family's window closed after: a cross where its volume was.
+            g.closed(&[(3.0, 13.0), (21.0, 13.0), (21.0, 21.0), (3.0, 21.0)]);
+            g.line(&[(12.0, 4.0), (12.0, 18.0)]);
+            g.line(&[(9.0, 15.0), (12.0, 18.0), (15.0, 15.0)]);
+            g.line(&[(16.0, 3.0), (21.0, 8.0)]);
+            g.line(&[(21.0, 3.0), (16.0, 8.0)]);
+        }
         Icon::FamilyEditor => {
             // An editable component: a small volume plus a separate pencil, distinct from View3D.
             g.closed(&[(4.0, 8.0), (11.0, 4.0), (18.0, 8.0), (11.0, 12.0)]);
@@ -1084,16 +1454,18 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.closed(&[(3.0, 15.0), (8.0, 15.0), (8.0, 20.0), (3.0, 20.0)]);
             g.line(&[(12.0, 17.5), (21.0, 17.5)]);
         }
+        Icon::Cowork => {
+            // Two people, one a step behind the other.
+            g.circle((9.0, 7.0), 3.0);
+            g.line(&[(3.0, 20.0), (3.0, 16.0), (5.0, 12.5), (13.0, 12.5), (15.0, 16.0), (15.0, 20.0)]);
+            g.line(&[(14.5, 4.6), (16.0, 4.0), (18.5, 5.0), (19.0, 7.0), (18.0, 9.5), (16.5, 10.0)]);
+            g.line(&[(17.0, 12.5), (19.0, 12.5), (21.0, 16.0), (21.0, 20.0)]);
+        }
         Icon::Home => {
             // Home retains its door, keeping it distinct from the modeling Roof icon.
             g.line(&[(3.0, 11.0), (12.0, 3.0), (21.0, 11.0)]);
             g.line(&[(5.0, 9.222222), (5.0, 21.0), (19.0, 21.0), (19.0, 9.222222)]);
             g.line(&[(10.0, 21.0), (10.0, 15.0), (14.0, 15.0), (14.0, 21.0)]);
-        }
-        Icon::Back => {
-            // An arrow pointing left: back where you were.
-            g.line(&[(20.0, 12.0), (4.5, 12.0)]);
-            g.line(&[(10.5, 6.0), (4.5, 12.0), (10.5, 18.0)]);
         }
         Icon::NewFile => {
             g.closed(&[(5.0, 3.0), (14.0, 3.0), (19.0, 8.0), (19.0, 21.0), (5.0, 21.0)]);
@@ -1110,8 +1482,228 @@ pub fn outlines(icon: Icon, compact: bool) -> Vec<Outline> {
             g.line(&[(7.0, 12.0), (10.5, 15.5), (17.0, 9.0)]);
             g.circle((12.0, 12.0), 9.0);
         }
+        Icon::Keyboard => {
+            g.closed(&[(3.0, 6.0), (21.0, 6.0), (21.0, 18.0), (3.0, 18.0)]);
+            g.line(&[(5.0, 9.0), (7.0, 9.0)]);
+            g.line(&[(9.0, 9.0), (11.0, 9.0)]);
+            g.line(&[(13.0, 9.0), (15.0, 9.0)]);
+            g.line(&[(17.0, 9.0), (19.0, 9.0)]);
+            g.line(&[(5.0, 12.0), (7.0, 12.0)]);
+            g.line(&[(9.0, 12.0), (11.0, 12.0)]);
+            g.line(&[(13.0, 12.0), (15.0, 12.0)]);
+            g.line(&[(17.0, 12.0), (19.0, 12.0)]);
+            g.line(&[(7.0, 15.0), (17.0, 15.0)]);
+        }
+        Icon::Back => {
+            // A plain arrow pointing left, its head the same angle as Undo's.
+            g.line(&[(20.0, 12.0), (4.0, 12.0)]);
+            g.line(&[(10.0, 6.0), (4.0, 12.0), (10.0, 18.0)]);
+        }
+        Icon::LineWeights => {
+            // Three pens, each wider: a stroke, then bars as wide as a heavier pen draws.
+            g.line(&[(3.0, 5.0), (21.0, 5.0)]);
+            g.closed(&[(3.0, 10.0), (21.0, 10.0), (21.0, 12.5), (3.0, 12.5)]);
+            g.closed(&[(3.0, 16.0), (21.0, 16.0), (21.0, 20.5), (3.0, 20.5)]);
+        }
+        Icon::ObjectStyles => {
+            // A wall cut, hatched as a cut is, before a plain one seen beyond.
+            g.closed(&[(3.0, 4.0), (10.0, 4.0), (10.0, 20.0), (3.0, 20.0)]);
+            g.line(&[(3.0, 11.0), (10.0, 4.0)]);
+            g.line(&[(3.0, 18.0), (10.0, 11.0)]);
+            if !compact {
+                g.line(&[(5.0, 20.0), (10.0, 15.0)]);
+            }
+            g.closed(&[(14.0, 8.0), (21.0, 8.0), (21.0, 20.0), (14.0, 20.0)]);
+        }
+        Icon::FilledRegion => {
+            // An irregular sketched region, hatched inside its outline.
+            g.closed(&[(3.0, 6.0), (15.0, 3.0), (21.0, 10.0), (17.0, 21.0), (5.0, 18.0)]);
+            g.line(&[(4.2, 12.0), (10.5, 4.6)]);
+            g.line(&[(4.8, 17.0), (16.2, 4.3)]);
+            if !compact {
+                g.line(&[(9.0, 19.0), (19.4, 7.9)]);
+            }
+            g.line(&[(14.0, 20.3), (20.0, 13.5)]);
+        }
+        Icon::MaskingRegion => {
+            // A plain region over a hatch: what's under it hidden where it lies.
+            g.line(&[(3.0, 9.0), (9.0, 3.0)]);
+            g.line(&[(3.0, 15.0), (8.0, 10.0)]);
+            g.line(&[(3.0, 21.0), (8.0, 16.0)]);
+            g.line(&[(15.0, 3.0), (21.0, 3.0)]);
+            g.closed(&[(8.0, 8.0), (21.0, 8.0), (21.0, 21.0), (8.0, 21.0)]);
+        }
+        Icon::FillPatterns => {
+            // Three swatches: hatched, crosshatched, solid's outline.
+            g.closed(&[(3.0, 3.0), (11.0, 3.0), (11.0, 11.0), (3.0, 11.0)]);
+            g.line(&[(3.0, 7.0), (7.0, 3.0)]);
+            g.line(&[(7.0, 11.0), (11.0, 7.0)]);
+            g.closed(&[(13.0, 3.0), (21.0, 3.0), (21.0, 11.0), (13.0, 11.0)]);
+            g.line(&[(17.0, 3.0), (17.0, 11.0)]);
+            g.line(&[(13.0, 7.0), (21.0, 7.0)]);
+            g.closed(&[(3.0, 13.0), (21.0, 13.0), (21.0, 21.0), (3.0, 21.0)]);
+            if !compact {
+                g.line(&[(3.0, 17.0), (21.0, 17.0)]);
+            }
+        }
+        Icon::AnnotationSettings => {
+            // A pencil leaning back from its tip, the line it has drawn along the bottom ending there.
+            g.closed(&[(20.0, 20.0), (18.5, 15.5), (8.5, 5.5), (5.5, 8.5), (15.5, 18.5)]);
+            g.line(&[(18.5, 15.5), (15.5, 18.5)]);
+            if !compact {
+                g.line(&[(11.0, 8.0), (8.0, 11.0)]);
+            }
+            g.line(&[(3.0, 20.0), (20.0, 20.0)]);
+        }
+        Icon::LinePatterns => {
+            // Three lines, dashed, dash-dot and dotted.
+            for (a, b) in [(3.0, 8.0), (11.0, 16.0), (19.0, 21.0)] {
+                g.line(&[(a, 6.0), (b, 6.0)]);
+            }
+            g.line(&[(3.0, 12.0), (10.0, 12.0)]);
+            g.line(&[(12.5, 12.0), (13.5, 12.0)]);
+            g.line(&[(16.0, 12.0), (21.0, 12.0)]);
+            for x in [3.5, 7.75, 12.0, 16.25, 20.5] {
+                g.line(&[(x - 0.5, 18.0), (x + 0.5, 18.0)]);
+            }
+        }
+        Icon::Circle => {
+            // A circle by its centre, a grip there, and a point on it.
+            g.circle((12.0, 12.0), 8.5);
+            if !compact {
+                g.closed(&[(10.5, 10.5), (13.5, 10.5), (13.5, 13.5), (10.5, 13.5)]);
+            }
+        }
+        Icon::Inscribed => {
+            // A hexagon about a grip at its centre, the radius out to a corner.
+            g.closed(&hexagon(9.0));
+            g.closed(&[(10.5, 10.5), (13.5, 10.5), (13.5, 13.5), (10.5, 13.5)]);
+            g.line(&[(13.5, 12.0), (21.0, 12.0)]);
+        }
+        Icon::Circumscribed => {
+            // A hexagon about a grip at its centre, the radius square onto the middle of a side.
+            g.closed(&hexagon(8.0 / (TAU / 12.0).cos()));
+            g.closed(&[(10.5, 10.5), (13.5, 10.5), (13.5, 13.5), (10.5, 13.5)]);
+            g.line(&[(12.0, 13.5), (12.0, 20.0)]);
+            if !compact {
+                g.line(&[(12.0, 17.5), (14.5, 17.5), (14.5, 20.0)]);
+            }
+        }
+        Icon::CentreArc => {
+            // A quarter arc round a grip at its centre, with the radius to its middle.
+            g.closed(&[(4.0, 16.0), (8.0, 16.0), (8.0, 20.0), (4.0, 20.0)]);
+            g.arc((6.0, 18.0), 14.0, -90.0, 0.0);
+            if !compact {
+                g.line(&[(8.6, 15.4), (14.5, 9.5)]);
+            }
+        }
+        Icon::TangentArc => {
+            // A line, then an arc going on from its end the way it ran, to a grip.
+            g.line(&[(3.0, 19.5), (10.0, 19.5)]);
+            g.arc((10.0, 9.5), 10.0, 90.0, 0.0);
+            g.closed(&[(18.0, 5.5), (22.0, 5.5), (22.0, 9.5), (18.0, 9.5)]);
+            if !compact {
+                g.line(&[(10.0, 17.0), (10.0, 22.0)]);
+            }
+        }
+        Icon::Fillet => {
+            // Two lines rounded where they'd meet.
+            g.line(&[(4.5, 21.0), (4.5, 12.5)]);
+            g.arc((12.5, 12.5), 8.0, 180.0, 270.0);
+            g.line(&[(12.5, 4.5), (21.0, 4.5)]);
+            if !compact {
+                g.line(&[(12.5, 12.5), (8.0, 8.0)]);
+            }
+        }
+        Icon::Spline => {
+            // A curve led by its control points: grips off it, where it bends toward them.
+            g.cubic([(4.0, 18.0), (7.0, 3.0), (17.0, 21.0), (20.0, 6.0)]);
+            g.closed(&[(2.0, 18.0), (6.0, 18.0), (6.0, 22.0), (2.0, 22.0)]);
+            g.closed(&[(18.0, 2.0), (22.0, 2.0), (22.0, 6.0), (18.0, 6.0)]);
+            if !compact {
+                g.closed(&[(8.0, 2.0), (11.0, 2.0), (11.0, 5.0), (8.0, 5.0)]);
+                g.closed(&[(13.0, 19.0), (16.0, 19.0), (16.0, 22.0), (13.0, 22.0)]);
+            }
+        }
+        Icon::FitSpline => {
+            // A curve passing through its points, each a ring on it.
+            g.cubic([(4.6, 15.6), (6.0, 7.0), (9.5, 7.5), (12.0, 12.0)]);
+            g.cubic([(12.0, 12.0), (14.5, 16.5), (18.0, 17.0), (19.4, 8.4)]);
+            g.circle((3.5, 18.0), 2.0);
+            g.circle((20.5, 6.0), 2.0);
+            // The points it passes through at the top and the bottom of its waves.
+            g.circle((7.9, 8.9), 2.0);
+            g.circle((16.1, 15.1), 2.0);
+        }
+        Icon::Ellipse => {
+            // An ellipse about its centre.
+            g.ellipse((12.0, 12.0), (9.5, 0.0), (0.0, 6.0), true);
+            if !compact {
+                g.line(&[(12.0, 10.0), (12.0, 14.0)]);
+                g.line(&[(10.0, 12.0), (14.0, 12.0)]);
+            }
+        }
+        Icon::PartialEllipse => {
+            // Half an ellipse across its axis, between grips at its ends.
+            g.ellipse((12.0, 16.0), (8.5, 0.0), (0.0, 8.5 * 0.8), false);
+            g.closed(&[(1.5, 16.0), (5.5, 16.0), (5.5, 20.0), (1.5, 20.0)]);
+            g.closed(&[(18.5, 16.0), (22.5, 16.0), (22.5, 20.0), (18.5, 20.0)]);
+            // Its axis, between the grips: dashed, or one line where dashes would blur.
+            if compact {
+                g.line(&[(5.5, 18.0), (18.5, 18.0)]);
+            } else {
+                g.line(&[(8.0, 18.0), (10.5, 18.0)]);
+                g.line(&[(13.5, 18.0), (16.0, 18.0)]);
+            }
+        }
+        Icon::Polyline => {
+            // One line through several points, a grip at either end.
+            g.line(&[(4.0, 18.0), (9.0, 8.0), (15.0, 15.0), (20.0, 6.0)]);
+            g.closed(&[(2.0, 18.0), (6.0, 18.0), (6.0, 22.0), (2.0, 22.0)]);
+            g.closed(&[(18.0, 2.0), (22.0, 2.0), (22.0, 6.0), (18.0, 6.0)]);
+        }
+        Icon::PickLines => {
+            // A line, and the pointer that picks it.
+            g.line(&[(3.0, 7.0), (21.0, 7.0)]);
+            g.closed(&[(9.0, 10.0), (9.0, 20.5), (11.8, 17.7), (13.6, 21.0), (15.4, 20.1), (13.7, 16.8), (17.5, 16.8)]);
+        }
+        Icon::JoinPolyline => {
+            // Two lines meeting at one grip: one line now.
+            g.line(&[(3.0, 20.0), (10.0, 11.0)]);
+            g.line(&[(14.0, 11.0), (21.0, 20.0)]);
+            g.closed(&[(10.0, 7.0), (14.0, 7.0), (14.0, 11.0), (10.0, 11.0)]);
+            if !compact {
+                g.line(&[(5.0, 4.0), (8.0, 6.5)]);
+                g.line(&[(19.0, 4.0), (16.0, 6.5)]);
+            }
+        }
+        Icon::ExplodePolyline => {
+            // A polyline come apart into its pieces.
+            g.line(&[(3.0, 18.0), (7.5, 10.0)]);
+            g.line(&[(10.0, 9.0), (14.0, 15.0)]);
+            g.line(&[(16.5, 14.0), (21.0, 6.0)]);
+            if !compact {
+                g.line(&[(8.5, 13.5), (8.5, 16.0)]);
+                g.line(&[(15.5, 9.5), (15.5, 7.0)]);
+            }
+        }
+        Icon::Rectangle => {
+            // A sketched rectangle by its two opposite corners, each a grip; its sides stop at the grips.
+            g.closed(&[(3.0, 3.0), (7.0, 3.0), (7.0, 7.0), (3.0, 7.0)]);
+            g.closed(&[(17.0, 17.0), (21.0, 17.0), (21.0, 21.0), (17.0, 21.0)]);
+            g.line(&[(7.0, 5.0), (19.0, 5.0), (19.0, 17.0)]);
+            g.line(&[(17.0, 19.0), (5.0, 19.0), (5.0, 7.0)]);
+        }
     }
     g.0
+}
+
+/// A hexagon about the middle, its corners `r` from it, two of them level with it.
+fn hexagon(r: f32) -> [(f32, f32); 6] {
+    std::array::from_fn(|k| {
+        let a = TAU * k as f32 / 6.0;
+        (12.0 + r * a.cos(), 12.0 + r * a.sin())
+    })
 }
 
 #[derive(Default)]

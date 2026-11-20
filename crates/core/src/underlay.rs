@@ -26,11 +26,11 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
             match shape {
-                crate::dxf::Shape::Line(line) => out.push((layer.name.clone(), line.iter().map(|p| place(*p)).collect(), false)),
-                crate::dxf::Shape::Path { points, closed } => {
+                crate::dxf::drawing::Shape::Line(line) => out.push((layer.name.clone(), line.iter().map(|p| place(*p)).collect(), false)),
+                crate::dxf::drawing::Shape::Path { points, closed } => {
                     out.push((layer.name.clone(), points.iter().map(|p| place(*p)).collect(), *closed))
                 }
-                crate::dxf::Shape::Arc { at, radius, from, to } => {
+                crate::dxf::drawing::Shape::Arc { at, radius, from, to } => {
                     out.push((
                         layer.name.clone(),
                         crate::geom::along_arc(*at, *radius, *from, *to).into_iter().map(place).collect(),
@@ -39,16 +39,16 @@ pub fn lines_by_layer(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool)> {
                 }
                 // A point a survey measured is a place and no line: it is drawn ([`marks`]), and the ground is read
                 // off the points with what the drawing writes beside them ([`survey`]).
-                crate::dxf::Shape::Point { .. } => {}
+                crate::dxf::drawing::Shape::Point { .. } => {}
                 // A word is what the drawing says and no line of the building: it is drawn ([`words`]) and never
                 // traced over or snapped to, or a survey's lettering would come in as walls.
-                crate::dxf::Shape::Words { .. } => {}
+                crate::dxf::drawing::Shape::Words { .. } => {}
                 // Nor is a measurement: the two lines it takes its figure out along are a pair of parallel lines a
                 // wall's thickness apart, which is the very thing a trace looks for. It is drawn ([`measures`]).
-                crate::dxf::Shape::Measure { .. } => {}
+                crate::dxf::drawing::Shape::Measure { .. } => {}
                 // Nor is a hatch: its boundary runs along the faces of the wall it fills, and traced it would draw
                 // every one of them twice. It is drawn ([`fills`]).
-                crate::dxf::Shape::Fill { .. } => {}
+                crate::dxf::drawing::Shape::Fill { .. } => {}
             }
         }
     }
@@ -92,7 +92,7 @@ pub fn arcs(m: &Model, u: &Underlay) -> Vec<(String, Bend)> {
     let mut out: Vec<(String, Bend)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Arc { at, radius, from, to } = shape else { continue };
+            let crate::dxf::drawing::Shape::Arc { at, radius, from, to } = shape else { continue };
             // Turned with the drawing: an arc placed turned is drawn between the angles that far round.
             out.push((layer.name.clone(), Bend { at: place(*at), radius: *radius, from: from + u.angle, to: to + u.angle }));
         }
@@ -109,7 +109,7 @@ pub fn words(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
     let mut out: Vec<(String, Vec<P2>)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Words { at, text, height, angle } = shape else { continue };
+            let crate::dxf::drawing::Shape::Words { at, text, height, angle } = shape else { continue };
             // Our lettering is drawn with y down, from the left of the line it stands on; a drawing has y up.
             let (s, c) = angle.to_radians().sin_cos();
             let turn = |x: f64, y: f64| place(P2(at.0 + x * c - y * s, at.1 + x * s + y * c));
@@ -131,7 +131,7 @@ pub fn marks(m: &Model, u: &Underlay) -> Vec<(String, P2)> {
     let mut out: Vec<(String, P2)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            if let crate::dxf::Shape::Point { at } = shape {
+            if let crate::dxf::drawing::Shape::Point { at } = shape {
                 out.push((layer.name.clone(), place(*at)));
             }
         }
@@ -151,7 +151,7 @@ pub fn caption(m: &Model, u: &Underlay, region: [P2; 2]) -> Option<String> {
     let mut best: Option<(f64, f64, String)> = None;
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Words { at, text, height, .. } = shape else { continue };
+            let crate::dxf::drawing::Shape::Words { at, text, height, .. } = shape else { continue };
             let said = text.trim();
             let at = place(*at);
             if said.is_empty() || at.0 < sw.0 || at.0 > ne.0 || at.1 < sw.1 || at.1 > ne.1 {
@@ -258,8 +258,8 @@ pub fn survey(m: &Model, u: &Underlay, region: [P2; 2]) -> Survey {
     for layer in drawing.layers.iter().filter(|l| l.name != UNPLOTTED && !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
             match shape {
-                crate::dxf::Shape::Point { at } if within(place(*at)) => points.push(place(*at)),
-                crate::dxf::Shape::Words { at, text, height, .. } if *height > 0.0 && within(place(*at)) => {
+                crate::dxf::drawing::Shape::Point { at } if within(place(*at)) => points.push(place(*at)),
+                crate::dxf::drawing::Shape::Words { at, text, height, .. } if *height > 0.0 && within(place(*at)) => {
                     if let Some(says) = height_said(text) {
                         written.push((place(*at), says * 1000.0, height * QUOTA_REACH));
                     }
@@ -303,7 +303,7 @@ pub fn heights(m: &Model, u: &Underlay, region: [P2; 2]) -> Heights {
     let mut marks: Vec<Mark> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Words { at, text, .. } = shape else { continue };
+            let crate::dxf::drawing::Shape::Words { at, text, .. } = shape else { continue };
             let at = place(*at);
             if at.0 < sw.0 || at.0 > ne.0 || at.1 < sw.1 || at.1 > ne.1 {
                 continue;
@@ -612,7 +612,7 @@ pub fn measures(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>)> {
     let mut out: Vec<(String, Vec<P2>)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Measure { from, to, line, text, height } = shape else { continue };
+            let crate::dxf::drawing::Shape::Measure { from, to, line, text, height } = shape else { continue };
             let height = *height;
             let mut stroke = |points: [P2; 2]| out.push((layer.name.clone(), points.into_iter().map(place).collect()));
             stroke([*from, line[0]]);
@@ -679,7 +679,7 @@ pub fn fills(m: &Model, u: &Underlay) -> Vec<(String, Vec<P2>, bool, Vec<crate::
     let mut out = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Fill { solid, rings, rulings, .. } = shape else { continue };
+            let crate::dxf::drawing::Shape::Fill { solid, rings, rulings, .. } = shape else { continue };
             // The underlay is turned as a whole, so the pattern turns with it.
             let turned: Vec<crate::dxf::Ruling> =
                 rulings.iter().map(|r| crate::dxf::Ruling { angle: r.angle + u.angle, ..r.clone() }).collect();
@@ -701,7 +701,7 @@ pub fn said(m: &Model, u: &Underlay) -> Vec<(P2, f64, String)> {
     let mut out: Vec<(P2, f64, String)> = Vec::new();
     for layer in drawing.layers.iter().filter(|l| !u.hidden.iter().any(|h| h == &l.name)) {
         for shape in &layer.shapes {
-            let crate::dxf::Shape::Words { at, text, height, angle } = shape else { continue };
+            let crate::dxf::drawing::Shape::Words { at, text, height, angle } = shape else { continue };
             let (s, c) = angle.to_radians().sin_cos();
             let (x, y) = (f64::from(crate::font::width(text, *height as f32)) / 2.0, height / 2.0);
             out.push((place(P2(at.0 + x * c - y * s, at.1 + x * s + y * c)), *height, text.clone()));
@@ -812,7 +812,7 @@ pub fn extent(m: &Model, u: &Underlay) -> Option<[P2; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dxf::{Drawing, Layer, Shape};
+    use crate::dxf::drawing::{Drawing, Layer, Shape};
     use std::sync::Arc;
 
     /// A model with one underlay, of one shape, where `at` and turned `angle`.

@@ -183,11 +183,13 @@ fn wall_footings_run_under_a_wall_between_two_clicks() {
 fn the_structure_tabs_floor_is_a_structural_one_and_the_architecture_tabs_is_not() {
     let mut h = app(BOX);
     structural(&mut h, "Floor: Structural");
-    click(&mut h, P2(4000.0, 3000.0));
+    press(&mut h, "Walls' Outline");
+    press(&mut h, "Finish Edit Mode");
     let floors = ids(&h, "floor");
     assert_eq!(field(&h, floors[0], "structural"), json!(true));
     tool(&mut h, "Floor");
-    click(&mut h, P2(4000.0, 3000.0));
+    press(&mut h, "Walls' Outline");
+    press(&mut h, "Finish Edit Mode");
     let floors = ids(&h, "floor");
     assert_eq!(floors.len(), 2);
     assert!(field(&h, floors[1], "structural").is_null(), "an architectural floor says nothing of load");
@@ -203,8 +205,9 @@ fn revits_shortcuts_pick_the_structure_tools() {
     }
     // SB is the structural floor; CL the architectural column, but on the Structure tab the structural one, as in Revit.
     shortcut(&mut h, "SB");
-    assert_eq!(h.state().tool, Tool::Floor);
-    click(&mut h, P2(4000.0, 3000.0));
+    assert!(matches!(h.state().sketch.as_ref().map(|s| s.of), Some(crate::sketch::Of::Floor(_))), "a floor's sketch");
+    press(&mut h, "Walls' Outline");
+    press(&mut h, "Finish Edit Mode");
     assert_eq!(field(&h, ids(&h, "floor")[0], "structural"), json!(true));
     shortcut(&mut h, "CL");
     assert_eq!(h.state().tool, Tool::Column);
@@ -348,6 +351,10 @@ fn the_structure_speaks_portuguese_and_spanish_and_leaves_no_english() {
             missed.extend(english(&h, l));
             key(&mut h, Key::Escape);
             key(&mut h, Key::Escape);
+            // The structural floor sketches at once: its sketch cancelled before the next.
+            if h.state().sketch.is_some() {
+                press(&mut h, crate::lang::translated_in(l, "Cancel Edit Mode").unwrap_or("Cancel Edit Mode"));
+            }
         }
         // What they made, selected: the palette, the contextual tab and the type dialog.
         for (point, edit_type) in [(P2(3000.0, 1000.0), true), (P2(2000.0, 2000.0), false), (P2(3000.0, 3000.0), false)] {
@@ -394,4 +401,33 @@ fn a_duplicated_beam_type_keeps_its_shape_and_its_material() {
     let made = h.state().session.model.types.runs["beam"]["Steel Tube 200"].clone();
     assert_eq!((made.width, made.depth, made.round, made.material.as_str()), (200.0, 200.0, true, "Metal"));
     assert_eq!(field(&h, beam, "type"), json!("Steel Tube 200"), "OK puts the selected beam on it");
+}
+
+#[test]
+fn steel_profile_survives_duplicate_edit_type_and_native_reopen() {
+    let mut h = app("beam {\"points\":[[0,0],[4000,0]],\"type\":\"IPE 300\",\"offset\":2800}");
+    let beam = ids(&h, "beam")[0];
+    click(&mut h, P2(2000.0, 0.0));
+    press(&mut h, "Edit Type");
+    press(&mut h, "Duplicate…");
+    type_into(&mut h, "New type", "Custom steel");
+    press(&mut h, "Create");
+    type_into(&mut h, "Width", "1");
+    press(&mut h, "OK");
+    assert!(h.state().type_dialog.is_some(), "invalid plates keep the dialog open");
+    assert_eq!(h.state().session.model.types.runs["beam"]["Custom steel"].width, 150.0);
+    type_into(&mut h, "Width", "180");
+    press(&mut h, "OK");
+    assert_eq!(field(&h, beam, "type"), json!("Custom steel"));
+    let ty = &h.state().session.model.types.runs["beam"]["Custom steel"];
+    let profile = ty.profile.as_ref().expect("duplicating a steel type must retain its section");
+    assert_eq!(profile.shape, bimcraft_core::profiles::Shape::I);
+    assert_eq!((profile.web, profile.flange, profile.radius), (7.1, 10.7, 15.0));
+    assert!(profile.name.is_empty(), "resizing a section removes its catalogue designation");
+    let path = std::env::temp_dir().join(format!("steel-ui-{}.bimcraft", std::process::id()));
+    h.state_mut().session.execute("save", &json!({"path":path})).unwrap();
+    h.state_mut().session.execute("open", &json!({"path":path})).unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(field(&h, beam, "width"), json!(180.0));
+    assert!(h.state().session.model.types.runs["beam"]["Custom steel"].profile.is_some());
 }

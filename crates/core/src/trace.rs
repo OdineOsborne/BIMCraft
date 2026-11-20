@@ -1412,7 +1412,7 @@ fn met(walls: &mut [Found], how: &How, settled: &mut [[bool; 2]]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dxf::{Drawing, Layer, Shape};
+    use crate::dxf::drawing::{Drawing, Layer, Shape};
     use std::sync::Arc;
 
     /// A model with one underlay of the lines given, each on the layer it names.

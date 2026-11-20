@@ -8,6 +8,8 @@
 //! values elements hold among their parameters, under names no project parameter may take, so
 //! copies, `modify`, schedules and view filters reach them as they reach any other.
 
+use bimcraft_i18n::msg;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -112,7 +114,7 @@ pub struct OptionSet {
 
 /// A project's phases to start from, in `language`.
 pub fn phases(language: Language) -> Vec<String> {
-    ["Existing", "New Construction"].map(|w| language.word(w).to_string()).to_vec()
+    [msg!("Existing"), msg!("New Construction")].map(|w| language.word(w).to_string()).to_vec()
 }
 
 pub fn default_phases() -> Vec<String> {
@@ -124,11 +126,11 @@ pub fn filters(language: Language) -> BTreeMap<String, PhaseFilter> {
     use Presentation::{ByCategory as B, NotDisplayed as N, Overridden as O};
     let f = |new, existing, demolished, temporary| PhaseFilter { new, existing, demolished, temporary };
     [
-        ("Show All", f(B, B, B, B)),
-        ("Show Complete", f(B, B, N, B)),
-        ("Show New", f(B, N, N, N)),
-        ("Show Previous + Demolished", f(N, B, O, N)),
-        ("Show Previous + New", f(B, O, N, B)),
+        (msg!("Show All"), f(B, B, B, B)),
+        (msg!("Show Complete"), f(B, B, N, B)),
+        (msg!("Show New"), f(B, N, N, N)),
+        (msg!("Show Previous + Demolished"), f(N, B, O, N)),
+        (msg!("Show Previous + New"), f(B, O, N, B)),
     ]
     .into_iter()
     .map(|(n, f)| (language.word(n).to_string(), f))
@@ -203,7 +205,10 @@ pub fn status(m: &Model, e: &Element, at: usize) -> Option<Status> {
 
 /// Whether anything in `m` is phased or in a design option.
 pub fn any(m: &Model) -> bool {
-    m.elements.values().any(|e| e.params().is_some_and(|p| p.keys().any(|k| reserved(k))))
+    match m.derived.made(&m.elements) {
+        Some(look) => look.any_phased(),
+        None => m.elements.values().any(|e| e.params().is_some_and(|p| p.keys().any(|k| reserved(k)))),
+    }
 }
 
 /// Whether a view that shows the options `g` chooses shows element `e`: one in no option shows
@@ -244,6 +249,7 @@ pub(crate) fn check_project(m: &Model) -> Result<(), String> {
     }
     for (s, o) in &m.phase_overrides {
         o.check(&format!("the {} phase's overrides", s.name()))?;
+        o.check_patterns(m)?;
         if o.hidden || o.transparency > 0 {
             return Err(format!("the {} phase's overrides: a phase filter hides what it doesn't display; overrides draw", s.name()));
         }
@@ -552,7 +558,7 @@ mod tests {
         assert_eq!(both(&mut s, json!("Show Previous + Demolished")), [true, false, true, false]);
         // Existing in halftone and demolished dashed in red, as the project's overrides say.
         let d = plan(&s, 100000);
-        assert!(lines(&d, walls[2]).contains(&(10, Rgb(200, 40, 30), Some([10.0, 5.0]))), "{:?}", lines(&d, walls[2]));
+        assert!(lines(&d, walls[2]).contains(&(10, Rgb(200, 40, 30), Some(vec![10.0, 5.0]))), "{:?}", lines(&d, walls[2]));
         assert_eq!(both(&mut s, json!("Show Previous + New")), [true, true, false, true]);
         let d = plan(&s, 100000);
         assert!(lines(&d, walls[0]).contains(&(10, Rgb(140, 140, 140), None)), "{:?}", lines(&d, walls[0]));
@@ -842,7 +848,10 @@ mod tests {
             json!({"view": 100000, "phase": "Existing", "phase_filter": "Show Complete", "options": {"Facade": "Glass"}}),
         );
         let r = run(&mut s, "template", json!({"name": "Survey", "from": 100000}));
-        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"]));
+        assert_eq!(
+            r["controls"],
+            json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style", "background_grid"])
+        );
         assert_eq!(
             (r["phase"].clone(), r["phase_filter"].clone(), r["options"].clone()),
             (json!("Existing"), json!("Show Complete"), json!({"Facade": "Glass"}))

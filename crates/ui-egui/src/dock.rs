@@ -7,6 +7,8 @@
 //! so it can be tested and kept in the settings file; the view that takes the tools is the active one
 //! ([`BimApp::sheet`]): any other on screen draws as it is, and a click on it makes it the active one.
 
+use bimcraft_i18n::msg;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::FRAC_PI_2;
 
@@ -26,16 +28,32 @@ use crate::{BimApp, Sheet, icon_button};
 pub enum Palette {
     Properties,
     Browser,
+    /// BIMCraft's tools, in place of the ribbon: Rev, which has the ribbon, never shows it.
+    Tools,
+    /// The chat with a model that manages the project (`assistant.rs`): closed until the user opens it.
+    Assistant,
 }
 
 impl Palette {
-    pub const ALL: [Palette; 2] = [Palette::Properties, Palette::Browser];
+    pub const ALL: [Palette; 4] = [Palette::Properties, Palette::Browser, Palette::Tools, Palette::Assistant];
 
     /// Its name: what its tab says (in the interface's language) and what the settings file keeps it as.
     pub fn name(self) -> &'static str {
         match self {
             Palette::Properties => "Properties",
-            Palette::Browser => "Project Browser",
+            Palette::Browser => msg!("Project Browser"),
+            Palette::Tools => msg!("Tools"),
+            Palette::Assistant => msg!("Assistant"),
+        }
+    }
+
+    /// What its title and tab say in the profile this frame wears: BIMCraft calls Properties the Inspector and the Project
+    /// Browser the Navigator.
+    pub fn label(self) -> &'static str {
+        match (self, crate::style::rev()) {
+            (Palette::Properties, false) => msg!("Inspector"),
+            (Palette::Browser, false) => msg!("Navigator"),
+            _ => self.name(),
         }
     }
 
@@ -101,18 +119,25 @@ pub struct Float {
 }
 
 /// Where a palette goes: docked on a side (a stack of its own, after the others there), a tab of the stack that holds
-/// another palette, or floating with its corner at a point.
+/// another palette, a stack of its own just before the docked stack that holds another, or floating with its corner at a point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     Side(Side),
     With(Palette),
+    Before(Palette),
     Float(Pos2),
 }
 
+/// How wide a side holding the Tools palette alone starts, in points.
+const TOOLS_WIDTH: f32 = 240.0;
+/// How much wider the right side starts than the left, in points.
+const RIGHT_EXTRA: f32 = 12.0;
 /// A palette's window, when it starts floating.
 pub const FLOAT_SIZE: Vec2 = vec2(300.0, 420.0);
 /// A view's window, when it starts floating.
 pub const VIEW_SIZE: Vec2 = vec2(640.0, 440.0);
+/// The least height the last card on a side is given: its header, its tabs and its search, with room for a few rows.
+const LAST_MIN: f32 = 150.0;
 /// How wide the strip along the docked view's edge is that docks a palette there, in points.
 const EDGE: f32 = 36.0;
 /// How far the strips stand in from the view's edge, in points.
@@ -132,11 +157,11 @@ pub struct Docking {
 }
 
 impl Default for Docking {
-    /// Revit's: Properties over the Project Browser, down the left side.
+    /// BIMCraft's: the tools down the left, the Inspector over the Navigator down the right.
     fn default() -> Docking {
         Docking {
-            left: vec![Stack::of(Palette::Properties), Stack::of(Palette::Browser)],
-            right: Vec::new(),
+            left: vec![Stack::of(Palette::Tools)],
+            right: vec![Stack::of(Palette::Properties), Stack::of(Palette::Browser)],
             bottom: Vec::new(),
             floats: Vec::new(),
             home: BTreeMap::new(),
@@ -145,6 +170,17 @@ impl Default for Docking {
 }
 
 impl Docking {
+    /// Rev's, as Revit's: Properties over the Project Browser, down the left side.
+    pub fn revit() -> Docking {
+        Docking {
+            left: vec![Stack::of(Palette::Properties), Stack::of(Palette::Browser)],
+            right: Vec::new(),
+            bottom: Vec::new(),
+            floats: Vec::new(),
+            home: BTreeMap::from([(Palette::Tools, Side::Left)]),
+        }
+    }
+
     pub fn side(&self, side: Side) -> &[Stack] {
         match side {
             Side::Left => &self.left,
@@ -213,11 +249,22 @@ impl Docking {
         self.floats.retain(|f| !f.stack.tabs.is_empty());
     }
 
-    /// Puts `p` where `to` says, out of where it was. A tab dropped on its own stack, or on a palette that isn't
-    /// open, stays where it was.
+    /// The side the docked stack holding `q` is on, and its place there.
+    fn place_of(&self, q: Palette) -> Option<(Side, usize)> {
+        let side = self.docked(q)?;
+        Some((side, self.side(side).iter().position(|s| s.tabs.contains(&q))?))
+    }
+
+    /// Puts `p` where `to` says, out of where it was. A tab dropped on its own stack, on a palette that isn't open, or
+    /// before itself or one that isn't docked, stays where it was.
     pub fn put(&mut self, p: Palette, to: Target) {
         if let Target::With(q) = to
             && (q == p || !self.shown(q))
+        {
+            return;
+        }
+        if let Target::Before(q) = to
+            && (q == p || self.docked(q).is_none())
         {
             return;
         }
@@ -236,12 +283,18 @@ impl Docking {
                     stack.active = stack.tabs.len() - 1;
                 }
             }
+            Target::Before(q) => {
+                if let Some((side, at)) = self.place_of(q) {
+                    self.side_mut(side).insert(at, Stack::of(p));
+                    self.home.insert(p, side);
+                }
+            }
             Target::Float(at) => self.floats.push(Float { stack: Stack::of(p), at, size: FLOAT_SIZE }),
         }
     }
 
-    /// Docks the whole window `p` floats in: a stack of its own on a side, or its tabs after another stack's. Dropped
-    /// anywhere else, it stays a window (dragging it moved it already).
+    /// Docks the whole window `p` floats in: a stack of its own on a side or before another docked stack, or its tabs after
+    /// another stack's. Dropped anywhere else, it stays a window (dragging it moved it already).
     pub fn put_window(&mut self, p: Palette, to: Target) {
         let Some(i) = self.floats.iter().position(|f| f.stack.tabs.contains(&p)) else { return };
         match to {
@@ -251,6 +304,15 @@ impl Docking {
                     self.home.insert(*q, side);
                 }
                 self.side_mut(side).push(f.stack);
+            }
+            Target::Before(q) => {
+                if let Some((side, at)) = self.place_of(q) {
+                    let f = self.floats.remove(i);
+                    for tab in &f.stack.tabs {
+                        self.home.insert(*tab, side);
+                    }
+                    self.side_mut(side).insert(at, f.stack);
+                }
             }
             Target::With(q) if self.shown(q) && !self.floats[i].stack.tabs.contains(&q) => {
                 let f = self.floats.remove(i);
@@ -271,7 +333,13 @@ impl Docking {
         match (on, self.shown(p)) {
             (true, false) => {
                 let side = self.home.get(&p).copied().unwrap_or(Side::Left);
-                self.put(p, Target::Side(side));
+                // A chat wants height: the Assistant opens as a tab of the Project Browser's stack, unless it was last put on another side.
+                match self.docked(Palette::Browser) {
+                    Some(b) if p == Palette::Assistant && self.home.get(&p).is_none_or(|s| *s == b) => {
+                        self.put(p, Target::With(Palette::Browser))
+                    }
+                    _ => self.put(p, Target::Side(side)),
+                }
             }
             (false, true) => self.take(p),
             _ => {}
@@ -347,8 +415,11 @@ impl Docking {
         }
         let closed: BTreeSet<Palette> = v["closed"].as_array().into_iter().flatten().filter_map(|n| Palette::named(n.as_str()?)).collect();
         for p in Palette::ALL {
-            if !d.shown(p) && !closed.contains(&p) {
+            // The Assistant opens when the user asks: a file from before it was added leaves it closed.
+            if !d.shown(p) && !closed.contains(&p) && p != Palette::Assistant {
+                // First on the left: the Tools palette, which a file from before it holds nothing of, stands where it would have.
                 d.put(p, Target::Side(Side::Left));
+                d.left.rotate_right(1);
             }
         }
         d
@@ -378,6 +449,8 @@ pub enum Drag {
 enum Land {
     Side(Side),
     With(Palette),
+    /// The top edge of a docked palette's header (along the bottom, its left edge): a stack of its own before it.
+    Before(Palette),
     /// The views' tab bar, before the tab at this place.
     Tabs(usize),
 }
@@ -386,17 +459,22 @@ impl BimApp {
     /// The docked palettes, round the views; call between the bars and the views.
     pub(crate) fn docks(&mut self, ui: &mut Ui) {
         self.drop_headers.clear();
-        let frame = Frame::new().fill(pal().panel).stroke(Stroke::new(1.0, pal().border));
+        // The side holds the stacks' cards; between them and round them, the view's ground.
+        let frame = Frame::NONE;
         for side in Side::ALL {
             if self.docking.side(side).is_empty() {
                 continue;
             }
+            // A side of the Tools palette alone is a rail and a column of names wide.
+            let tools = self.docking.side(side) == [Stack::of(Palette::Tools)];
+            let width = if tools { TOOLS_WIDTH } else { 290.0 };
             let panel = match side {
-                Side::Left => Panel::left("dock-left").default_size(290.0),
-                Side::Right => Panel::right("dock-right").default_size(290.0),
+                Side::Left => Panel::left("dock-left").default_size(width),
+                // The right side's card meets the window's edge, where its scroll bar must clear the edge that resizes the window.
+                Side::Right => Panel::right("dock-right").default_size(width + RIGHT_EXTRA),
                 Side::Bottom => Panel::bottom("dock-bottom").default_size(240.0),
             };
-            panel.frame(frame).resizable(true).min_size(140.0).show(ui, |ui| self.dock_side(ui, side));
+            panel.frame(frame).show_separator_line(false).resizable(true).min_size(140.0).show(ui, |ui| self.dock_side(ui, side));
         }
     }
 
@@ -404,10 +482,24 @@ impl BimApp {
     fn dock_side(&mut self, ui: &mut Ui, side: Side) {
         let stacks = self.docking.side(side).to_vec();
         let n = stacks.len();
-        let frame = Frame::new().fill(pal().panel).stroke(Stroke::new(1.0, pal().border));
         for (i, stack) in stacks.iter().enumerate() {
-            if i + 1 == n {
-                self.stack_ui(ui, stack, false);
+            // Each stack a card, standing off the window's edges and the next card: the last one off the bottom (or, along
+            // the bottom, off the right) too.
+            let last = i + 1 == n;
+            let frame = match side {
+                Side::Bottom => crate::style::card([true, last, true, true]),
+                _ => crate::style::card([true, true, true, last]),
+            };
+            // Flush to the window's right edge (Compact), a card's scrollbar would lie in the zone that resizes the window.
+            let frame = match crate::style::compact() && side == Side::Right && self.own_bar() {
+                true => frame.inner_margin(egui::Margin { right: crate::titlebar::EDGE as i8, ..egui::Margin::ZERO }),
+                false => frame,
+            };
+            if last {
+                frame.show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    self.stack_ui(ui, stack, false);
+                });
                 continue;
             }
             // Named for the palette it holds, so a stack keeps its size while the others come and go.
@@ -415,11 +507,15 @@ impl BimApp {
             // An even share of what's left, but of the last two the first takes a little more (Properties over the
             // Project Browser, as they start).
             let share = if n - i == 2 { 0.55 } else { 1.0 / (n - i) as f32 };
+            // A card over others leaves them what they need, so the last never runs under the status bar when the window shrinks
+            // under a card that was taller: the others' least, 80 each, and the last's header, tabs and search.
+            let gap = f32::from(crate::style::gap());
+            let most = ui.available_height() - (n - i - 2) as f32 * (80.0 + gap) - LAST_MIN - gap;
             let panel = match side {
                 Side::Bottom => Panel::left(id).default_size(ui.available_width() * share),
-                _ => Panel::top(id).default_size(ui.available_height() * share),
+                _ => Panel::top(id).default_size(ui.available_height() * share).max_size(most.max(80.0)),
             };
-            panel.frame(frame).resizable(true).min_size(80.0).show(ui, |ui| {
+            panel.frame(frame).show_separator_line(false).resizable(true).min_size(80.0).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 self.stack_ui(ui, stack, false);
             });
@@ -456,17 +552,16 @@ impl BimApp {
     /// A stack: its title (or its tabs), its Dock menu and its close button, then the palette it shows.
     fn stack_ui(&mut self, ui: &mut Ui, stack: &Stack, floating: bool) {
         let Some(shown) = stack.shown() else { return };
-        let (rect, back) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click_and_drag());
+        let (rect, back) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click_and_drag());
         let p = ui.painter();
-        p.rect_filled(rect, 0.0, pal().bar);
         p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pal().border));
         self.drop_headers.push((shown, rect, floating));
         let lone = stack.tabs.len() == 1;
         if lone {
             let title = self.palette_title(shown);
             back.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &title));
-            let at = rect.left_center() + vec2(10.0, 0.0);
-            ui.painter().text(at, Align2::LEFT_CENTER, title, FontId::proportional(13.0), pal().text);
+            let at = rect.left_center() + vec2(12.0, 0.0);
+            ui.painter().text(at, Align2::LEFT_CENTER, title, crate::style::semibold(13.0), pal().text);
         }
         if back.drag_started() {
             self.dragging = Some(if floating { Drag::Window(shown) } else { Drag::Palette(shown) });
@@ -484,7 +579,7 @@ impl BimApp {
             ui.spacing_mut().item_spacing.x = 2.0;
             if !lone {
                 for tab in &stack.tabs {
-                    let r = palette_tab(ui, t(tab.name()), *tab == shown);
+                    let r = palette_tab(ui, t(tab.label()), *tab == shown);
                     if r.clicked() {
                         self.docking.activate(*tab);
                     }
@@ -502,7 +597,7 @@ impl BimApp {
                 Popup::menu(&r).show(|ui| self.dock_menu(ui, shown, rect));
             });
         });
-        let body = Frame::new().fill(pal().panel);
+        let body = Frame::NONE;
         body.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             self.palette_body(ui, shown);
@@ -529,19 +624,29 @@ impl BimApp {
     /// A palette's title: the Project Browser's names the project, as Revit's does.
     fn palette_title(&self, p: Palette) -> String {
         match p {
-            Palette::Properties => t(p.name()).to_string(),
-            Palette::Browser => tf("Project Browser · {}", &[&self.session.model.name]),
+            Palette::Properties | Palette::Tools | Palette::Assistant => t(p.label()).to_string(),
+            Palette::Browser => match self.active_family() {
+                Some(ed) => format!("{} · {}", t(p.label()), ed.title()),
+                _ => format!("{} · {}", t(p.label()), self.session.model.name),
+            },
         }
     }
 
     /// What a palette shows, under its title: as wide as where it's docked, its scroll bar at the edge.
     pub(crate) fn palette_body(&mut self, ui: &mut Ui, p: Palette) {
-        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // No wider than the palette: what is wider is cut, never pushes the card past its side (off the window, docked right).
+        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]).min_scrolled_height(0.0).max_width(ui.available_width());
         match p {
+            Palette::Properties if self.family_doc() => {
+                scroll.id_salt("family-properties").show(ui, |ui| Frame::new().inner_margin(8.0).show(ui, |ui| self.family_properties(ui)));
+            }
             Palette::Properties => {
                 scroll.id_salt("properties").show(ui, |ui| Frame::new().inner_margin(8.0).show(ui, |ui| self.properties(ui)));
             }
+            Palette::Browser if self.family_doc() => self.family_browser(ui),
             Palette::Browser => self.browser_palette(ui),
+            Palette::Tools => self.tool_column(ui),
+            Palette::Assistant => self.assistant_palette(ui),
         }
     }
 
@@ -600,7 +705,7 @@ impl BimApp {
                     let p = ui.painter();
                     p.rect_filled(rect, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, if active { pal().select_fill } else { pal().bar });
                     p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pal().border));
-                    let ink = if active { pal().accent } else { pal().text };
+                    let ink = if active { pal().accent_ink } else { pal().text };
                     p.text(rect.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, &title, FontId::proportional(13.0), ink);
                     if back.drag_started() {
                         self.dragging = Some(Drag::ViewWindow(f.sheet));
@@ -691,11 +796,27 @@ impl BimApp {
                     ),
                 ];
                 let own = self.docking.stack_of(p).cloned();
-                for (q, rect, _) in &self.drop_headers {
+                for (q, rect, floating) in &self.drop_headers {
                     // Not its own stack: a tab dropped there stays where it was, and so does a window.
                     let mine = own.as_ref().is_some_and(|s| s.tabs.contains(q));
                     if !mine {
                         out.insert(0, (Land::With(*q), *rect, tf("Tab with {}", &[t(q.name())])));
+                        // A thin strip along the header's leading edge puts it there as a stack of its own; it comes ahead of the
+                        // header's own zone, which makes a tab.
+                        let before = match self.docking.docked(*q) {
+                            Some(Side::Bottom) => Some((
+                                Rect::from_min_max(rect.left_top() - vec2(8.0, 0.0), pos2(rect.left() + 6.0, rect.bottom())),
+                                msg!("Left of {}"),
+                            )),
+                            Some(_) => Some((
+                                Rect::from_min_max(rect.left_top() - vec2(0.0, 8.0), pos2(rect.right(), rect.top() + 6.0)),
+                                msg!("Above {}"),
+                            )),
+                            None => None,
+                        };
+                        if let Some((edge, label)) = before.filter(|_| !*floating) {
+                            out.insert(0, (Land::Before(*q), edge, tf(label, &[t(q.name())])));
+                        }
                     }
                 }
                 out
@@ -737,7 +858,7 @@ impl BimApp {
                 Land::Side(Side::Right) => FRAC_PI_2,
                 _ => 0.0,
             };
-            if on || !matches!(land, Land::With(_)) {
+            if on || !matches!(land, Land::With(_) | Land::Before(_)) {
                 zone_label(&p, *r, label, angle, on);
             }
         }
@@ -756,9 +877,11 @@ impl BimApp {
         match (drag, hit) {
             (Drag::Palette(p), Some(Land::Side(s))) => self.docking.put(p, Target::Side(s)),
             (Drag::Palette(p), Some(Land::With(q))) => self.docking.put(p, Target::With(q)),
+            (Drag::Palette(p), Some(Land::Before(q))) => self.docking.put(p, Target::Before(q)),
             (Drag::Palette(p), _) => self.docking.put(p, Target::Float(corner)),
             (Drag::Window(p), Some(Land::Side(s))) => self.docking.put_window(p, Target::Side(s)),
             (Drag::Window(p), Some(Land::With(q))) => self.docking.put_window(p, Target::With(q)),
+            (Drag::Window(p), Some(Land::Before(q))) => self.docking.put_window(p, Target::Before(q)),
             (Drag::View(s), Some(Land::Tabs(i))) => {
                 // Dropped back on the bar, it moves along it.
                 let from = self.views.iter().position(|v| *v == s).unwrap_or(i);
@@ -812,7 +935,7 @@ fn palette_tab(ui: &mut Ui, label: &str, active: bool) -> egui::Response {
         StrokeKind::Inside,
     );
     if r.has_focus() {
-        p.rect_stroke(rect, 4.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        p.rect_stroke(rect, 4.0, crate::style::focus_ring(), StrokeKind::Inside);
     }
     p.text(rect.center(), Align2::CENTER_CENTER, label, font, if active { pal().text } else { pal().muted });
     r

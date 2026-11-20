@@ -1,1295 +1,2349 @@
-//! DXF: the Drawing Exchange Format, read from the specification Autodesk publishes. A survey, a consultant's plan, the
-//! 2D a building is modelled over — what this reads is the geometry, layer by layer, in millimetres.
+//! DXF, read from the public DXF reference: a drawing's layers and the entities of its model space, each in the
+//! drawing's own unit, which `$INSUNITS` names when the file knows it. What a plan can't draw as it is (a polyline's
+//! bulges, an ellipse, a spline) is flattened to points on the curve; a block is placed where each INSERT puts it, arrays
+//! and nesting included, under a bound; paper space, a binary file and the kinds of entity the reader doesn't draw are
+//! left out and named. A `CadImport` element places what is read; this module knows no element.
 //!
-//! It reads what a record says and no more. `LINE`, `LWPOLYLINE`, `POLYLINE` with its `VERTEX`, `ARC` and `CIRCLE`, each
-//! on the layer it names (group code 8), come in, and `TEXT` and `MTEXT` as the words the drawing says, where it says
-//! them; `DIMENSION` as what the drawing measures and the figure it writes over it, and `HATCH` as the areas it
-//! fills and the pattern it fills them with. Everything else is counted by its own name and listed, never guessed
-//! at. A polyline's bulge is the arc it draws between two of its points and is read as that arc ([`bow`]), which
-//! splits the polyline into the pieces it is drawn in; one that is no arc is left as the line between them and said
-//! to be, and a polyline of more points than `MAX_VERTICES` is left out whole rather than cut short.
-//! What a drawing says of itself is drawn and is no line of the building: a word, a measurement and a hatch are
-//! drawn with the plan and left out of the lines traced and snapped to, or a survey's lettering would come in as
-//! walls, a dimension's two lines as a wall's two faces, and a hatch's boundary as the faces it runs along.
-//! A block is opened where it is put: a survey draws its doors, its windows and its furniture as blocks, so an
-//! `INSERT` brings in what the `BLOCK` of that name holds, from its base point, turned and scaled as the insert
-//! says and as many times as its grid of copies says. What a block draws on layer `0` comes in on the layer the
-//! block is put on, as a drawing has it; what it draws on a layer of its own keeps that one. A block holds blocks,
-//! `MAX_NESTING` deep, past which a drawing is drawing itself; an insert of a block the file does not hold is
-//! counted like anything else left out, and so is a round thing a block is scaled unevenly into an ellipse.
-//!
-//! The file says its own unit in `$INSUNITS` (inches, feet, millimetres, centimetres, metres); where it says nothing,
-//! or something else, its numbers are read as millimetres, which is what a CAD drawing of a building is usually in. A
-//! caller who knows better gives `Options::scale`.
-//!
-//! Binary DXF and DWG are other formats and are refused by name: DWG is Autodesk's own and has no published
-//! specification, so it is converted before it comes here.
+//! A second reader lives in [`drawing`]: the one a drawing put under a plan to trace over is read with (Link CAD's
+//! underlay, Trace Walls, the ground from a survey). It reads in millimetres what a survey says of itself as well as
+//! what it draws (its points, its words, its measurements, its hatches and their patterns), and its names that this
+//! module doesn't use are here too, so `dxf::Drawing`, `dxf::measured` and the rest read as they always have.
+
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::geom::P2;
+use crate::render::Rgb;
 
-/// What a file may be before it is refused, bytes.
-pub const MAX_BYTES: usize = 256 << 20;
-/// The most shapes one drawing brings in.
-pub const MAX_SHAPES: usize = 500_000;
-/// The most points one polyline brings in.
-pub const MAX_VERTICES: usize = 20_000;
-/// How far a drawing's points may lie from its origin, mm.
-pub const MAX_COORD: f64 = 1e9;
-/// How many blocks deep a block may put another: past that a drawing is drawing itself.
-pub const MAX_NESTING: usize = 8;
-/// The most letters one word of a drawing brings in.
-pub const MAX_WORD: usize = 256;
-/// How many kinds of thing left out are named, the most of each first.
-const NAMED: usize = 12;
-/// How many of a drawing's figures are tried as the unit the rest are held against ([`measured`]).
-const TRIED: usize = 64;
-/// The most group codes one hatch is read out of.
-const MAX_RAW: usize = 200_000;
-/// The most areas one hatch fills, and the most families of lines its pattern is drawn with.
-const MAX_RINGS: usize = 256;
-const MAX_RULINGS: usize = 64;
-/// The most dashes one family of a pattern's lines is drawn with.
-const MAX_DASHES: usize = 64;
+pub mod drawing;
+pub use drawing::{Disagreed, Drawing, MAX_COORD, MAX_NESTING, MAX_VERTICES, MAX_WORD, Measured, Options, Ruling, is_dwg, measured};
 
-/// How a file's numbers become millimetres.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Options {
-    /// Millimetres to one of the file's units; `None` is what the file says, else millimetres.
-    pub scale: Option<f64>,
+/// What a file may be before it's refused, bytes.
+pub const MAX_BYTES: usize = 128 << 20;
+/// The most shapes a drawing may hold once its blocks are placed.
+pub const MAX_SHAPES: usize = 1_000_000;
+/// How deep a block may be inside a block.
+pub const MAX_DEPTH: usize = 16;
+/// How far a file's coordinates may lie from its origin, in its own unit.
+pub const MAX_FILE_COORD: f64 = 1e12;
+/// The most entities visited placing blocks (an array of a block of arrays): a bound on hostile nesting.
+const MAX_WORK: usize = 4_000_000;
+/// The most values one entity may hold: a polyline's vertices, a hatch's edges.
+const MAX_PAIRS: usize = 2_000_000;
+/// The most rows, and the most columns, an INSERT's array may have.
+const MAX_ARRAY: usize = 10_000;
+/// The most segments a flattened arc, circle or ellipse gets.
+const CURVE_STEPS: usize = 64;
+/// Segments a spline gets in each of its spans, and the most in all.
+const SPLINE_STEPS: usize = 8;
+const MAX_SPLINE_POINTS: usize = 2048;
+/// The most characters of one text.
+const MAX_CHARS: usize = 4096;
+
+/// A colour as an entity or a layer names it: the standard index, a true colour, or its layer's or its block's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    ByLayer,
+    ByBlock,
+    Index(u8),
+    True(u8, u8, u8),
 }
 
-/// A piece of a drawing, in millimetres.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Shape {
-    /// A straight line, from one end to the other.
-    Line([P2; 2]),
-    /// A polyline's points in order, and whether its last point joins its first.
-    Path { points: Vec<P2>, closed: bool },
-    /// A centre, a radius, and the angles it runs between, degrees counter-clockwise from east. A circle runs 0 to 360.
-    Arc { at: P2, radius: f64, from: f64, to: f64 },
-    /// One point a survey measured, where it measured it. A marker and no line of the building: a plan draws it as a
-    /// small cross, and the height it stands at is not in it — a surveyor's plan writes that beside it, as `Words`.
-    Point { at: P2 },
-    /// What a survey writes on its drawing, where it writes it: the left of the line it stands on, how tall its
-    /// capitals are, and how far it is turned, degrees counter-clockwise from east. It is what the drawing says and
-    /// no line of the building, so a plan draws it and the walls are not read from it.
-    Words { at: P2, text: String, height: f64, angle: f64 },
-    /// What a survey measures on its drawing: the two points it measures between, the line it writes the measurement
-    /// along — those two points brought onto it, so that how long it is is what the drawing measured — and the figure
-    /// it writes there, with how tall that figure is written (zero where the drawing does not say).
-    ///
-    /// The drawing's own word on a distance, and no line of the building: a plan draws it and the walls are not read
-    /// from it, or the two lines a dimension takes its measurement out along would be read as a wall.
-    Measure { from: P2, to: P2, line: [P2; 2], text: String, height: f64 },
-    /// What a drawing fills an area with to say what it is of: the name its pattern goes by, whether it is filled
-    /// solid, the areas it fills, and the families of parallel lines that pattern is drawn with, which the file
-    /// gives whether or not this knows the name.
-    ///
-    /// A fill is drawn and no line of the building: a hatch runs along the faces of the wall it fills, and read as
-    /// geometry it would draw every one of them twice.
-    Fill { pattern: String, solid: bool, rings: Vec<Vec<P2>>, rulings: Vec<Ruling> },
+impl Color {
+    /// The colour itself, when it is one: none for the drawing's ink (index 7, black on white paper) and for a colour
+    /// left to the layer or the block.
+    pub fn rgb(self) -> Option<Rgb> {
+        match self {
+            Color::Index(i) => aci(i),
+            Color::True(r, g, b) => Some(Rgb(r, g, b)),
+            Color::ByLayer | Color::ByBlock => None,
+        }
+    }
 }
 
-/// One family of a hatch pattern's lines: how far it is turned, degrees counter-clockwise from east, how far apart
-/// its lines are across themselves, how far along itself each line stands from the one before it, and the dashes it
-/// is drawn with, mm — a length to draw and a negative one to leave, over and over, and none for a line with no
-/// break in it. A pattern of dashes drawn without them is a web of lines and not the stipple a drawing shows.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Ruling {
-    pub angle: f64,
-    pub gap: f64,
-    pub shift: f64,
-    pub dashes: Vec<f64>,
+/// The standard colour index: the nine named colours, then 24 hues in five shades, each full and pale, then six greys.
+/// Index 7 is the drawing's ink (black on white paper, white on black), so it is none here; 0 is by block and 256 by
+/// layer, neither an index.
+pub fn aci(i: u8) -> Option<Rgb> {
+    Some(match i {
+        1 => Rgb(255, 0, 0),
+        2 => Rgb(255, 255, 0),
+        3 => Rgb(0, 255, 0),
+        4 => Rgb(0, 255, 255),
+        5 => Rgb(0, 0, 255),
+        6 => Rgb(255, 0, 255),
+        8 => Rgb(128, 128, 128),
+        9 => Rgb(192, 192, 192),
+        10..=249 => {
+            let (hue, shade) = (f64::from((i - 10) / 10) * 15.0, (i - 10) % 10);
+            let high = match shade / 2 {
+                0 => 255.0,
+                1 => 204.0,
+                2 => 153.0,
+                3 => 127.0,
+                _ => 76.0,
+            };
+            let low = if shade % 2 == 1 { high / 2.0 } else { 0.0 };
+            hue_rgb(hue, high, low)
+        }
+        250..=255 => {
+            let g = match i - 250 {
+                0 => 51,
+                1 => 91,
+                2 => 132,
+                3 => 173,
+                4 => 214,
+                _ => 255,
+            };
+            Rgb(g, g, g)
+        }
+        _ => return None,
+    })
 }
 
-/// A layer of a drawing: the name the file gives it, and what is drawn on it.
+/// The colour at `hue` degrees whose brightest channel is `high` and dimmest `low`: six sectors of 60°, the middle
+/// channel ramping between them.
+fn hue_rgb(hue: f64, high: f64, low: f64) -> Rgb {
+    let sector = (hue / 60.0).floor();
+    let f = hue / 60.0 - sector;
+    let (down, up) = (high - (high - low) * f, low + (high - low) * f);
+    let (r, g, b) = match sector as i64 % 6 {
+        0 => (high, up, low),
+        1 => (down, high, low),
+        2 => (low, high, up),
+        3 => (low, down, high),
+        4 => (up, low, high),
+        _ => (high, low, down),
+    };
+    Rgb(r as u8, g as u8, b as u8)
+}
+
+/// A layer of the drawing, as its LAYER table holds it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
     pub name: String,
-    pub shapes: Vec<Shape>,
+    /// Its colour; an entity whose colour is by layer takes it.
+    pub color: Color,
+    /// Its linetype's name (`Continuous` when the file names none).
+    pub linetype: String,
+    /// Its line weight, mm, or none for the default.
+    pub weight: Option<f64>,
+    /// Turned off: its entities aren't shown.
+    pub off: bool,
+    /// Frozen: neither shown nor regenerated.
+    pub frozen: bool,
 }
 
-/// What a DXF file holds, once read: its layers in the order they were first drawn on, what it did not read, and the
-/// box its geometry lies in.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Drawing {
+/// A linetype: its dashes in drawing units (a gap is negative, a dot zero), to be scaled by the drawing's `ltscale`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Linetype {
+    pub name: String,
+    pub dashes: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Horizontal {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vertical {
+    Baseline,
+    Bottom,
+    Middle,
+    Top,
+}
+
+/// Where a text's point sits on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Align {
+    pub h: Horizontal,
+    pub v: Vertical,
+}
+
+/// What an entity draws, in drawing units.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shape {
+    Line(P2, P2),
+    Polyline {
+        pts: Vec<P2>,
+        closed: bool,
+    },
+    Circle {
+        c: P2,
+        r: f64,
+    },
+    /// Counter-clockwise from `start` to `end`, degrees.
+    Arc {
+        c: P2,
+        r: f64,
+        start: f64,
+        end: f64,
+    },
+    Point(P2),
+    /// One line of lettering: `height` is its capital height, `angle` its baseline's in degrees counter-clockwise from east.
+    /// An attribute's (ATTRIB) has its tag: what a title block reads it as a field of.
+    Text {
+        at: P2,
+        height: f64,
+        angle: f64,
+        text: String,
+        align: Align,
+        tag: Option<String>,
+    },
+    /// A hatch's boundaries, or a solid: `solid` when filled through, else patterned, which a view draws as it can.
+    Fill {
+        rings: Vec<Vec<P2>>,
+        solid: bool,
+    },
+}
+
+impl Shape {
+    /// Whether every number of it is finite and within [`MAX_FILE_COORD`].
+    fn fits(&self) -> bool {
+        let ok = |x: f64| x.is_finite() && x.abs() <= MAX_FILE_COORD;
+        let p = |p: &P2| ok(p.0) && ok(p.1);
+        match self {
+            Shape::Line(a, b) => p(a) && p(b),
+            Shape::Polyline { pts, .. } => pts.iter().all(p),
+            Shape::Circle { c, r } => p(c) && ok(*r),
+            Shape::Arc { c, r, start, end } => p(c) && ok(*r) && ok(*start) && ok(*end),
+            Shape::Point(q) => p(q),
+            Shape::Text { at, height, angle, .. } => p(at) && ok(*height) && ok(*angle),
+            Shape::Fill { rings, .. } => rings.iter().flatten().all(p),
+        }
+    }
+}
+
+/// An entity of model space, placed: its layer, how it is drawn, and its shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entity {
+    pub layer: String,
+    pub color: Color,
+    /// Its linetype's name when it has one of its own; none takes the layer's.
+    pub linetype: Option<String>,
+    /// Its line weight, mm, when it has one of its own.
+    pub weight: Option<f64>,
+    pub shape: Shape,
+}
+
+/// A DXF file read: what it draws, in its own unit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dxf {
+    /// Millimetres to the drawing's unit, from `$INSUNITS`; none when the file is unitless, or in a unit no building is
+    /// drawn in, and the user says.
+    pub scale: Option<f64>,
+    /// The unit's name (`mm`, `m`, `in`, `ft`…), or `unitless`.
+    pub unit: String,
+    /// `$ACADVER` as the file says it, or empty.
+    pub version: String,
+    /// The LAYER table, and a layer an entity names that the table doesn't, with defaults.
     pub layers: Vec<Layer>,
-    /// What was left out, the most of a kind first: `312 TEXT`, `4 SPLINE`.
-    pub left_out: Vec<String>,
-    /// The corners of what came in, mm: south-west, north-east. None where nothing did.
-    pub extent: Option<[P2; 2]>,
-    /// Millimetres to one of the file's units, as the file said or as the caller did.
-    pub scale: f64,
+    pub linetypes: Vec<Linetype>,
+    /// `$LTSCALE`: what every linetype's dashes are multiplied by.
+    pub ltscale: f64,
+    pub entities: Vec<Entity>,
+    /// `$EXTMIN` and `$EXTMAX`, the drawing's extents as the file says them.
+    pub extents: Option<[P2; 2]>,
+    /// What was left out, by what it was, each with its count: kinds of entity the reader doesn't draw, paper space,
+    /// a block nested too deep or not defined, an entity of no size.
+    pub left_out: BTreeMap<String, usize>,
 }
 
-impl Drawing {
-    /// How many shapes came in, over every layer.
-    pub fn shapes(&self) -> usize {
-        self.layers.iter().map(|l| l.shapes.len()).sum()
+impl Dxf {
+    /// The layer named, if the drawing has it.
+    pub fn layer(&self, name: &str) -> Option<&Layer> {
+        self.layers.iter().find(|l| l.name == name)
+    }
+
+    /// The box round everything drawn, drawing units: an arc's or circle's whole circle, a text's point.
+    pub fn bounds(&self) -> Option<[P2; 2]> {
+        union(self.entities.iter().map(|e| e.shape.bounds()))
     }
 }
 
-/// What a drawing's measurements say, held against what it draws: see [`measured`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct Measured {
-    /// How many measurements were read whose figure is a number.
-    pub read: usize,
-    /// What one of those figures' units is, in millimetres: 10 where a drawing prints centimetres.
-    pub unit: f64,
-    /// The scale the drawing's own measurements say it is drawn at, millimetres to one of the file's units, where
-    /// the units it was read with cannot be right. Empty where they can, which is nearly always.
-    pub scale_says: Vec<f64>,
-    /// The measurements whose figure the drawing is not drawn to, the furthest off first.
-    pub disagree: Vec<Disagreed>,
+/// The box round the boxes given.
+pub fn union(boxes: impl IntoIterator<Item = [P2; 2]>) -> Option<[P2; 2]> {
+    boxes.into_iter().reduce(|[lo, hi], [a, b]| [P2(lo.0.min(a.0), lo.1.min(a.1)), P2(hi.0.max(b.0), hi.1.max(b.1))])
 }
 
-/// A measurement that says a length the drawing is not drawn to.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Disagreed {
-    /// What it writes.
-    pub says: String,
-    /// How far apart the two points it was taken between are, mm.
-    pub drawn: f64,
-    /// The middle of the line it is written along: where to go and look.
-    pub at: P2,
+impl Shape {
+    /// The box round it, drawing units: a circle's whole circle, an arc's sweep, a text's point.
+    pub fn bounds(&self) -> [P2; 2] {
+        let pts: Vec<P2> = match self {
+            Shape::Line(a, b) => vec![*a, *b],
+            Shape::Polyline { pts, .. } => pts.clone(),
+            Shape::Circle { c, r } => vec![*c - P2(*r, *r), *c + P2(*r, *r)],
+            // Its ends, and where it passes east, north, west or south of its centre.
+            Shape::Arc { c, r, start, end } => {
+                let at = |deg: f64| *c + P2(deg.to_radians().cos(), deg.to_radians().sin()) * *r;
+                let quarters = (0..8).map(|k| f64::from(k) * 90.0).filter(|q| q > start && q < end);
+                [*start, *end].into_iter().chain(quarters).map(at).collect()
+            }
+            Shape::Point(p) | Shape::Text { at: p, .. } => vec![*p],
+            Shape::Fill { rings, .. } => rings.iter().flatten().copied().collect(),
+        };
+        union(pts.into_iter().map(|p| [p, p])).unwrap_or_default()
+    }
 }
 
-/// Every measurement a drawing writes, held against the geometry it is written over.
-///
-/// A drawing prints a length in units and to a precision of its own and says neither in the dimension. But what
-/// nearly every figure on a drawing is, is the length it stands over printed in those units, so the unit is what most
-/// of its figures agree on: of the units its own figures make, held one at a time against all the others, the one the
-/// most of them come out right under. The middle one of them would do on most drawings and not on all, because the
-/// figures that are not the length under them are the whole of what this is for, and a survey written over in half
-/// its places has no middle worth taking.
-///
-/// Held against that unit, a figure disagrees where it is further from the length under it than the rounding it is
-/// printed to explains — half of its own last digit. That is the survey saying something its drawing does not: a
-/// surveyor who measured 8.70 and drew 8.80 writes `870` over the figure, and a wall traced from that drawing comes
-/// out 100 mm too long. None where the drawing writes no figure that is a number.
-///
-/// That unit is also what catches a file whose units are not what it says they are, which a survey drawn in metres
-/// and saved as millimetres is: read as it says, the building comes out a hand's width across and nothing traces.
-/// A length is written in millimetres, centimetres or metres, both the one a drawing is drawn in and the one it
-/// prints; so a drawing whose figures come out in none of them was read at the wrong scale, and the scales at which
-/// both come out a unit somebody writes in are what its own measurements say it is drawn at ([`Measured::scale_says`]).
-/// Nothing is said of a drawing whose figures already come out in one of the three, which is nearly every drawing.
-pub fn measured(d: &Drawing) -> Option<Measured> {
-    let read: Vec<(f64, &str, f64, P2)> = d
-        .layers
-        .iter()
-        .flat_map(|l| &l.shapes)
-        .filter_map(|shape| {
-            let Shape::Measure { line, text, .. } = shape else { return None };
-            let (says, drawn) = (figure(text)?, line[0].dist(line[1]));
-            let at = P2((line[0].0 + line[1].0) / 2.0, (line[0].1 + line[1].1) / 2.0);
-            (drawn > 0.0).then_some((says, text.as_str(), drawn, at))
-        })
-        .collect();
-    let mut units: Vec<f64> = read.iter().map(|(says, _, drawn, _)| says / drawn).collect();
-    units.sort_by(f64::total_cmp);
-    // The unit the most figures agree on, each held against it to the rounding it is printed to, and the closest
-    // agreement where two units are agreed on by as many. Tried from across the whole spread of them and not at the
-    // middle of it, because a drawing a surveyor has written over in half its places has no middle worth taking.
-    let tries = units.len().clamp(1, TRIED);
-    let agreement = |per_mm: f64| {
-        read.iter()
-            .filter(|(says, text, drawn, _)| (says - drawn * per_mm).abs() <= rounding(text))
-            .fold((0usize, 0.0f64), |(n, off), (says, _, drawn, _)| (n + 1, off + (says - drawn * per_mm).abs()))
+/// Millimetres to the unit `$INSUNITS` names, and the unit's name; none for unitless, and for a unit no building is
+/// drawn in.
+fn insunits(code: i64) -> (Option<f64>, &'static str) {
+    match code {
+        1 => (Some(25.4), "in"),
+        2 => (Some(304.8), "ft"),
+        3 => (Some(1_609_344.0), "miles"),
+        4 => (Some(1.0), "mm"),
+        5 => (Some(10.0), "cm"),
+        6 => (Some(1000.0), "m"),
+        7 => (Some(1e6), "km"),
+        8 => (Some(2.54e-5), "microinches"),
+        9 => (Some(0.0254), "mils"),
+        10 => (Some(914.4), "yards"),
+        11 => (Some(1e-7), "angstroms"),
+        12 => (Some(1e-6), "nanometres"),
+        13 => (Some(1e-3), "microns"),
+        14 => (Some(100.0), "dm"),
+        15 => (Some(1e4), "decametres"),
+        16 => (Some(1e5), "hectometres"),
+        18 => (None, "astronomical units"),
+        19 => (None, "light years"),
+        20 => (None, "parsecs"),
+        21 => (Some(304.800_609_601_2), "US survey feet"),
+        _ => (None, "unitless"),
+    }
+}
+
+/// The drawing a DXF file holds, or what's wrong with it.
+pub fn read(bytes: &[u8]) -> Result<Dxf, String> {
+    if bytes.len() > MAX_BYTES {
+        return Err(format!("it's {} bytes; up to {MAX_BYTES}", bytes.len()));
+    }
+    if bytes.starts_with(b"AutoCAD Binary DXF") {
+        return Err("it's a binary DXF; save it as an ASCII DXF (any version) and bring that in".into());
+    }
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    // A file of 2007 and later is UTF-8. One before is in the code page its header names in $DWGCODEPAGE: the header is ASCII
+    // in every page, so the bytes are scanned for it before any decoding. A page this doesn't know, and a file that names none,
+    // read as Latin-1, as the West's always have and never fail.
+    let text: Cow<str> = match std::str::from_utf8(bytes) {
+        Ok(t) => Cow::Borrowed(t),
+        Err(_) => Cow::Owned(codepage(bytes).map_or_else(|| latin1(bytes), |e| e.decode(bytes).0.into_owned())),
     };
-    let per_mm = (0..tries)
-        .filter_map(|i| units.get(i * units.len() / tries).copied())
-        .filter(|per_mm| per_mm.is_finite() && *per_mm > 0.0)
-        .max_by(|a, b| {
-            let (an, aoff) = agreement(*a);
-            let (bn, boff) = agreement(*b);
-            an.cmp(&bn).then(boff.total_cmp(&aoff))
-        })?;
-    let off = |says: f64, drawn: f64| says - drawn * per_mm;
-    let mut disagree: Vec<Disagreed> = read
-        .iter()
-        .filter(|(says, text, drawn, _)| off(*says, *drawn).abs() > rounding(text))
-        .map(|(_, text, drawn, at)| Disagreed { says: (*text).to_string(), drawn: *drawn, at: *at })
-        .collect();
-    disagree.sort_by(|a, b| {
-        let far = |x: &Disagreed| figure(&x.says).map_or(0.0, |says| off(says, x.drawn).abs());
-        far(b).total_cmp(&far(a))
-    });
-    Some(Measured { read: read.len(), unit: 1.0 / per_mm, scale_says: scale_says(d.scale, 1.0 / per_mm), disagree })
+    read_text(&text)
 }
 
-/// The units a length is written in, millimetres to one: millimetres, centimetres and metres. What a drawing is
-/// drawn in is one of them and what it prints is one of them, and a decimetre is neither.
-const WRITTEN_IN: [f64; 3] = [1.0, 10.0, 1000.0];
+/// [`read`] of text.
+pub fn read_text(text: &str) -> Result<Dxf, String> {
+    Reader { p: Pairs::new(text), header: HashMap::new(), layers: Vec::new(), linetypes: Vec::new(), blocks: HashMap::new(), ents: None }
+        .read()
+}
 
-/// How near a unit a measured one must come to be it: a figure printed to the nearest centimetre over a wall a
-/// metre long is a fortieth out on its own, and the three units are ten times apart, so nothing is ever two.
-const NEARLY: f64 = 0.05;
+/// The text as Latin-1, byte for byte.
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
 
-/// The scales a drawing's figures allow, where the one it was read at is not among them: for each unit it could be
-/// printing in, the scale that would make it so, kept where that scale is itself a unit a drawing is drawn in.
-fn scale_says(read_at: f64, unit: f64) -> Vec<f64> {
-    let nearly = |a: f64, b: f64| (a - b).abs() <= b * NEARLY;
-    if !unit.is_finite() || unit <= 0.0 || WRITTEN_IN.iter().any(|written| nearly(unit, *written)) {
-        return Vec::new();
+/// The encoding the file's `$DWGCODEPAGE` names, looked for in the first 64 KiB: the header is there, and it is ASCII in every
+/// page, so the bytes scan line by line without any decoding.
+fn codepage(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    let head = &bytes[..bytes.len().min(65_536)];
+    let mut lines = head.split(|&b| b == b'\n').map(|l| std::str::from_utf8(l).ok().map(str::trim).unwrap_or(""));
+    while let Some(line) = lines.next() {
+        if line != "$DWGCODEPAGE" {
+            continue;
+        }
+        // The variable's name (9), the value's code (3), then the page: anything else is not a header this reads the page from.
+        let Some(3) = lines.next().and_then(|l| l.trim().parse::<i32>().ok()) else { return None };
+        return lines.next().map(str::trim).and_then(page);
     }
-    WRITTEN_IN
-        .iter()
-        .filter_map(|prints| {
-            let scale = read_at * prints / unit;
-            WRITTEN_IN.iter().copied().find(|drawn_in| nearly(scale, *drawn_in))
+    None
+}
+
+/// The encoding a code page's name says, where a decoder here has one: the East Asian pages, the Windows ones and the few
+/// others. The DOS pages (437, 850, …) have no decoder here and keep the Latin-1 they always had.
+fn page(name: &str) -> Option<&'static encoding_rs::Encoding> {
+    use encoding_rs::*;
+    Some(match name.to_ascii_uppercase().as_str() {
+        "ANSI_874" => WINDOWS_874,
+        "ANSI_932" => SHIFT_JIS,
+        "ANSI_936" => GBK,
+        "ANSI_949" => EUC_KR,
+        "ANSI_950" => BIG5,
+        "ANSI_1250" => WINDOWS_1250,
+        "ANSI_1251" => WINDOWS_1251,
+        "ANSI_1252" => WINDOWS_1252,
+        "ANSI_1253" => WINDOWS_1253,
+        "ANSI_1254" => WINDOWS_1254,
+        "ANSI_1255" => WINDOWS_1255,
+        "ANSI_1256" => WINDOWS_1256,
+        "ANSI_1257" => WINDOWS_1257,
+        "ANSI_1258" => WINDOWS_1258,
+        "ANSI_8859_2" => ISO_8859_2,
+        "ANSI_8859_3" => ISO_8859_3,
+        "ANSI_8859_4" => ISO_8859_4,
+        "ANSI_8859_5" => ISO_8859_5,
+        "ANSI_8859_6" => ISO_8859_6,
+        "ANSI_8859_7" => ISO_8859_7,
+        "ANSI_8859_8" => ISO_8859_8,
+        // Latin-5's bytes are the Windows Turkish ones', so the decoder here has no ISO_8859_9 of its own.
+        "ANSI_8859_9" => WINDOWS_1254,
+        "DOS866" => IBM866,
+        "KOI8_R" => KOI8_R,
+        "MACINTOSH" => MACINTOSH,
+        "ANSI_65001" => UTF_8,
+        _ => return None,
+    })
+}
+
+// ---------- the pairs of a file ----------
+
+/// A file's group codes and values, a pair at a time.
+struct Pairs<'a> {
+    lines: std::str::Split<'a, char>,
+    /// Lines given so far, so a message can say where.
+    line: usize,
+    peeked: Option<(i32, &'a str)>,
+}
+
+impl<'a> Pairs<'a> {
+    fn new(text: &'a str) -> Pairs<'a> {
+        Pairs { lines: text.split('\n'), line: 0, peeked: None }
+    }
+
+    fn next(&mut self) -> Result<Option<(i32, &'a str)>, String> {
+        if let Some(p) = self.peeked.take() {
+            return Ok(Some(p));
+        }
+        let code = loop {
+            let Some(code) = self.lines.next() else { return Ok(None) };
+            self.line += 1;
+            let code = code.trim();
+            if !code.is_empty() {
+                break code;
+            }
+        };
+        let n: i32 = code.parse().map_err(|_| format!("line {}: `{code}` isn't a group code", self.line))?;
+        // The last line of a file that ends in a line break is empty: no value either.
+        let value = self.lines.next().filter(|v| !(v.trim().is_empty() && self.lines.clone().next().is_none()));
+        let Some(value) = value else {
+            return Err(format!("line {}: the file ends after group code {n}, with no value", self.line));
+        };
+        self.line += 1;
+        // Text keeps its spaces; a name, a number or a flag has none that matter.
+        let value = if matches!(n, 1 | 3) { value.strip_suffix('\r').unwrap_or(value) } else { value.trim() };
+        Ok(Some((n, value)))
+    }
+
+    fn peek(&mut self) -> Result<Option<(i32, &'a str)>, String> {
+        if self.peeked.is_none() {
+            self.peeked = self.next()?;
+        }
+        Ok(self.peeked)
+    }
+}
+
+/// A number a file holds, or why it isn't one a drawing can hold.
+fn number(line: usize, v: &str) -> Result<f64, String> {
+    let x: f64 = v.trim().parse().map_err(|_| format!("line {line}: `{v}` isn't a number"))?;
+    if !x.is_finite() {
+        return Err(format!("line {line}: `{v}` isn't a number a drawing can hold"));
+    }
+    if x.abs() <= MAX_FILE_COORD { Ok(x) } else { Err(format!("line {line}: {v} is past what a drawing holds ({MAX_FILE_COORD})")) }
+}
+
+/// One entity, table entry or block header: its kind, where it starts, and its pairs in order.
+struct Ent<'a> {
+    kind: &'a str,
+    line: usize,
+    codes: Vec<(i32, &'a str)>,
+}
+
+impl<'a> Ent<'a> {
+    fn str(&self, code: i32) -> Option<&'a str> {
+        self.codes.iter().find(|(c, _)| *c == code).map(|(_, v)| *v)
+    }
+
+    fn num(&self, code: i32) -> Result<Option<f64>, String> {
+        self.str(code).map(|v| number(self.line, v)).transpose()
+    }
+
+    fn int(&self, code: i32) -> Result<Option<i64>, String> {
+        Ok(self.num(code)?.map(|x| x as i64))
+    }
+
+    /// The point at `code` (its x) and `code + 10` (its y), first of each.
+    fn point(&self, code: i32) -> Result<Option<P2>, String> {
+        match (self.num(code)?, self.num(code + 10)?) {
+            (Some(x), Some(y)) => Ok(Some(P2(x, y))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Every point whose x is at `code`, in order, each with the value at `extra` that follows it (or 0).
+    fn points(&self, code: i32, extra: i32) -> Result<Vec<(P2, f64)>, String> {
+        let mut out: Vec<(P2, f64)> = Vec::new();
+        let mut x = None;
+        for (c, v) in &self.codes {
+            if *c == code {
+                x = Some(number(self.line, v)?);
+            } else if *c == code + 10 {
+                if let Some(x) = x.take() {
+                    out.push((P2(x, number(self.line, v)?), 0.0));
+                }
+            } else if *c == extra
+                && let Some(last) = out.last_mut()
+            {
+                last.1 = number(self.line, v)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every value at `code`, in order.
+    fn all(&self, code: i32) -> Result<Vec<f64>, String> {
+        self.codes.iter().filter(|(c, _)| *c == code).map(|(_, v)| number(self.line, v)).collect()
+    }
+}
+
+// ---------- the sections ----------
+
+struct Block<'a> {
+    base: P2,
+    ents: Vec<Ent<'a>>,
+}
+
+struct Reader<'a> {
+    p: Pairs<'a>,
+    /// Each header variable's pairs.
+    header: HashMap<&'a str, Vec<(i32, &'a str)>>,
+    layers: Vec<Layer>,
+    linetypes: Vec<Linetype>,
+    blocks: HashMap<String, Block<'a>>,
+    /// The ENTITIES section's, once seen.
+    ents: Option<Vec<Ent<'a>>>,
+}
+
+impl<'a> Reader<'a> {
+    fn read(mut self) -> Result<Dxf, String> {
+        while let Some((code, value)) = self.p.next()? {
+            if code != 0 {
+                continue;
+            }
+            match value {
+                "EOF" => break,
+                "SECTION" => {
+                    let name = match self.p.next()? {
+                        Some((2, n)) => n,
+                        _ => return Err(format!("line {}: a SECTION with no name", self.p.line)),
+                    };
+                    match name {
+                        "HEADER" => self.header()?,
+                        "TABLES" => self.tables()?,
+                        "BLOCKS" => self.blocks()?,
+                        "ENTITIES" => self.ents = Some(self.entities()?),
+                        _ => self.skip()?,
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(ents) = self.ents.take() else {
+            return Err("it isn't a DXF: there's no ENTITIES section".into());
+        };
+        let var = |name: &str, code: i32| self.header.get(name).and_then(|v| v.iter().find(|(c, _)| *c == code)).map(|(_, v)| *v);
+        let (scale, unit) = insunits(var("$INSUNITS", 70).and_then(|v| v.trim().parse::<f64>().ok()).map_or(0, |x| x as i64));
+        let version = var("$ACADVER", 1).unwrap_or("").trim().to_string();
+        let ltscale = var("$LTSCALE", 40).and_then(|v| number(0, v).ok()).filter(|x| *x > 0.0).unwrap_or(1.0);
+        let corner = |name: &str| -> Option<P2> {
+            let (x, y) = (var(name, 10)?, var(name, 20)?);
+            Some(P2(number(0, x).ok()?, number(0, y).ok()?))
+        };
+        let extents = match (corner("$EXTMIN"), corner("$EXTMAX")) {
+            (Some(lo), Some(hi)) if lo.0 <= hi.0 && lo.1 <= hi.1 => Some([lo, hi]),
+            _ => None,
+        };
+        let mut out = Out { entities: Vec::new(), left_out: BTreeMap::new(), work: 0 };
+        self.place(&mut out, &ents, Xf::ID, None, 0)?;
+        let mut layers = std::mem::take(&mut self.layers);
+        for e in &out.entities {
+            if !layers.iter().any(|l| l.name == e.layer) {
+                layers.push(Layer {
+                    name: e.layer.clone(),
+                    color: Color::Index(7),
+                    linetype: "Continuous".into(),
+                    weight: None,
+                    off: false,
+                    frozen: false,
+                });
+            }
+        }
+        Ok(Dxf {
+            scale,
+            unit: unit.into(),
+            version,
+            layers,
+            linetypes: std::mem::take(&mut self.linetypes),
+            ltscale,
+            entities: out.entities,
+            extents,
+            left_out: out.left_out,
+        })
+    }
+
+    /// Past the end of this section.
+    fn skip(&mut self) -> Result<(), String> {
+        while let Some((code, value)) = self.p.next()? {
+            if code == 0 && value == "ENDSEC" {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn header(&mut self) -> Result<(), String> {
+        let mut name = None;
+        while let Some((code, value)) = self.p.next()? {
+            match (code, value) {
+                (0, "ENDSEC") => break,
+                (9, n) => name = Some(n),
+                (c, v) => {
+                    if let Some(n) = name {
+                        self.header.entry(n).or_default().push((c, v));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The pairs after a `(0, kind)` up to the next code 0.
+    fn entity(&mut self, kind: &'a str) -> Result<Ent<'a>, String> {
+        let line = self.p.line;
+        let mut codes = Vec::new();
+        // After a 101, an embedded object's data (an MTEXT's columns, written since 2018), whose 10s and 11s aren't the
+        // entity's: read past, not kept, or its point and direction would be the object's.
+        let mut embedded = false;
+        while let Some((c, v)) = self.p.peek()? {
+            if c == 0 {
+                break;
+            }
+            self.p.next()?;
+            embedded |= c == 101;
+            if embedded {
+                continue;
+            }
+            codes.push((c, v));
+            if codes.len() > MAX_PAIRS {
+                return Err(format!("line {line}: one {kind} holds more than {MAX_PAIRS} values"));
+            }
+        }
+        Ok(Ent { kind, line, codes })
+    }
+
+    fn tables(&mut self) -> Result<(), String> {
+        while let Some((code, value)) = self.p.next()? {
+            if code != 0 {
+                continue;
+            }
+            match value {
+                "ENDSEC" => break,
+                "LAYER" => {
+                    let e = self.entity("LAYER")?;
+                    let (color, off) = match (e.int(420)?, e.int(62)?) {
+                        (Some(rgb), _) => (true_color(rgb), false),
+                        (None, Some(n)) if n < 0 => (index_color(-n), true),
+                        (None, Some(n)) => (index_color(n), false),
+                        (None, None) => (Color::Index(7), false),
+                    };
+                    self.layers.push(Layer {
+                        name: e.str(2).unwrap_or("0").to_string(),
+                        color,
+                        linetype: e.str(6).filter(|s| !s.is_empty()).unwrap_or("Continuous").to_string(),
+                        weight: weight(e.int(370)?),
+                        off,
+                        frozen: e.int(70)?.unwrap_or(0) & 1 != 0,
+                    });
+                }
+                "LTYPE" => {
+                    let e = self.entity("LTYPE")?;
+                    self.linetypes.push(Linetype { name: e.str(2).unwrap_or("").to_string(), dashes: e.all(49)? });
+                }
+                kind => {
+                    self.entity(kind)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn blocks(&mut self) -> Result<(), String> {
+        let mut open: Option<(String, Block<'a>)> = None;
+        while let Some((code, value)) = self.p.next()? {
+            if code != 0 {
+                continue;
+            }
+            match value {
+                "ENDSEC" => break,
+                "BLOCK" => {
+                    let e = self.entity("BLOCK")?;
+                    let name = e.str(2).unwrap_or("").to_string();
+                    open = Some((name, Block { base: e.point(10)?.unwrap_or(P2(0.0, 0.0)), ents: Vec::new() }));
+                }
+                "ENDBLK" => {
+                    self.entity("ENDBLK")?;
+                    if let Some((name, block)) = open.take() {
+                        self.blocks.insert(name, block);
+                    }
+                }
+                kind => {
+                    let e = self.entity(kind)?;
+                    if let Some((_, block)) = &mut open {
+                        block.ents.push(e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn entities(&mut self) -> Result<Vec<Ent<'a>>, String> {
+        let mut ents = Vec::new();
+        while let Some((code, value)) = self.p.next()? {
+            if code != 0 {
+                continue;
+            }
+            if value == "ENDSEC" {
+                break;
+            }
+            ents.push(self.entity(value)?);
+        }
+        Ok(ents)
+    }
+}
+
+fn true_color(rgb: i64) -> Color {
+    Color::True((rgb >> 16 & 0xFF) as u8, (rgb >> 8 & 0xFF) as u8, (rgb & 0xFF) as u8)
+}
+
+fn index_color(n: i64) -> Color {
+    match n {
+        0 => Color::ByBlock,
+        1..=255 => Color::Index(n as u8),
+        _ => Color::ByLayer,
+    }
+}
+
+/// A line weight as a file holds it, hundredths of a millimetre; by layer, by block and the default are none.
+fn weight(v: Option<i64>) -> Option<f64> {
+    v.filter(|w| *w >= 0).map(|w| f64::from(w as i32) / 100.0)
+}
+
+// ---------- placing ----------
+
+/// Where a block's entities go: `p` lands on `o + x * p.0 + y * p.1`.
+#[derive(Clone, Copy)]
+struct Xf {
+    o: P2,
+    x: P2,
+    y: P2,
+}
+
+impl Xf {
+    const ID: Xf = Xf { o: P2(0.0, 0.0), x: P2(1.0, 0.0), y: P2(0.0, 1.0) };
+    /// What an extrusion pointing down does: x the other way.
+    const MIRROR_X: Xf = Xf { o: P2(0.0, 0.0), x: P2(-1.0, 0.0), y: P2(0.0, 1.0) };
+
+    fn at(self, p: P2) -> P2 {
+        self.o + self.x * p.0 + self.y * p.1
+    }
+
+    fn vec(self, v: P2) -> P2 {
+        self.x * v.0 + self.y * v.1
+    }
+
+    /// `self` after `inner`: a point goes through `inner` first.
+    fn then(self, inner: Xf) -> Xf {
+        Xf { o: self.at(inner.o), x: self.vec(inner.x), y: self.vec(inner.y) }
+    }
+
+    /// When circles stay circles: the scale, the turn in degrees, and whether it mirrors.
+    fn similarity(self) -> Option<(f64, f64, bool)> {
+        let (lx, ly) = (self.x.length(), self.y.length());
+        let square = self.x.dot(self.y).abs() <= 1e-9 * lx * ly;
+        (lx > 0.0 && (lx - ly).abs() <= 1e-9 * lx && square)
+            .then(|| (lx, self.x.1.atan2(self.x.0).to_degrees(), self.x.cross(self.y) < 0.0))
+    }
+}
+
+/// What a block's entities take from the INSERT that places them: layer 0 becomes its layer, and by block its colour
+/// and linetype.
+struct Inherit<'b> {
+    layer: &'b str,
+    color: Color,
+    linetype: Option<&'b str>,
+}
+
+struct Out {
+    entities: Vec<Entity>,
+    left_out: BTreeMap<String, usize>,
+    work: usize,
+}
+
+impl Out {
+    fn left(&mut self, what: &str) {
+        *self.left_out.entry(what.into()).or_default() += 1;
+    }
+
+    fn push(&mut self, e: Entity) -> Result<(), String> {
+        // Blocks scaled inside blocks can carry a point past any drawing, or past any number.
+        if !e.shape.fits() {
+            self.left("past what a drawing holds");
+            return Ok(());
+        }
+        if self.entities.len() >= MAX_SHAPES {
+            return Err(format!("it draws more than {MAX_SHAPES} shapes; up to that many"));
+        }
+        self.entities.push(e);
+        Ok(())
+    }
+}
+
+/// An entity's layer, colour, linetype and weight, with what it takes from the block it's in.
+struct Style {
+    layer: String,
+    color: Color,
+    linetype: Option<String>,
+    weight: Option<f64>,
+}
+
+impl Style {
+    fn of(e: &Ent, inh: Option<&Inherit>) -> Result<Style, String> {
+        let layer = match (e.str(8).unwrap_or("0"), inh) {
+            ("0", Some(i)) => i.layer,
+            (l, _) => l,
+        };
+        let color = match (e.int(420)?, e.int(62)?) {
+            (Some(rgb), _) => true_color(rgb),
+            (None, Some(n)) => index_color(n.abs()),
+            (None, None) => Color::ByLayer,
+        };
+        let color = match (color, inh) {
+            (Color::ByBlock, Some(i)) => i.color,
+            (c, _) => c,
+        };
+        let linetype = match e.str(6).map(str::trim) {
+            None | Some("") => None,
+            Some(lt) if lt.eq_ignore_ascii_case("BYLAYER") => None,
+            Some(lt) if lt.eq_ignore_ascii_case("BYBLOCK") => inh.and_then(|i| i.linetype).map(String::from),
+            Some(lt) => Some(lt.to_string()),
+        };
+        Ok(Style { layer: layer.chars().take(MAX_CHARS).collect(), color, linetype, weight: weight(e.int(370)?) })
+    }
+}
+
+impl<'a> Reader<'a> {
+    /// `ents` placed through `xf`, those of a block with what they inherit from its INSERT.
+    fn place(&self, out: &mut Out, ents: &[Ent<'a>], xf: Xf, inh: Option<&Inherit>, depth: usize) -> Result<(), String> {
+        let mut i = 0;
+        while let Some(e) = ents.get(i) {
+            i += 1;
+            out.work += 1;
+            if out.work > MAX_WORK {
+                return Err(format!("its blocks place more than {MAX_WORK} entities; up to that many"));
+            }
+            if e.int(67)?.unwrap_or(0) == 1 {
+                out.left("paper space");
+                continue;
+            }
+            let style = Style::of(e, inh)?;
+            let xf = if e.num(230)?.is_some_and(|z| z < 0.0) { xf.then(Xf::MIRROR_X) } else { xf };
+            let shape = match e.kind {
+                "LINE" => match (e.point(10)?, e.point(11)?) {
+                    (Some(a), Some(b)) => Some(Shape::Line(a, b)),
+                    _ => None,
+                },
+                "CIRCLE" => match (e.point(10)?, e.num(40)?) {
+                    (Some(c), Some(r)) if r > 0.0 => Some(Shape::Circle { c, r }),
+                    _ => None,
+                },
+                "ARC" => match (e.point(10)?, e.num(40)?) {
+                    (Some(c), Some(r)) if r > 0.0 => {
+                        let start = e.num(50)?.unwrap_or(0.0);
+                        Some(arc(c, r, start, e.num(51)?.unwrap_or(360.0)))
+                    }
+                    _ => None,
+                },
+                "LWPOLYLINE" => {
+                    let closed = e.int(70)?.unwrap_or(0) & 1 != 0;
+                    polyline(e.points(10, 42)?, closed)
+                }
+                "POLYLINE" => {
+                    let flags = e.int(70)?.unwrap_or(0);
+                    let mut pts = Vec::new();
+                    while let Some(v) = ents.get(i).filter(|v| v.kind == "VERTEX") {
+                        i += 1;
+                        let vflags = v.int(70)?.unwrap_or(0);
+                        // A spline-fit polyline keeps its frame's control points too; they aren't drawn.
+                        if flags & 4 != 0 && vflags & 16 != 0 {
+                            continue;
+                        }
+                        if let Some(p) = v.point(10)? {
+                            pts.push((p, v.num(42)?.unwrap_or(0.0)));
+                        }
+                    }
+                    if ents.get(i).is_some_and(|v| v.kind == "SEQEND") {
+                        i += 1;
+                    }
+                    if flags & (16 | 64) != 0 {
+                        out.left("POLYLINE mesh");
+                        continue;
+                    }
+                    polyline(pts, flags & 1 != 0)
+                }
+                "POINT" => e.point(10)?.map(Shape::Point),
+                "ELLIPSE" => ellipse(e)?,
+                "SPLINE" => spline(e)?,
+                "TEXT" | "ATTRIB" => {
+                    if e.kind == "ATTRIB" && e.int(70)?.unwrap_or(0) & 1 != 0 {
+                        continue;
+                    }
+                    text(e)?
+                }
+                "MTEXT" => {
+                    // A colour its formatting gives the whole of it, before its first word, over the entity's.
+                    let raw: String = e.codes.iter().filter(|(c, _)| *c == 3 || *c == 1).map(|(_, v)| *v).collect();
+                    let color = leading_color(&raw).unwrap_or(style.color);
+                    for line in mtext(e)? {
+                        out.push(Entity {
+                            layer: style.layer.clone(),
+                            color,
+                            linetype: style.linetype.clone(),
+                            weight: style.weight,
+                            shape: transformed(line, xf),
+                        })?;
+                    }
+                    continue;
+                }
+                "HATCH" => hatch(e)?,
+                "SOLID" | "TRACE" => match (e.point(10)?, e.point(11)?, e.point(12)?, e.point(13)?) {
+                    (Some(a), Some(b), Some(c), d) => {
+                        let mut ring = vec![a, b];
+                        if let Some(d) = d.filter(|d| d.dist(c) > 0.0) {
+                            ring.push(d);
+                        }
+                        ring.push(c);
+                        Some(Shape::Fill { rings: vec![ring], solid: true })
+                    }
+                    _ => None,
+                },
+                "INSERT" => {
+                    self.insert(out, e, &style, xf, depth)?;
+                    continue;
+                }
+                "DIMENSION" => {
+                    if let Some(name) = e.str(2) {
+                        self.block(out, name, &style, xf, depth)?;
+                    }
+                    continue;
+                }
+                "SEQEND" | "VERTEX" | "ATTDEF" => continue,
+                other => {
+                    out.left(other);
+                    continue;
+                }
+            };
+            match shape {
+                Some(shape) => out.push(Entity {
+                    layer: style.layer,
+                    color: style.color,
+                    linetype: style.linetype,
+                    weight: style.weight,
+                    shape: transformed(shape, xf),
+                })?,
+                None => out.left("empty"),
+            }
+        }
+        Ok(())
+    }
+
+    /// The block an INSERT names, placed at its point, scaled, turned, and as many times as its array says.
+    fn insert(&self, out: &mut Out, e: &Ent<'a>, style: &Style, xf: Xf, depth: usize) -> Result<(), String> {
+        let Some(name) = e.str(2) else {
+            out.left("INSERT of no block");
+            return Ok(());
+        };
+        let at = e.point(10)?.unwrap_or(P2(0.0, 0.0));
+        let (sx, sy) = (e.num(41)?.unwrap_or(1.0), e.num(42)?.unwrap_or(1.0));
+        if sx == 0.0 || sy == 0.0 {
+            out.left("empty");
+            return Ok(());
+        }
+        let turn = e.num(50)?.unwrap_or(0.0).to_radians();
+        let (cols, rows) = (e.int(70)?.unwrap_or(1).clamp(1, MAX_ARRAY as i64), e.int(71)?.unwrap_or(1).clamp(1, MAX_ARRAY as i64));
+        let (dx, dy) = (e.num(44)?.unwrap_or(0.0), e.num(45)?.unwrap_or(0.0));
+        let (ex, ey) = (P2(turn.cos(), turn.sin()), P2(-turn.sin(), turn.cos()));
+        for row in 0..rows {
+            for col in 0..cols {
+                let o = at + ex * (dx * col as f64) + ey * (dy * row as f64);
+                let local = Xf { o, x: ex * sx, y: ey * sy };
+                self.block(out, name, style, xf.then(local), depth)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The block named, its base on `xf`'s origin.
+    fn block(&self, out: &mut Out, name: &str, style: &Style, xf: Xf, depth: usize) -> Result<(), String> {
+        let Some(block) = self.blocks.get(name) else {
+            out.left("INSERT of a block the file doesn't define");
+            return Ok(());
+        };
+        if depth >= MAX_DEPTH {
+            out.left(&format!("a block nested deeper than {MAX_DEPTH}"));
+            return Ok(());
+        }
+        let unbased = Xf { o: P2(-block.base.0, -block.base.1), ..Xf::ID };
+        let inh = Inherit { layer: &style.layer, color: style.color, linetype: style.linetype.as_deref() };
+        self.place(out, &block.ents, xf.then(unbased), Some(&inh), depth + 1)
+    }
+}
+
+/// `shape` through `xf`: a circle or an arc stays one where circles stay circles, else it's flattened first.
+fn transformed(shape: Shape, xf: Xf) -> Shape {
+    let at = |p: P2| xf.at(p);
+    match shape {
+        Shape::Line(a, b) => Shape::Line(at(a), at(b)),
+        Shape::Polyline { pts, closed } => Shape::Polyline { pts: pts.into_iter().map(at).collect(), closed },
+        Shape::Point(p) => Shape::Point(at(p)),
+        Shape::Fill { rings, solid } => Shape::Fill { rings: rings.into_iter().map(|r| r.into_iter().map(at).collect()).collect(), solid },
+        Shape::Circle { c, r } => match xf.similarity() {
+            Some((k, _, _)) => Shape::Circle { c: at(c), r: r * k },
+            None => {
+                let mut pts: Vec<P2> = arc_points(c, r, 0.0, 360.0).into_iter().map(at).collect();
+                pts.pop();
+                Shape::Polyline { pts, closed: true }
+            }
+        },
+        Shape::Arc { c, r, start, end } => match xf.similarity() {
+            Some((k, turn, mirror)) => {
+                let (s, e) = if mirror { (turn - end, turn - start) } else { (start + turn, end + turn) };
+                arc(at(c), r * k, s, e)
+            }
+            None => Shape::Polyline { pts: arc_points(c, r, start, end - start).into_iter().map(at).collect(), closed: false },
+        },
+        Shape::Text { at: p, height, angle, text, align, tag } => {
+            let (k, turn) = xf.similarity().map_or((xf.x.length(), xf.x.1.atan2(xf.x.0).to_degrees()), |(k, t, _)| (k, t));
+            Shape::Text { at: at(p), height: height * k, angle: angle + turn, text, align, tag }
+        }
+    }
+}
+
+/// The arc counter-clockwise from `start` to `end` degrees, `start` brought into [0, 360) and `end` after it (a whole
+/// turn when they're equal).
+fn arc(c: P2, r: f64, start: f64, end: f64) -> Shape {
+    let start = start.rem_euclid(360.0);
+    let mut sweep = (end - start).rem_euclid(360.0);
+    if sweep == 0.0 {
+        sweep = 360.0;
+    }
+    Shape::Arc { c, r, start, end: start + sweep }
+}
+
+/// Points along the arc from `start` through `sweep` degrees (counter-clockwise when positive), both ends included.
+pub(crate) fn arc_points(c: P2, r: f64, start: f64, sweep: f64) -> Vec<P2> {
+    let n = ((sweep.abs() / 360.0 * CURVE_STEPS as f64).ceil() as usize).clamp(2, CURVE_STEPS);
+    (0..=n)
+        .map(|i| {
+            let a = (start + sweep * i as f64 / n as f64).to_radians();
+            c + P2(a.cos(), a.sin()) * r
         })
         .collect()
 }
 
-/// The number a figure is, where it is one and nothing else. A drawing made in Italy prints `2,80` where one made
-/// elsewhere prints `2.80`, and both say the same length; a figure with a word in it (`var.`, `8.70 m`, `~350`) is
-/// what the drawing says and no number, and nothing is worked out from it.
-fn figure(text: &str) -> Option<f64> {
-    let text = text.trim();
-    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    let ok = match text.strip_prefix('-').unwrap_or(text).split(['.', ',']).collect::<Vec<&str>>().as_slice() {
-        [whole] => digits(whole),
-        [whole, part] => digits(whole) && digits(part),
-        _ => false,
-    };
-    ok.then(|| text.replace(',', ".").parse().ok())?
-}
-
-/// How far a figure may stand from the length under it and still be that length: half of its own last digit, which is
-/// the rounding a drawing prints with, and a hair for the arithmetic.
-fn rounding(text: &str) -> f64 {
-    let places = match text.trim().rsplit_once(['.', ',']) {
-        Some((_, part)) => part.chars().count() as i32,
-        None => 0,
-    };
-    0.5 * 10f64.powi(-places) * (1.0 + 1e-9)
-}
-
-/// `$INSUNITS` as millimetres to one unit: the values of the specification this knows. A file that says nothing, or
-/// says something this does not know (microns, miles, a surveyor's foot), is read as millimetres and says nothing about
-/// it, because a drawing of a building nearly always is.
-fn insunits(code: i64) -> Option<f64> {
-    Some(match code {
-        1 => 25.4,
-        2 => 304.8,
-        4 => 1.0,
-        5 => 10.0,
-        6 => 1000.0,
-        _ => return None,
-    })
-}
-
-/// A pair of lines of a DXF file: its group code, and the value under it.
-struct Pairs<'a> {
-    lines: std::str::Lines<'a>,
-}
-
-impl<'a> Iterator for Pairs<'a> {
-    type Item = (i64, &'a str);
-    fn next(&mut self) -> Option<(i64, &'a str)> {
-        loop {
-            let code = self.lines.next()?.trim();
-            let value = self.lines.next()?.trim_end_matches(['\r', '\n']);
-            if let Ok(code) = code.parse::<i64>() {
-                return Some((code, value.trim()));
-            }
-            // A line that is no group code is a file this does not understand; the next pair may still be one.
-        }
-    }
-}
-
-/// What one entity of the file holds, as its group codes are read.
-#[derive(Default)]
-struct Entity {
-    layer: String,
-    points: Vec<P2>,
-    /// The second point of a line, under codes 11 and 21.
-    second: Option<P2>,
-    x: Option<f64>,
-    y: Option<f64>,
-    radius: Option<f64>,
-    from: Option<f64>,
-    to: Option<f64>,
-    flags: i64,
-    /// The bend of each of its points that has one: which point it is, counted from the first, and the bulge the
-    /// file writes there, which is an arc from that point to the next.
-    bulge: Vec<(usize, f64)>,
-    /// The name a `BLOCK` gives itself and an `INSERT` names, under code 2.
-    name: String,
-    /// What a `TEXT` or an `MTEXT` says, under code 1, with the chunks a long `MTEXT` is cut into under code 3
-    /// before it.
-    text: String,
-    /// What an `INSERT` scales a block by, under codes 41 and 42, and the grid of copies it stands for, under 70
-    /// and 71 with their spacings under 44 and 45. A block put once at its own size says none of them.
-    scale: (Option<f64>, Option<f64>),
-    grid: (Option<i64>, Option<i64>),
-    spacing: (Option<f64>, Option<f64>),
-    /// What a `TEXT`'s point is the point of, under codes 72 and 73, and what an `MTEXT`'s is, under 71: a word is
-    /// written from its left, from its middle or from its right, and the file says which.
-    align: (Option<i64>, Option<i64>),
-    /// The two points a `DIMENSION` measures between, under codes 13 and 23 and 14 and 24.
-    between: (Option<P2>, Option<P2>),
-    /// Every group code of a `HATCH`, in the order the file gives them. A hatch's boundary is loops of edges and its
-    /// pattern is families of lines, and neither can be read out of the codes gathered one by one: the same code
-    /// says a different thing at each turn, and what it says is the turn it comes at.
-    raw: Vec<(i64, String)>,
-}
-
-/// A block put into the drawing by an `INSERT`: which block, on what layer, where, turned and scaled how, and how
-/// many copies of it stand across and up from there.
-#[derive(Clone, Default)]
-struct Put {
-    name: String,
-    layer: String,
-    at: P2,
-    scale: P2,
-    angle: f64,
-    grid: (i64, i64),
-    spacing: P2,
-}
-
-/// What a block holds: a shape, on the layer it is drawn on, or another block put inside it.
-enum Drawn {
-    Shape(String, Shape),
-    Put(Put),
-}
-
-/// Where the points of a block land in the drawing: where its own two axes point, and where its base point goes. A
-/// block put inside a block turns and scales what is turned and scaled already, which is no turn and scale of its
-/// own any more, so this is kept as the two axes and not as an angle.
-#[derive(Clone, Copy)]
-struct Placed {
-    x: P2,
-    y: P2,
-    at: P2,
-}
-
-impl Placed {
-    /// The drawing's own axes: where a block stands that is put nowhere, which is where the drawing's own entities
-    /// stand.
-    const SAME: Placed = Placed { x: P2(1.0, 0.0), y: P2(0.0, 1.0), at: P2(0.0, 0.0) };
-
-    /// Where the `col`th copy across and the `row`th up of a block put so lands.
-    fn of(put: &Put, col: f64, row: f64) -> Placed {
-        let (sin, cos) = put.angle.to_radians().sin_cos();
-        let (x, y) = (put.spacing.0 * col, put.spacing.1 * row);
-        Placed {
-            x: P2(cos * put.scale.0, sin * put.scale.0),
-            y: P2(-sin * put.scale.1, cos * put.scale.1),
-            at: P2(put.at.0 + x * cos - y * sin, put.at.1 + x * sin + y * cos),
-        }
-    }
-
-    /// Where a point of the block lands.
-    fn point(&self, p: P2) -> P2 {
-        P2(self.at.0 + self.x.0 * p.0 + self.y.0 * p.1, self.at.1 + self.x.1 * p.0 + self.y.1 * p.1)
-    }
-
-    /// This placing, done inside `outer`: the block put inside the block put there.
-    fn inside(&self, outer: &Placed) -> Placed {
-        let axis = |a: P2| P2(outer.x.0 * a.0 + outer.y.0 * a.1, outer.x.1 * a.0 + outer.y.1 * a.1);
-        Placed { x: axis(self.x), y: axis(self.y), at: outer.point(self.at) }
-    }
-
-    /// What a radius is multiplied by where a round thing stays round — the two axes as long as each other and
-    /// square to one another — and none where it would come out an ellipse, which is no shape this draws.
-    fn round(&self) -> Option<f64> {
-        let (x, y) = (self.x.0.hypot(self.x.1), self.y.0.hypot(self.y.1));
-        let square = self.x.0 * self.y.0 + self.x.1 * self.y.1;
-        (x > 0.0 && (x - y).abs() <= x * 1e-9 && square.abs() <= x * y * 1e-9).then_some(x)
-    }
-
-    /// Where the angle zero of a circle lands, in degrees, and whether the placing turns it over, which runs an arc
-    /// the other way round.
-    fn turn(&self) -> (f64, bool) {
-        (self.x.1.atan2(self.x.0).to_degrees(), self.x.0 * self.y.1 - self.x.1 * self.y.0 < 0.0)
-    }
-}
-
-impl Entity {
-    /// Keeps the point its x and y have made, where it has both.
-    fn point(&mut self) {
-        if let (Some(x), Some(y)) = (self.x.take(), self.y.take()) {
-            self.points.push(P2(x, y));
-        }
-    }
-}
-
-/// Whether `bytes` are a DWG: `AC10` and two digits, the version code Autodesk writes first. A DWG is not read here —
-/// it has no published specification — but it is told apart, so that what can convert one is asked, and what cannot
-/// says what the file is.
-pub fn is_dwg(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"AC10") && bytes.get(4..6).is_some_and(|v| v.iter().all(u8::is_ascii_digit))
-}
-
-/// The drawing `bytes` holds, or why it is not one.
-pub fn read(bytes: &[u8], o: &Options) -> Result<Drawing, String> {
-    if let Some(scale) = o.scale
-        && !(scale.is_finite() && scale > 0.0)
-    {
-        return Err(format!("a unit of {scale} mm isn't one"));
-    }
-    if bytes.len() > MAX_BYTES {
-        return Err(format!("it's {} bytes; a DXF is read up to {MAX_BYTES}", bytes.len()));
-    }
-    if bytes.starts_with(b"AutoCAD Binary DXF") {
-        return Err("this is a binary DXF, which BIMCraft doesn't read: save it as an ASCII DXF".into());
-    }
-    if bytes.starts_with(b"AC10") || bytes.starts_with(b"MC0.0") {
-        return Err("this is a DWG, Autodesk's own format, which has no published specification: convert it to DXF first".into());
-    }
-    let text = String::from_utf8_lossy(bytes);
-    let mut d = Drawing { scale: o.scale.unwrap_or(1.0), ..Drawing::default() };
-    let mut layers: Vec<Layer> = Vec::new();
-    let mut left_out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    // The bends of a polyline that are no arc, left as the line between their points.
-    let mut straight = 0usize;
-    let mut section = String::new();
-    let mut header: Option<String> = None;
-    let mut kind = String::new();
-    let mut e = Entity::default();
-    // A POLYLINE being read, while its VERTEX entities come in.
-    let mut open: Option<Entity> = None;
-    let mut capped = false;
-    // The blocks the file holds, and the one being read: its name, its base point, and what has been drawn in it so
-    // far. A block is kept as it is drawn and opened where it is put, because a block may put a block the file
-    // holds after it, and because the same block is put in many places.
-    let mut blocks: std::collections::HashMap<String, Vec<Drawn>> = std::collections::HashMap::new();
-    let mut block: Option<(String, P2, Vec<Drawn>)> = None;
-
-    let mut pairs = Pairs { lines: text.lines() }.peekable();
-    while let Some((code, value)) = pairs.next() {
-        // The header's variables: the file's own unit.
-        if section == "HEADER" {
-            match code {
-                9 => header = Some(value.to_string()),
-                70 if header.as_deref() == Some("$INSUNITS") && o.scale.is_none() => {
-                    if let Some(mm) = value.parse::<i64>().ok().and_then(insunits) {
-                        d.scale = mm;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if code != 0 {
-            // What a block is drawn out of is read as the drawing's own entities are, because that is what it is.
-            if section != "ENTITIES" && section != "BLOCKS" {
-                continue;
-            }
-            // A code says different things of different entities: 42 is a polyline's bulge and an insert's scale
-            // across, 70 a polyline's closing and an insert's count across.
-            let put = kind == "INSERT";
-            // A dimension says in 3 what it is drawn in and in 42 what it measures, where the one is a chunk of what
-            // an `MTEXT` says and the other an arc of a polyline read straight.
-            let dim = kind == "DIMENSION";
-            if kind == "HATCH" && e.raw.len() < MAX_RAW {
-                e.raw.push((code, value.to_string()));
-            }
-            match code {
-                1 => e.text.push_str(value),
-                3 if !dim => e.text.push_str(value),
-                2 => e.name = value.to_string(),
-                8 => e.layer = value.to_string(),
-                10 => {
-                    e.point();
-                    e.x = value.parse().ok();
-                }
-                20 => e.y = value.parse().ok(),
-                11 => e.second = value.parse().ok().map(|x| P2(x, 0.0)),
-                21 => {
-                    if let (Some(P2(x, _)), Ok(y)) = (e.second, value.parse::<f64>()) {
-                        e.second = Some(P2(x, y));
-                    }
-                }
-                13 => e.between.0 = value.parse().ok().map(|x| P2(x, 0.0)),
-                23 => {
-                    if let (Some(P2(x, _)), Ok(y)) = (e.between.0, value.parse::<f64>()) {
-                        e.between.0 = Some(P2(x, y));
-                    }
-                }
-                14 => e.between.1 = value.parse().ok().map(|x| P2(x, 0.0)),
-                24 => {
-                    if let (Some(P2(x, _)), Ok(y)) = (e.between.1, value.parse::<f64>()) {
-                        e.between.1 = Some(P2(x, y));
-                    }
-                }
-                40 => e.radius = value.parse().ok(),
-                41 if put => e.scale.0 = value.parse().ok(),
-                42 if put => e.scale.1 = value.parse().ok(),
-                42 if dim => {}
-                42 => {
-                    // The point it bends from is the one being read, which is not in its points until it is done.
-                    if let Ok(b) = value.parse::<f64>()
-                        && b != 0.0
-                        && e.bulge.len() < MAX_VERTICES
-                    {
-                        e.bulge.push((e.points.len(), b));
-                    }
-                }
-                44 if put => e.spacing.0 = value.parse().ok(),
-                45 if put => e.spacing.1 = value.parse().ok(),
-                50 => e.from = value.parse().ok(),
-                51 => e.to = value.parse().ok(),
-                70 if put => e.grid.0 = value.parse().ok(),
-                71 if put => e.grid.1 = value.parse().ok(),
-                70 => e.flags = value.parse().unwrap_or(0),
-                71 | 72 => e.align.0 = value.parse().ok(),
-                73 => e.align.1 = value.parse().ok(),
-                _ => {}
-            }
-            continue;
-        }
-        // A new entity, or the end of one: what was being read is finished first.
-        e.point();
-        // A POLYLINE is a header, and its points are the VERTEX entities that follow it, to its SEQEND. Anything else
-        // holds its own points and is finished where it ends.
-        let mut put: Option<Put> = None;
-        let done: Vec<(String, Shape)> = match kind.as_str() {
-            "POLYLINE" => {
-                open = Some(std::mem::take(&mut e));
-                Vec::new()
-            }
-            // A block opens where it is named and holds what is drawn until its end. Its base point is the point
-            // of it that lands where it is put, so what it holds is kept from there.
-            "BLOCK" => {
-                let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
-                block = Some((e.name.clone(), P2(at.0 * d.scale, at.1 * d.scale), Vec::new()));
-                Vec::new()
-            }
-            "ENDBLK" => {
-                if let Some((name, _, held)) = block.take() {
-                    blocks.insert(name, held);
-                }
-                Vec::new()
-            }
-            "INSERT" => {
-                let at = e.points.first().copied().unwrap_or(P2(0.0, 0.0));
-                let across = e.grid.0.unwrap_or(1).clamp(0, MAX_SHAPES as i64);
-                put = Some(Put {
-                    name: e.name.clone(),
-                    layer: e.layer.clone(),
-                    at: P2(at.0 * d.scale, at.1 * d.scale),
-                    scale: P2(e.scale.0.unwrap_or(1.0), e.scale.1.unwrap_or(1.0)),
-                    angle: e.from.unwrap_or(0.0),
-                    grid: (across, e.grid.1.unwrap_or(1).clamp(0, MAX_SHAPES as i64)),
-                    spacing: P2(e.spacing.0.unwrap_or(0.0) * d.scale, e.spacing.1.unwrap_or(0.0) * d.scale),
-                });
-                Vec::new()
-            }
-            "VERTEX" => {
-                if let Some(o) = &mut open {
-                    // Its bend is its own point's, which stands where this vertex lands among the polyline's.
-                    let at = o.points.len();
-                    o.bulge.extend(e.bulge.iter().map(|(_, b)| (at, *b)));
-                    o.points.append(&mut e.points);
-                }
-                Vec::new()
-            }
-            // What the drawing measures. The figure it prints is read out of the picture a CAD drew it as, which is a
-            // block of its own, so this is here and not in `finish`, where the blocks are not to hand.
-            "DIMENSION" => measurement(&e, d.scale, &blocks).map(|shape| (e.layer.clone(), shape)).into_iter().collect(),
-            // What the drawing fills an area with. Its boundary and its pattern are read out of its group codes in
-            // the order they come, so this is here with the dimension and not in `finish`.
-            "HATCH" => filled(&e, d.scale, &mut left_out).map(|shape| (e.layer.clone(), shape)).into_iter().collect(),
-            "SEQEND" => match open.take() {
-                None => Vec::new(),
-                Some(mut o) => {
-                    let layer = o.layer.clone();
-                    pieces("POLYLINE", &mut o, d.scale, &mut straight).into_iter().map(|shape| (layer.clone(), shape)).collect()
-                }
-            },
-            other => pieces(other, &mut e, d.scale, &mut straight).into_iter().map(|shape| (e.layer.clone(), shape)).collect(),
-        };
-        // What was read is drawn into the block being read, where there is one, and into the drawing otherwise.
-        let read = !done.is_empty();
-        for (layer, shape) in done {
-            match &mut block {
-                Some((_, base, held)) => held.push(Drawn::Shape(layer, from_base(shape, *base))),
-                None if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => capped = true,
-                None => draw(&mut layers, &layer, shape),
-            }
-        }
-        match (read, put) {
-            (_, Some(put)) => match &mut block {
-                Some((_, _, held)) => held.push(Drawn::Put(put)),
-                None => open_up(&put, &blocks, &mut layers, &mut left_out, &mut capped),
-            },
-            (true, None) => {}
-            // What it does not read: named by its own kind, once for each of them. A POLYLINE is left out where its
-            // vertices made no path, and its VERTEX and SEQEND are parts of it, not kinds of their own.
-            // The words that hold a file together are no kind of thing: a section opens while its name is still being
-            // read, so its own marker would otherwise be counted among what was left out.
-            (false, None)
-                if !kind.is_empty()
-                    && !matches!(
-                        kind.as_str(),
-                        "VERTEX" | "SEQEND" | "POLYLINE" | "SECTION" | "ENDSEC" | "EOF" | "TABLE" | "ENDTAB" | "BLOCK" | "ENDBLK" | "CLASS"
-                    )
-                    && (section == "ENTITIES" || block.is_some()) =>
-            {
-                // A dimension is counted by what it measures, because the kinds of it this does not read measure
-                // something else entirely and a count of them says so.
-                let what = match kind.as_str() {
-                    "DIMENSION" => unread_dimension(&e),
-                    _ => kind.clone(),
-                };
-                *left_out.entry(what).or_default() += 1;
-            }
-            (false, None) => {}
-        }
-        e = Entity::default();
-        kind = value.to_string();
-        match value {
-            "SECTION" => section = String::new(),
-            "ENDSEC" => section = String::new(),
-            _ => {}
-        }
-        // The name of a section follows its `0/SECTION` under code 2.
-        if value == "SECTION"
-            && let Some(&(2, name)) = pairs.peek()
-        {
-            section = name.to_string();
-        }
-    }
-
-    if capped {
-        left_out.insert(format!("shapes past the {MAX_SHAPES} a drawing holds"), 1);
-    }
-    if straight > 0 {
-        left_out.insert("polyline bends that are no arc, read as the straight line between their points".into(), straight);
-    }
-    let mut named: Vec<(String, usize)> = left_out.into_iter().collect();
-    named.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    d.left_out = named.into_iter().take(NAMED).map(|(what, n)| format!("{n} {what}")).collect();
-    d.extent = extent(&layers);
-    d.layers = layers;
-    Ok(d)
-}
-
-/// `shape` drawn on `layer`, which the drawing holds already or gains here, so that the layers stand in the order
-/// they were first drawn on.
-fn draw(layers: &mut Vec<Layer>, layer: &str, shape: Shape) {
-    let name = if layer.trim().is_empty() { "0" } else { layer.trim() };
-    match layers.iter_mut().find(|l| l.name == name) {
-        Some(l) => l.shapes.push(shape),
-        None => layers.push(Layer { name: name.to_string(), shapes: vec![shape] }),
-    }
-}
-
-/// A shape of a block as the block holds it: measured from its base point, which is the point of it that lands
-/// where the block is put.
-fn from_base(shape: Shape, base: P2) -> Shape {
-    let off = |p: P2| P2(p.0 - base.0, p.1 - base.1);
-    match shape {
-        Shape::Line([a, b]) => Shape::Line([off(a), off(b)]),
-        Shape::Path { points, closed } => Shape::Path { points: points.into_iter().map(off).collect(), closed },
-        Shape::Arc { at, radius, from, to } => Shape::Arc { at: off(at), radius, from, to },
-        Shape::Point { at } => Shape::Point { at: off(at) },
-        Shape::Words { at, text, height, angle } => Shape::Words { at: off(at), text, height, angle },
-        Shape::Measure { from, to, line, text, height } => {
-            Shape::Measure { from: off(from), to: off(to), line: [off(line[0]), off(line[1])], text, height }
-        }
-        Shape::Fill { pattern, solid, rings, rulings } => {
-            Shape::Fill { pattern, solid, rings: rings.into_iter().map(|r| r.into_iter().map(off).collect()).collect(), rulings }
-        }
-    }
-}
-
-/// A block put into the drawing: every copy of it the grid says, each opened where it stands.
-fn open_up(
-    put: &Put,
-    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
-    layers: &mut Vec<Layer>,
-    left_out: &mut std::collections::BTreeMap<String, usize>,
-    capped: &mut bool,
-) {
-    // A block holding nothing draws nothing, so nothing would ever stop a grid of a million rows of a million of
-    // it, or eight of those inside one another. How many times a block is opened at all is counted and bounded by
-    // what a drawing holds, which is the one bound that holds whatever a file asks for.
-    let mut tries = 0usize;
-    put_in(put, "0", &Placed::SAME, blocks, 0, layers, left_out, capped, &mut tries);
-}
-
-/// The same, inside a block put there already: on the layer that one came in on, where that one put it.
-#[allow(clippy::too_many_arguments)]
-fn put_in(
-    put: &Put,
-    on: &str,
-    outer: &Placed,
-    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
-    depth: usize,
-    layers: &mut Vec<Layer>,
-    left_out: &mut std::collections::BTreeMap<String, usize>,
-    capped: &mut bool,
-    tries: &mut usize,
-) {
-    let on = match put.layer.trim() {
-        "" | "0" => on,
-        own => own,
-    };
-    for row in 0..put.grid.1.max(1) {
-        for col in 0..put.grid.0.max(1) {
-            if *capped {
-                return;
-            }
-            let placed = Placed::of(put, col as f64, row as f64).inside(outer);
-            opened(&put.name, on, &placed, blocks, depth, layers, left_out, capped, tries);
-        }
-    }
-}
-
-/// A block opened: every shape it holds, drawn on the layer it comes in on, where the placing puts it. A block
-/// holds blocks, so this goes round again — [`MAX_NESTING`] deep, past which a drawing is drawing itself.
-#[allow(clippy::too_many_arguments)]
-fn opened(
-    name: &str,
-    on: &str,
-    placed: &Placed,
-    blocks: &std::collections::HashMap<String, Vec<Drawn>>,
-    depth: usize,
-    layers: &mut Vec<Layer>,
-    left_out: &mut std::collections::BTreeMap<String, usize>,
-    capped: &mut bool,
-    tries: &mut usize,
-) {
-    *tries += 1;
-    if *tries > MAX_SHAPES {
-        *capped = true;
-        return;
-    }
-    if depth >= MAX_NESTING {
-        *left_out.entry(format!("blocks put more than {MAX_NESTING} deep, left unopened")).or_default() += 1;
-        return;
-    }
-    let Some(held) = blocks.get(name) else {
-        *left_out.entry("INSERT of a block the file doesn't hold".into()).or_default() += 1;
-        return;
-    };
-    for drawn in held {
-        if *capped {
-            return;
-        }
-        match drawn {
-            // What a block draws on layer 0 takes the layer the block is put on, as a drawing has it; what it
-            // draws on a layer of its own keeps that one.
-            Drawn::Shape(layer, shape) => {
-                let on = match layer.trim() {
-                    "" | "0" => on,
-                    own => own,
-                };
-                match placing(shape, placed) {
-                    Ok(_) if layers.iter().map(|l| l.shapes.len()).sum::<usize>() >= MAX_SHAPES => *capped = true,
-                    Ok(shape) => draw(layers, on, shape),
-                    Err(why) => *left_out.entry(why.into()).or_default() += 1,
-                }
-            }
-            Drawn::Put(inner) => put_in(inner, on, placed, blocks, depth + 1, layers, left_out, capped, tries),
-        }
-    }
-}
-
-/// A shape of a block where the placing puts it, or why it is not drawn there.
-fn placing(shape: &Shape, placed: &Placed) -> Result<Shape, &'static str> {
-    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
-    let far = "things in a block put farther from the origin than a drawing reaches";
-    match shape {
-        Shape::Line([a, b]) => {
-            let line = [placed.point(*a), placed.point(*b)];
-            line.iter().all(sane).then_some(Shape::Line(line)).ok_or(far)
-        }
-        Shape::Path { points, closed } => {
-            let points: Vec<P2> = points.iter().map(|p| placed.point(*p)).collect();
-            points.iter().all(sane).then_some(Shape::Path { points, closed: *closed }).ok_or(far)
-        }
-        Shape::Point { at } => {
-            let at = placed.point(*at);
-            sane(&at).then_some(Shape::Point { at }).ok_or(far)
-        }
-        Shape::Arc { at, radius, from, to } => {
-            // Scaled evenly a circle is a circle, and scaled unevenly it is an ellipse, which this does not draw.
-            let radius = radius * placed.round().ok_or("round things in a block scaled into ellipses")?;
-            let at = placed.point(*at);
-            let (turn, over) = placed.turn();
-            // A whole circle stays a whole circle, whatever it is turned by. An arc turns with the block, and a
-            // block turned over runs it the other way round, so its two ends change places.
-            let (from, to) = match ((to - from).abs() >= 360.0, over) {
-                (true, _) => (0.0, 360.0),
-                (false, false) => (from + turn, to + turn),
-                (false, true) => (turn - to, turn - from),
-            };
-            let round = (from / 360.0).floor() * 360.0;
-            let (from, to) = (from - round, to - round);
-            let ok = sane(&at) && radius.is_finite() && radius > 0.0 && radius <= MAX_COORD && from.is_finite() && to.is_finite();
-            ok.then_some(Shape::Arc { at, radius, from, to }).ok_or(far)
-        }
-        Shape::Words { at, text, height, angle } => {
-            // A word is as tall as the block makes it and turned with it, however unevenly the block is scaled:
-            // what it says is the whole of what it is for, and a word is no shape to come out wrong.
-            let (turn, _) = placed.turn();
-            let height = height * placed.y.0.hypot(placed.y.1);
-            let at = placed.point(*at);
-            let ok = sane(&at) && height.is_finite() && height > 0.0 && height <= MAX_COORD;
-            ok.then_some(Shape::Words { at, text: text.clone(), height, angle: angle + turn }).ok_or(far)
-        }
-        Shape::Measure { from, to, line, text, height } => {
-            // A measurement goes where the block puts it, and its figure is as tall as the block makes it: what it
-            // says of a distance is the whole of what it is for.
-            let height = height * placed.y.0.hypot(placed.y.1);
-            let (from, to) = (placed.point(*from), placed.point(*to));
-            let line = [placed.point(line[0]), placed.point(line[1])];
-            let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && height <= MAX_COORD;
-            ok.then_some(Shape::Measure { from, to, line, text: text.clone(), height }).ok_or(far)
-        }
-        Shape::Fill { pattern, solid, rings, rulings } => {
-            // A pattern goes with the block: its lines turn with it and spread as it is scaled. Scaled unevenly
-            // they would be a family of lines no longer evenly apart, which is no pattern this draws.
-            let spread = placed.round().ok_or("hatches in a block scaled into ellipses")?;
-            let (turn, over) = placed.turn();
-            let rings: Vec<Vec<P2>> = rings.iter().map(|r| r.iter().map(|p| placed.point(*p)).collect()).collect();
-            let rulings = rulings
-                .iter()
-                .map(|r| Ruling {
-                    angle: if over { turn - r.angle } else { r.angle + turn },
-                    gap: r.gap * spread,
-                    shift: r.shift * spread,
-                    dashes: r.dashes.iter().map(|d| d * spread).collect(),
-                })
-                .collect();
-            match rings.iter().flatten().all(sane) {
-                true => Ok(Shape::Fill { pattern: pattern.clone(), solid: *solid, rings, rulings }),
-                false => Err(far),
-            }
-        }
-    }
-}
-
-/// What a `DIMENSION` measures, in millimetres, or none where it is a kind of dimension that measures no length
-/// between two points.
-///
-/// A dimension is written along a line of its own, and that line is not always the line between the two points it
-/// measures: a surveyor measuring the width of a room between two corners that are not level with one another writes
-/// the width. A linear dimension says how far that line is turned (code 50); an aligned one runs along its two
-/// points. So the two points are brought onto it, and how long it is between them is what the drawing measured.
-///
-/// What it says there is its own word on it (code 1), where a survey writes one over the figure, and otherwise the
-/// figure the picture a CAD drew it as prints. The figure is read where it was written and never worked out again from
-/// what was measured: a drawing prints in units and to a precision of its own — this one prints centimetres — and
-/// keeps them in its dimension style, not in the dimension.
-fn measurement(e: &Entity, scale: f64, blocks: &std::collections::HashMap<String, Vec<Drawn>>) -> Option<Shape> {
-    let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
-    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
-    let (from, to) = (mm(e.between.0?), mm(e.between.1?));
-    let at = mm(*e.points.first()?);
-    let along = match e.flags & 7 {
-        0 => {
-            let turn = e.from.unwrap_or(0.0);
-            let (sin, cos) = turn.to_radians().sin_cos();
-            turn.is_finite().then_some(P2(cos, sin))?
-        }
-        1 => {
-            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-            let len = dx.hypot(dy);
-            (len > 0.0).then_some(P2(dx / len, dy / len))?
-        }
-        _ => return None,
-    };
-    let onto = |p: P2| {
-        let out = (p.0 - at.0) * along.0 + (p.1 - at.1) * along.1;
-        P2(at.0 + along.0 * out, at.1 + along.1 * out)
-    };
-    let line = [onto(from), onto(to)];
-    // The figure, as the picture prints it. A word written over the figure may have the figure in it, written `<>`.
-    let printed = blocks.get(&e.name).into_iter().flatten().find_map(|drawn| match drawn {
-        Drawn::Shape(_, Shape::Words { text, height, .. }) => Some((text.clone(), *height)),
-        _ => None,
-    });
-    let (figure, height) = printed.unwrap_or_default();
-    let over = e.text.trim();
-    let text = match over.is_empty() {
-        true => figure,
-        false => over.replace("<>", &figure),
-    };
-    let ok = [from, to, line[0], line[1]].iter().all(sane) && height.is_finite() && (0.0..=MAX_COORD).contains(&height);
-    (ok && text.chars().count() <= MAX_WORD).then_some(Shape::Measure { from, to, line, text, height })
-}
-
-/// What a `HATCH` fills, in millimetres, or none where it fills nothing this can read.
-///
-/// A hatch is read out of its group codes in the order the specification gives them, because the same code says a
-/// different thing at each turn of it: after the number of boundary loops (91) each loop says what kind it is (92)
-/// and then either the points of a polyline or one edge after another, and after the boundary the pattern says how
-/// many families of lines it is drawn with (78) and then each family's angle and offset.
-///
-/// Only the loops the file marks as a boundary of their own — external, or outermost — are filled. A loop that is
-/// neither is an island left out of the hatch, and filling one would fill what the drawing left empty. A loop drawn
-/// with a spline or an ellipse is not read and is counted: half a boundary is a ring that is not the shape it fills.
-fn filled(e: &Entity, scale: f64, left_out: &mut std::collections::BTreeMap<String, usize>) -> Option<Shape> {
-    let raw = &e.raw;
-    let at = |i: usize| raw.get(i).map(|(code, _)| *code);
-    let num = |i: usize| raw.get(i).and_then(|(_, v)| v.trim().parse::<f64>().ok());
-    let int = |i: usize| raw.get(i).and_then(|(_, v)| v.trim().parse::<i64>().ok()).unwrap_or(0);
-    let find = |from: usize, code: i64| (from..raw.len()).find(|i| at(*i) == Some(code));
-    // A point under `x` and the code after it: a hatch writes its y under the x, always.
-    let point = |i: usize, x: i64, y: i64| match (num(i), at(i + 1) == Some(y) && at(i) == Some(x)) {
-        (Some(px), true) => num(i + 1).map(|py| P2(px * scale, py * scale)),
-        _ => None,
-    };
-    let mut rings: Vec<Vec<P2>> = Vec::new();
-    let mut unread = 0usize;
-    let mut i = find(0, 91)?;
-    let loops = int(i).clamp(0, MAX_RINGS as i64) as usize;
-    i += 1;
-    for _ in 0..loops {
-        let Some(f) = find(i, 92) else { break };
-        let (kind, mut ring, mut whole) = (int(f), Vec::new(), true);
-        i = f + 1;
-        let Some(n) = find(i, 93) else { break };
-        let count = int(n).clamp(0, MAX_VERTICES as i64) as usize;
-        i = n + 1;
-        // A polyline boundary is its points; any other is one edge after another, each saying its own kind first.
-        if kind & 2 != 0 {
-            for _ in 0..count {
-                let Some(x) = find(i, 10) else { break };
-                i = x + 2;
-                ring.extend(point(x, 10, 20));
-            }
-        } else {
-            for _ in 0..count {
-                let Some(t) = find(i, 72) else { break };
-                i = t + 1;
-                match int(t) {
-                    1 => {
-                        let (from, to) = (find(i, 10).and_then(|x| point(x, 10, 20)), find(i, 11).and_then(|x| point(x, 11, 21)));
-                        match (from, to) {
-                            (Some(from), Some(to)) => {
-                                ring.push(from);
-                                ring.push(to);
-                            }
-                            _ => whole = false,
-                        }
-                        i = find(i, 11).map_or(i, |x| x + 2);
-                    }
-                    2 => {
-                        let centre = find(i, 10).and_then(|x| point(x, 10, 20));
-                        let radius = find(i, 40).and_then(num).map(|r| r * scale);
-                        let (from, to) = (find(i, 50).map(|x| num(x).unwrap_or(0.0)), find(i, 51).map(|x| num(x).unwrap_or(360.0)));
-                        match (centre, radius, from, to) {
-                            (Some(centre), Some(radius), Some(from), Some(to)) if radius > 0.0 => {
-                                ring.extend(crate::geom::along_arc(centre, radius, from, to));
-                            }
-                            _ => whole = false,
-                        }
-                        i = find(i, 51).map_or(i, |x| x + 1);
-                    }
-                    // An ellipse or a spline: a shape this does not draw, so the ring it is part of is not the
-                    // shape the drawing fills and is left out whole.
-                    _ => whole = false,
-                }
-            }
-        }
-        let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
-        ring.dedup();
-        match whole && ring.len() >= 3 && ring.iter().all(sane) {
-            true if kind & 1 != 0 || kind & 16 != 0 => rings.push(ring),
-            true => {}
-            false => unread += 1,
-        }
-    }
-    if unread > 0 {
-        *left_out.entry("hatch boundaries drawn with a spline or an ellipse".into()).or_default() += unread;
-    }
-    // The families of lines the pattern is drawn with. The offset (45 and 46) is the way one line of a family stands
-    // from the next, turned as the family itself is, so how far apart they are across themselves is the part of it
-    // that lies across the line — the rest is how far the dashes along one are shifted from those along the next.
-    let mut rulings = Vec::new();
-    if let Some(n) = find(0, 78) {
-        let mut i = n + 1;
-        for _ in 0..int(n).clamp(0, MAX_RULINGS as i64) {
-            let Some(a) = find(i, 53) else { break };
-            let angle = num(a).unwrap_or(0.0);
-            let Some(o) = find(a, 45) else { break };
-            i = o + 2;
-            let (Some(across), Some(up)) = (num(o), num(o + 1).filter(|_| at(o + 1) == Some(46))) else { continue };
-            let (sin, cos) = angle.to_radians().sin_cos();
-            let gap = (cos * up - sin * across).abs() * scale;
-            let shift = (cos * across + sin * up) * scale;
-            // The dashes the lines of this family are drawn with, under 49, as many as 79 says.
-            let dashes: Vec<f64> = match find(o, 79) {
-                Some(n) => (0..int(n).clamp(0, MAX_DASHES as i64))
-                    .filter_map(|k| find(n + 1 + k as usize, 49).filter(|d| *d == n + 1 + k as usize).and_then(num))
-                    .map(|d| d * scale)
-                    .collect(),
-                None => Vec::new(),
-            };
-            if angle.is_finite() && gap.is_finite() && gap > 0.0 && shift.is_finite() && dashes.iter().all(|d| d.is_finite()) {
-                rulings.push(Ruling { angle, gap, shift, dashes });
-            }
-        }
-    }
-    let solid = e.flags & 1 != 0;
-    (!rings.is_empty()).then(|| Shape::Fill { pattern: e.name.clone(), solid, rings, rulings })
-}
-
-/// What a dimension this does not read measures, to be counted by: a count of them says what they were, where a count
-/// of `DIMENSION` would say only that a drawing has some.
-fn unread_dimension(e: &Entity) -> String {
-    match e.flags & 7 {
-        2 | 5 => "DIMENSION of an angle",
-        3 => "DIMENSION of a diameter",
-        4 => "DIMENSION of a radius",
-        6 => "DIMENSION of a coordinate",
-        _ => "DIMENSION",
-    }
-    .to_string()
-}
-
-/// What an entity of `kind` is drawn as, in millimetres: one shape, or, where a polyline bends, the several that a
-/// bend splits it into. `straight` counts the bends that are no arc and are left as the line between their points.
-fn pieces(kind: &str, e: &mut Entity, scale: f64, straight: &mut usize) -> Vec<Shape> {
-    match kind {
-        "LWPOLYLINE" | "POLYLINE" if !e.bulge.is_empty() => bent(e, scale, straight),
-        _ => finish(kind, e, scale).into_iter().collect(),
-    }
-}
-
-/// The pieces a polyline that bends is drawn in: an arc for each bend of it, and a path for each run of points
-/// between them. A closed one is drawn with the run back to its first point, so none of it is lost with the flag.
-fn bent(e: &Entity, scale: f64, straight: &mut usize) -> Vec<Shape> {
-    let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
-    let points: Vec<P2> = e.points.iter().map(|p| mm(*p)).collect();
-    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
-    if points.len() < 2 || points.len() > MAX_VERTICES || !points.iter().all(sane) {
-        *straight += e.bulge.len();
-        return Vec::new();
-    }
-    let closed = e.flags & 1 == 1;
-    let (mut out, mut run): (Vec<Shape>, Vec<P2>) = (Vec::new(), Vec::new());
-    for i in 0..points.len() - usize::from(!closed) {
-        let (a, b) = (points[i], points[(i + 1) % points.len()]);
-        let bulge = e.bulge.iter().find(|(at, _)| *at == i).map(|(_, bulge)| *bulge);
-        match bulge.and_then(|bulge| bow(a, b, bulge)) {
-            Some(arc) => {
-                if run.len() > 1 {
-                    out.push(Shape::Path { points: std::mem::take(&mut run), closed: false });
-                }
-                run.clear();
-                out.push(arc);
-            }
-            None => {
-                *straight += usize::from(bulge.is_some());
-                if run.is_empty() {
-                    run.push(a);
-                }
-                run.push(b);
-            }
-        }
-    }
-    if run.len() > 1 {
-        out.push(Shape::Path { points: run, closed: false });
-    }
-    out
-}
-
-/// The arc a bulge draws from `a` to `b`, or none where it draws none. A bulge is the tangent of a quarter of the
-/// angle the arc takes up, signed: counter-clockwise from `a` where it is positive, and clockwise where it is
-/// negative — so a positive one bows to the right of the way the polyline runs, which the half circle shows
-/// outright (counter-clockwise from the west end of a chord to the east end passes under it, never over). An arc
-/// is held counter-clockwise from the first of its angles, so a negative bulge is the same arc read from `b`
-/// round to `a`.
-fn bow(a: P2, b: P2, bulge: f64) -> Option<Shape> {
-    let (across, turn) = (a.dist(b), 4.0 * bulge.atan());
-    let (sin, tan) = ((turn / 2.0).sin(), (turn / 2.0).tan());
-    if !(across.is_finite() && across > 0.0 && sin.abs() > 1e-12 && tan.abs() > 1e-12 && tan.is_finite()) {
+/// A polyline of vertices, each with the bulge of the segment that leaves it: bent segments flattened.
+fn polyline(pts: Vec<(P2, f64)>, closed: bool) -> Option<Shape> {
+    if pts.len() < 2 {
         return None;
     }
-    let at = (a + b) * 0.5 + ((b - a) * (1.0 / across)).perp() * (across / (2.0 * tan));
-    let radius = (across / (2.0 * sin)).abs();
-    let deg = |p: P2| (p.1 - at.1).atan2(p.0 - at.0).to_degrees();
-    let (from, to) = match bulge > 0.0 {
-        true => (deg(a), deg(b)),
-        false => (deg(b), deg(a)),
-    };
-    let sane = at.0.is_finite() && at.1.is_finite() && at.0.abs() <= MAX_COORD && at.1.abs() <= MAX_COORD;
-    (sane && radius.is_finite() && radius > 0.0 && radius <= MAX_COORD && from.is_finite() && to.is_finite()).then_some(Shape::Arc {
-        at,
-        radius,
-        from,
-        to,
-    })
-}
-
-/// The shape an entity of `kind` makes, in millimetres, or none where it makes none: a kind this does not read, or one
-/// whose numbers are not a shape (a line of one point, a radius that is no length, a polyline of nothing).
-fn finish(kind: &str, e: &mut Entity, scale: f64) -> Option<Shape> {
-    let mm = |p: P2| P2(p.0 * scale, p.1 * scale);
-    let sane = |p: &P2| p.0.is_finite() && p.1.is_finite() && p.0.abs() <= MAX_COORD && p.1.abs() <= MAX_COORD;
-    match kind {
-        "LINE" => {
-            let (from, to) = (mm(*e.points.first()?), mm(e.second?));
-            let line = [from, to];
-            line.iter().all(sane).then_some(Shape::Line(line))
-        }
-        "LWPOLYLINE" | "POLYLINE" => {
-            // One of more points than a path holds is left out with its kind, not cut short: half a drawing is worse
-            // than none of it, and what was left out is said.
-            if e.points.len() > MAX_VERTICES {
-                return None;
-            }
-            let points: Vec<P2> = e.points.iter().map(|p| mm(*p)).collect();
-            if points.len() < 2 || !points.iter().all(sane) {
-                return None;
-            }
-            Some(Shape::Path { points, closed: e.flags & 1 == 1 })
-        }
-        "TEXT" | "MTEXT" => {
-            // A word is what it says, so one that says nothing is none; one longer than a drawing writes is left out
-            // whole, as a polyline of too many points is.
-            let text = match kind {
-                "MTEXT" => plain(&e.text),
-                _ => e.text.trim().to_string(),
-            };
-            if text.is_empty() || text.chars().count() > MAX_WORD {
-                return None;
-            }
-            let height = e.radius? * scale;
-            let angle = e.from.unwrap_or(0.0);
-            // Where the file says the word stands is the point it is written from, which it says under its
-            // justification: a `TEXT` not written from the left of its line gives that point under codes 11 and 21.
-            let (across, up) = match kind {
-                "MTEXT" => {
-                    let at = e.align.0.unwrap_or(1).clamp(1, 9) - 1;
-                    (at % 3, 2 - at / 3)
-                }
-                _ => (
-                    match e.align.0.unwrap_or(0) {
-                        1 | 4 => 1,
-                        2 => 2,
-                        _ => 0,
-                    },
-                    match e.align.1.unwrap_or(0) {
-                        2 => 1,
-                        3 => 2,
-                        _ => 0,
-                    },
-                ),
-            };
-            let point = match (kind, across + up > 0, e.second) {
-                ("TEXT", true, Some(p)) => p,
-                _ => *e.points.first()?,
-            };
-            let at = mm(point);
-            // Back to the left of the line it stands on, which is where a word is drawn from. How wide it is is our
-            // own lettering's width, which is the lettering it will be drawn in.
-            let wide = f64::from(crate::font::width(&text, height as f32));
-            let (dx, dy) = (
-                match across {
-                    1 => -wide / 2.0,
-                    2 => -wide,
-                    _ => 0.0,
-                },
-                match up {
-                    1 => -height / 2.0,
-                    2 => -height,
-                    _ => 0.0,
-                },
-            );
-            let (sin, cos) = angle.to_radians().sin_cos();
-            let at = P2(at.0 + dx * cos - dy * sin, at.1 + dx * sin + dy * cos);
-            if !sane(&at) || !height.is_finite() || height <= 0.0 || height > MAX_COORD || !angle.is_finite() {
-                return None;
-            }
-            Some(Shape::Words { at, text, height, angle })
-        }
-        "POINT" => {
-            let at = mm(*e.points.first()?);
-            sane(&at).then_some(Shape::Point { at })
-        }
-        "ARC" | "CIRCLE" => {
-            let at = mm(*e.points.first()?);
-            let radius = e.radius? * scale;
-            if !sane(&at) || !radius.is_finite() || radius <= 0.0 || radius > MAX_COORD {
-                return None;
-            }
-            let (from, to) = match kind {
-                "CIRCLE" => (0.0, 360.0),
-                _ => (e.from.unwrap_or(0.0), e.to.unwrap_or(360.0)),
-            };
-            (from.is_finite() && to.is_finite()).then_some(Shape::Arc { at, radius, from, to })
-        }
-        _ => None,
+    if pts.iter().all(|(_, b)| *b == 0.0) {
+        return Some(Shape::Polyline { pts: pts.into_iter().map(|(p, _)| p).collect(), closed });
     }
+    let mut out: Vec<P2> = Vec::new();
+    let last = if closed { pts.len() } else { pts.len() - 1 };
+    for i in 0..last {
+        let (Some((a, bulge)), Some((b, _))) = (pts.get(i), pts.get((i + 1) % pts.len())) else { break };
+        if *bulge == 0.0 || a.dist(*b) == 0.0 {
+            out.push(*a);
+            continue;
+        }
+        let bent = bulge_points(*a, *b, *bulge);
+        out.extend(bent.iter().take(bent.len().saturating_sub(1)));
+    }
+    if !closed && let Some((p, _)) = pts.last() {
+        out.push(*p);
+    }
+    Some(Shape::Polyline { pts: out, closed })
 }
 
-/// What an `MTEXT` says, without the formatting it says it in: a survey writes a room's name in a paragraph with a
-/// font, a colour and a height of its own in it, and none of that is the name. What is left of the paragraph is one
-/// line, because a drawing's words are read for what they say and not for how they are set.
-fn plain(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text.chars();
-    while let Some(c) = rest.next() {
+/// Points along the arc from `a` to `b` whose bulge (the tangent of a quarter of its angle, counter-clockwise when
+/// positive) is `bulge`, both ends included.
+fn bulge_points(a: P2, b: P2, bulge: f64) -> Vec<P2> {
+    let theta = 4.0 * bulge.atan();
+    let d = a.dist(b);
+    let r = d / (2.0 * (theta / 2.0).sin().abs());
+    let c = (a + b) * 0.5 + (b - a).unit().perp() * (d / 2.0 / (theta / 2.0).tan());
+    let start = (a - c).1.atan2((a - c).0).to_degrees();
+    let mut pts = arc_points(c, r, start, theta.to_degrees());
+    if let Some(first) = pts.first_mut() {
+        *first = a;
+    }
+    if let Some(last) = pts.last_mut() {
+        *last = b;
+    }
+    pts
+}
+
+fn ellipse(e: &Ent) -> Result<Option<Shape>, String> {
+    let (Some(c), Some(m), Some(ratio)) = (e.point(10)?, e.point(11)?, e.num(40)?) else { return Ok(None) };
+    if ratio <= 0.0 || m.length() == 0.0 {
+        return Ok(None);
+    }
+    let (u0, u1) = (e.num(41)?.unwrap_or(0.0), e.num(42)?.unwrap_or(std::f64::consts::TAU));
+    let mut sweep = (u1 - u0).rem_euclid(std::f64::consts::TAU);
+    let whole = sweep < 1e-9;
+    if whole {
+        sweep = std::f64::consts::TAU;
+    }
+    let n = ((sweep / std::f64::consts::TAU * CURVE_STEPS as f64).ceil() as usize).clamp(2, CURVE_STEPS);
+    let minor = m.perp() * ratio;
+    let mut pts: Vec<P2> = (0..=n)
+        .map(|i| {
+            let u = u0 + sweep * i as f64 / n as f64;
+            c + m * u.cos() + minor * u.sin()
+        })
+        .collect();
+    if whole {
+        pts.pop();
+    }
+    Ok(Some(Shape::Polyline { pts, closed: whole }))
+}
+
+fn spline(e: &Ent) -> Result<Option<Shape>, String> {
+    let flags = e.int(70)?.unwrap_or(0);
+    let closed = flags & 1 != 0;
+    let degree = e.int(71)?.unwrap_or(3).clamp(1, 11) as usize;
+    let knots = e.all(40)?;
+    let controls = e.points(10, 41)?;
+    let fit = e.points(11, 0)?;
+    if controls.len() > degree && knots.len() == controls.len() + degree + 1 {
+        let weighted: Vec<(P2, f64)> = controls.iter().map(|(p, w)| (*p, if *w > 0.0 { *w } else { 1.0 })).collect();
+        let (Some(&u0), Some(&u1)) = (knots.get(degree), knots.get(controls.len())) else { return Ok(None) };
+        let n = ((controls.len() - degree) * SPLINE_STEPS).clamp(SPLINE_STEPS, MAX_SPLINE_POINTS);
+        let pts: Vec<P2> = (0..=n).filter_map(|i| de_boor(degree, &knots, &weighted, u0 + (u1 - u0) * i as f64 / n as f64)).collect();
+        return Ok((pts.len() >= 2).then_some(Shape::Polyline { pts, closed }));
+    }
+    if fit.len() >= 2 {
+        return Ok(Some(Shape::Polyline { pts: fit.into_iter().map(|(p, _)| p).collect(), closed }));
+    }
+    Ok(None)
+}
+
+/// The point at `u` of the B-spline of `degree` over `knots` with weighted `controls`, by de Boor's recurrence in
+/// homogeneous coordinates.
+fn de_boor(degree: usize, knots: &[f64], controls: &[(P2, f64)], u: f64) -> Option<P2> {
+    let n = controls.len();
+    let mut k = degree;
+    while k + 1 < n && u >= *knots.get(k + 1)? {
+        k += 1;
+    }
+    let mut d: Vec<[f64; 3]> = (0..=degree)
+        .map(|j| {
+            let (p, w) = controls.get(j + k - degree)?;
+            Some([p.0 * w, p.1 * w, *w])
+        })
+        .collect::<Option<_>>()?;
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let (t0, t1) = (*knots.get(j + k - degree)?, *knots.get(j + 1 + k - r)?);
+            let a = if t1 > t0 { (u - t0) / (t1 - t0) } else { 0.0 };
+            let (p, q) = (*d.get(j - 1)?, *d.get(j)?);
+            let v = [0, 1, 2].map(|i| (1.0 - a) * p[i] + a * q[i]);
+            if let Some(slot) = d.get_mut(j) {
+                *slot = v;
+            }
+        }
+    }
+    let [x, y, w] = *d.get(degree)?;
+    (w.abs() > 1e-12).then(|| P2(x / w, y / w))
+}
+
+/// The colour a multi-line text's formatting sets before its first word (`\C1;` an index, `\c255;` a true colour as
+/// AutoCAD writes it, blue in the high byte): the last of them, if any.
+fn leading_color(raw: &str) -> Option<Color> {
+    let mut chars = raw.chars().peekable();
+    let mut color = None;
+    while let Some(c) = chars.next() {
         match c {
-            // The braces a paragraph groups its runs with say nothing themselves.
             '{' | '}' => {}
-            '\\' => match rest.next() {
-                // A new paragraph, and the spaces a drawing writes with a mark of their own.
-                Some('P' | 'X' | '~') => out.push(' '),
-                // What a run is set in, which runs to a semicolon.
-                Some(c) if "fFHCcAQWTpS".contains(c) => {
-                    for c in rest.by_ref() {
-                        if c == ';' {
-                            break;
+            '\\' => {
+                let code = chars.next()?;
+                let body: String = chars.by_ref().take_while(|c| *c != ';').collect();
+                match code {
+                    'C' => color = body.trim().parse::<i64>().ok().map(index_color).or(color),
+                    'c' => {
+                        color = body.trim().parse::<i64>().ok().map(|v| {
+                            // AutoCAD's MTEXT true colour: red in the low byte.
+                            let (r, g, b) = ((v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 16) & 0xff) as u8);
+                            Color::True(r, g, b)
+                        });
+                    }
+                    'f' | 'F' | 'H' | 'W' | 'Q' | 'T' | 'A' | 'p' => {}
+                    _ => return color,
+                }
+            }
+            _ => return color,
+        }
+    }
+    color
+}
+
+/// A text's words as a file writes them: `%%d` is a degree sign, `%%p` plus or minus, `%%c` a diameter, `%%%` a
+/// percent, `%%u` and `%%o` underline and overline (dropped), `\U+XXXX` a character, and the formatting codes of
+/// multi-line text (`\P` a new line, `{…}` groups, `\f…;` fonts, `\H…;` heights and the rest) are dropped. A single line
+/// of text (`mtext` false) has no groups: its braces are its own, as a title block's fields (`{CLIENT}`) are.
+fn decode(s: &str, mtext: bool) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if out.len() >= MAX_CHARS {
+            break;
+        }
+        match c {
+            '%' if chars.peek() == Some(&'%') => {
+                chars.next();
+                match chars.next().map(|c| c.to_ascii_lowercase()) {
+                    Some('d') => out.push('°'),
+                    Some('p') => out.push('±'),
+                    Some('c') => out.push('Ø'),
+                    Some('%') => out.push('%'),
+                    Some('u' | 'o') => {}
+                    Some(other) => {
+                        out.push_str("%%");
+                        out.push(other);
+                    }
+                    None => out.push_str("%%"),
+                }
+            }
+            '{' | '}' if mtext => {}
+            '\\' => match chars.next() {
+                Some('P') => out.push('\n'),
+                Some('~') => out.push(' '),
+                Some('\\') => out.push('\\'),
+                Some('{') => out.push('{'),
+                Some('}') => out.push('}'),
+                Some('U') if chars.peek() == Some(&'+') => {
+                    chars.next();
+                    let hex: String = chars.by_ref().take(4).collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(ch) => out.push(ch),
+                        None => {
+                            out.push_str("\\U+");
+                            out.push_str(&hex);
                         }
                     }
                 }
-                // Underlining, overlining and the like, which is the one letter and nothing more.
-                Some(c) if "LlOoKkNn".contains(c) => {}
-                // A brace or a backslash of its own, written with one before it.
-                Some(c) => out.push(c),
-                None => {}
+                Some('S') => {
+                    // A fraction, stacked: its two parts, parted by a slash.
+                    let body: String = chars.by_ref().take_while(|c| *c != ';').collect();
+                    out.push_str(&body.replace(['^', '#'], "/"));
+                }
+                Some('A' | 'C' | 'c' | 'F' | 'f' | 'H' | 'Q' | 'T' | 'W' | 'p') => {
+                    chars.by_ref().take_while(|c| *c != ';').for_each(drop);
+                }
+                Some('L' | 'l' | 'O' | 'o' | 'K' | 'k' | 'N') => {}
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
             },
             c => out.push(c),
         }
     }
-    out.split_whitespace().collect::<Vec<&str>>().join(" ")
+    out
 }
 
-/// The box `layers` lie in, mm.
-fn extent(layers: &[Layer]) -> Option<[P2; 2]> {
-    let mut box_: Option<[P2; 2]> = None;
-    let mut grow = |p: P2| {
-        box_ = Some(match box_ {
-            None => [p, p],
-            Some([lo, hi]) => [P2(lo.0.min(p.0), lo.1.min(p.1)), P2(hi.0.max(p.0), hi.1.max(p.1))],
-        });
+fn text(e: &Ent) -> Result<Option<Shape>, String> {
+    let (Some(first), Some(height), Some(words)) = (e.point(10)?, e.num(40)?, e.str(1)) else { return Ok(None) };
+    if height <= 0.0 {
+        return Ok(None);
+    }
+    let words = decode(words, false).replace('\n', " ");
+    if words.trim().is_empty() {
+        return Ok(None);
+    }
+    let (h, v) = (e.int(72)?.unwrap_or(0), e.int(73)?.unwrap_or(0));
+    let second = e.point(11)?;
+    let (at, align) = match (h, v, second) {
+        (0, 0, _) | (3 | 5, _, _) | (_, _, None) => (first, Align { h: Horizontal::Left, v: Vertical::Baseline }),
+        (4, _, Some(p)) => (p, Align { h: Horizontal::Center, v: Vertical::Middle }),
+        (h, v, Some(p)) => {
+            let h = match h {
+                1 => Horizontal::Center,
+                2 => Horizontal::Right,
+                _ => Horizontal::Left,
+            };
+            let v = match v {
+                1 => Vertical::Bottom,
+                2 => Vertical::Middle,
+                3 => Vertical::Top,
+                _ => Vertical::Baseline,
+            };
+            (p, Align { h, v })
+        }
     };
-    for shape in layers.iter().flat_map(|l| &l.shapes) {
-        match shape {
-            Shape::Line(line) => line.iter().for_each(|p| grow(*p)),
-            Shape::Point { at } => grow(*at),
-            Shape::Path { points, .. } => points.iter().for_each(|p| grow(*p)),
-            Shape::Arc { at, radius, .. } => {
-                grow(P2(at.0 - radius, at.1 - radius));
-                grow(P2(at.0 + radius, at.1 + radius));
-            }
-            Shape::Words { at, text, height, angle } => {
-                let wide = f64::from(crate::font::width(text, *height as f32));
-                let (sin, cos) = angle.to_radians().sin_cos();
-                for (x, y) in [(0.0, 0.0), (wide, 0.0), (wide, *height), (0.0, *height)] {
-                    grow(P2(at.0 + x * cos - y * sin, at.1 + x * sin + y * cos));
+    let tag = (e.kind == "ATTRIB").then(|| e.str(2).map(|t| t.trim().to_string())).flatten().filter(|t| !t.is_empty());
+    Ok(Some(Shape::Text { at, height, angle: e.num(50)?.unwrap_or(0.0), text: words, align, tag }))
+}
+
+/// A multi-line text's lines, each a text of its own, stepped down from where its attachment point puts the block.
+fn mtext(e: &Ent) -> Result<Vec<Shape>, String> {
+    let (Some(at), Some(height)) = (e.point(10)?, e.num(40)?) else { return Ok(Vec::new()) };
+    if height <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let mut raw = String::new();
+    for (c, v) in &e.codes {
+        if *c == 3 {
+            raw.push_str(v);
+        }
+    }
+    raw.push_str(e.str(1).unwrap_or(""));
+    let words = decode(&raw, true);
+    let lines: Vec<&str> = words.lines().collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        return Ok(Vec::new());
+    }
+    let angle = match (e.num(50)?, e.point(11)?) {
+        (Some(a), _) => a,
+        (None, Some(dir)) if dir.length() > 0.0 => dir.1.atan2(dir.0).to_degrees(),
+        _ => 0.0,
+    };
+    let attach = e.int(71)?.unwrap_or(1).clamp(1, 9) - 1;
+    let h = match attach % 3 {
+        0 => Horizontal::Left,
+        1 => Horizontal::Center,
+        _ => Horizontal::Right,
+    };
+    let spacing = height * 5.0 / 3.0 * e.num(44)?.filter(|f| *f > 0.0).unwrap_or(1.0);
+    let block = height + spacing * (lines.len() - 1) as f64;
+    let up = P2(-angle.to_radians().sin(), angle.to_radians().cos());
+    let top = at
+        + up * match attach / 3 {
+            0 => 0.0,
+            1 => block / 2.0,
+            _ => block,
+        };
+    Ok(lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| Shape::Text {
+            at: top - up * (height + spacing * i as f64),
+            height,
+            angle,
+            text: line.to_string(),
+            align: Align { h, v: Vertical::Baseline },
+            tag: None,
+        })
+        .collect())
+}
+
+/// A hatch's boundary paths, each a ring: a polyline's (bulges flattened) or edges joined end to end.
+fn hatch(e: &Ent) -> Result<Option<Shape>, String> {
+    let solid = e.int(70)?.unwrap_or(0) & 1 != 0 || e.str(2).is_some_and(|n| n.eq_ignore_ascii_case("SOLID"));
+    let Some(start) = e.codes.iter().position(|(c, _)| *c == 91) else { return Ok(None) };
+    let mut cur = Cursor { e, k: start + 1 };
+    let paths = e.int(91)?.unwrap_or(0).clamp(0, 10_000);
+    let mut rings = Vec::new();
+    for _ in 0..paths {
+        let Some(flags) = cur.take(92)? else { break };
+        let flags = flags as i64;
+        let mut ring: Vec<P2> = Vec::new();
+        let join = |ring: &mut Vec<P2>, pts: Vec<P2>| {
+            for p in pts {
+                if ring.last().is_none_or(|q| q.dist(p) > 1e-9) {
+                    ring.push(p);
                 }
             }
-            Shape::Fill { rings, .. } => rings.iter().flatten().for_each(|p| grow(*p)),
-            // The points of a measurement, and how far its figure is written beyond the line it is written along.
-            Shape::Measure { from, to, line, height, .. } => {
-                [*from, *to, line[0], line[1]].iter().for_each(|p| grow(*p));
-                let out = height * 2.0;
-                for p in [line[0], line[1]] {
-                    grow(P2(p.0 - out, p.1 - out));
-                    grow(P2(p.0 + out, p.1 + out));
+        };
+        if flags & 2 != 0 {
+            let bulged = cur.take(72)?.unwrap_or(0.0) != 0.0;
+            let _closed = cur.take(73)?;
+            let n = cur.take(93)?.unwrap_or(0.0).clamp(0.0, MAX_PAIRS as f64) as usize;
+            let mut pts = Vec::new();
+            for _ in 0..n {
+                let (Some(x), Some(y)) = (cur.take(10)?, cur.take(20)?) else { break };
+                let bulge = if bulged { cur.take(42)?.unwrap_or(0.0) } else { 0.0 };
+                pts.push((P2(x, y), bulge));
+            }
+            if let Some(Shape::Polyline { pts, .. }) = polyline(pts, true) {
+                join(&mut ring, pts);
+            }
+        } else {
+            let n = cur.take(93)?.unwrap_or(0.0).clamp(0.0, MAX_PAIRS as f64) as usize;
+            for _ in 0..n {
+                let Some(kind) = cur.take(72)? else { break };
+                match kind as i64 {
+                    1 => {
+                        let (Some(x0), Some(y0), Some(x1), Some(y1)) = (cur.take(10)?, cur.take(20)?, cur.take(11)?, cur.take(21)?) else {
+                            break;
+                        };
+                        join(&mut ring, vec![P2(x0, y0), P2(x1, y1)]);
+                    }
+                    2 => {
+                        let (Some(x), Some(y), Some(r)) = (cur.take(10)?, cur.take(20)?, cur.take(40)?) else { break };
+                        let (s, t) = (cur.take(50)?.unwrap_or(0.0), cur.take(51)?.unwrap_or(360.0));
+                        let ccw = cur.take(73)?.unwrap_or(1.0) != 0.0;
+                        let (s, t) = if ccw { (s, t) } else { (-t, -s) };
+                        let sweep = {
+                            let w = (t - s).rem_euclid(360.0);
+                            if w == 0.0 { 360.0 } else { w }
+                        };
+                        if r > 0.0 {
+                            join(&mut ring, arc_points(P2(x, y), r, s, sweep));
+                        }
+                    }
+                    3 => {
+                        let (Some(x), Some(y), Some(mx), Some(my), Some(ratio)) =
+                            (cur.take(10)?, cur.take(20)?, cur.take(11)?, cur.take(21)?, cur.take(40)?)
+                        else {
+                            break;
+                        };
+                        let (s, t) = (cur.take(50)?.unwrap_or(0.0), cur.take(51)?.unwrap_or(360.0));
+                        let ccw = cur.take(73)?.unwrap_or(1.0) != 0.0;
+                        let (s, t) = if ccw { (s, t) } else { (-t, -s) };
+                        let sweep = {
+                            let w = (t - s).rem_euclid(360.0);
+                            if w == 0.0 { 360.0 } else { w }
+                        };
+                        let (c, m) = (P2(x, y), P2(mx, my));
+                        if ratio > 0.0 && m.length() > 0.0 {
+                            let n = ((sweep / 360.0 * CURVE_STEPS as f64).ceil() as usize).clamp(2, CURVE_STEPS);
+                            let minor = m.perp() * ratio;
+                            let pts = (0..=n)
+                                .map(|i| {
+                                    let u = (s + sweep * i as f64 / n as f64).to_radians();
+                                    c + m * u.cos() + minor * u.sin()
+                                })
+                                .collect();
+                            join(&mut ring, pts);
+                        }
+                    }
+                    4 => {
+                        let degree = cur.take(94)?.unwrap_or(3.0).clamp(1.0, 11.0) as usize;
+                        let rational = cur.take(73)?.unwrap_or(0.0) != 0.0;
+                        let _periodic = cur.take(74)?;
+                        let nk = cur.take(95)?.unwrap_or(0.0).clamp(0.0, MAX_PAIRS as f64) as usize;
+                        let nc = cur.take(96)?.unwrap_or(0.0).clamp(0.0, MAX_PAIRS as f64) as usize;
+                        let mut knots = Vec::with_capacity(nk.min(1 << 16));
+                        for _ in 0..nk {
+                            let Some(t) = cur.take(40)? else { break };
+                            knots.push(t);
+                        }
+                        let mut controls = Vec::with_capacity(nc.min(1 << 16));
+                        for _ in 0..nc {
+                            let (Some(x), Some(y)) = (cur.take(10)?, cur.take(20)?) else { break };
+                            let w = if rational { cur.take(42)?.filter(|w| *w > 0.0).unwrap_or(1.0) } else { 1.0 };
+                            controls.push((P2(x, y), w));
+                        }
+                        let nf = cur.take(97)?.unwrap_or(0.0).clamp(0.0, MAX_PAIRS as f64) as usize;
+                        let mut fit = Vec::new();
+                        for _ in 0..nf {
+                            let (Some(x), Some(y)) = (cur.take(11)?, cur.take(21)?) else { break };
+                            fit.push(P2(x, y));
+                        }
+                        if controls.len() > degree && knots.len() == controls.len() + degree + 1 {
+                            if let (Some(&u0), Some(&u1)) = (knots.get(degree), knots.get(controls.len())) {
+                                let n = ((controls.len() - degree) * SPLINE_STEPS).clamp(SPLINE_STEPS, MAX_SPLINE_POINTS);
+                                let pts = (0..=n)
+                                    .filter_map(|i| de_boor(degree, &knots, &controls, u0 + (u1 - u0) * i as f64 / n as f64))
+                                    .collect();
+                                join(&mut ring, pts);
+                            }
+                        } else {
+                            join(&mut ring, fit);
+                        }
+                    }
+                    _ => break,
                 }
             }
         }
+        if ring.len() >= 2 && ring.first().zip(ring.last()).is_some_and(|(a, b)| a.dist(*b) <= 1e-9) {
+            ring.pop();
+        }
+        if ring.len() >= 3 {
+            rings.push(ring);
+        }
     }
-    box_
+    Ok((!rings.is_empty()).then_some(Shape::Fill { rings, solid }))
+}
+
+/// A walk forward through an entity's pairs: a hatch lays its paths out in order, each value after the last.
+struct Cursor<'e, 'a> {
+    e: &'e Ent<'a>,
+    k: usize,
+}
+
+impl Cursor<'_, '_> {
+    /// The next value at `code` from here on, or none when there is none; the walk moves past it.
+    fn take(&mut self, code: i32) -> Result<Option<f64>, String> {
+        let Some(at) = self.e.codes.get(self.k..).and_then(|rest| rest.iter().position(|(c, _)| *c == code)) else {
+            return Ok(None);
+        };
+        self.k += at + 1;
+        let Some((_, v)) = self.e.codes.get(self.k - 1) else { return Ok(None) };
+        Ok(Some(number(self.e.line, v)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_arcs_box_is_round_its_sweep_not_its_circle() {
+        let near = |a: [P2; 2], b: [P2; 2]| a.iter().zip(&b).all(|(p, q)| p.dist(*q) < 1e-6);
+        // A quarter from east to north.
+        let quarter = arc(P2(0.0, 0.0), 10.0, 0.0, 90.0);
+        assert!(near(quarter.bounds(), [P2(0.0, 0.0), P2(10.0, 10.0)]), "{:?}", quarter.bounds());
+        // From north-east to south-east the long way: through north, west and south.
+        let most = arc(P2(0.0, 0.0), 10.0, 45.0, 315.0);
+        assert!(near(most.bounds(), [P2(-10.0, -10.0), P2(45f64.to_radians().cos() * 10.0, 10.0)]), "{:?}", most.bounds());
+        // Across east, from 350 to 10 degrees: a sliver of a great circle, as a near-straight wall is drawn.
+        let sliver = arc(P2(0.0, 0.0), 30_000.0, 359.0, 1.0);
+        let [lo, hi] = sliver.bounds();
+        assert!(hi.0 - lo.0 < 10.0 && hi.1 - lo.1 < 1100.0 && (hi.0 - 30_000.0).abs() < 1e-6, "{lo:?} {hi:?}");
+    }
+
+    /// Pairs as a file writes them: a code line, then its value.
+    fn pairs(list: &[(i32, &str)]) -> String {
+        list.iter().map(|(c, v)| format!("{c}\n{v}\n")).collect()
+    }
+
+    /// A file of these sections; an empty one is left out.
+    fn file(header: &str, tables: &str, blocks: &str, entities: &str) -> String {
+        let mut s = String::new();
+        for (name, body) in [("HEADER", header), ("TABLES", tables), ("BLOCKS", blocks)] {
+            if !body.is_empty() {
+                s += &format!("0\nSECTION\n2\n{name}\n{body}0\nENDSEC\n");
+            }
+        }
+        s + &format!("0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n0\nEOF\n")
+    }
+
+    fn drawing(entities: &str) -> Dxf {
+        read_text(&file("", "", "", entities)).unwrap()
+    }
+
+    fn near(a: P2, b: P2) -> bool {
+        a.dist(b) < 1e-6
+    }
+
+    fn has_point_near(pts: &[P2], p: P2) -> bool {
+        pts.iter().any(|q| q.dist(p) < 1e-6)
+    }
+
+    fn shapes(d: &Dxf) -> Vec<&Shape> {
+        d.entities.iter().map(|e| &e.shape).collect()
+    }
+
+    #[test]
+    fn a_line_a_circle_and_an_arc_read_with_their_layer_colour_and_linetype() {
+        let d = drawing(&pairs(&[
+            (0, "LINE"),
+            (8, "WALLS"),
+            (62, "1"),
+            (6, "HIDDEN"),
+            (370, "35"),
+            (10, "0"),
+            (20, "0"),
+            (30, "0"),
+            (11, "4000"),
+            (21, "0"),
+            (31, "0"),
+            (0, "CIRCLE"),
+            (8, "COLS"),
+            (420, "65280"),
+            (10, "100"),
+            (20, "200"),
+            (40, "50"),
+            (0, "ARC"),
+            (10, "0"),
+            (20, "0"),
+            (40, "10"),
+            (50, "90"),
+            (51, "180"),
+        ]));
+        assert_eq!(d.entities.len(), 3, "{d:?}");
+        let line = &d.entities[0];
+        assert_eq!(
+            (line.layer.as_str(), line.color, line.linetype.as_deref(), line.weight),
+            ("WALLS", Color::Index(1), Some("HIDDEN"), Some(0.35))
+        );
+        assert_eq!(line.shape, Shape::Line(P2(0.0, 0.0), P2(4000.0, 0.0)));
+        let circle = &d.entities[1];
+        assert_eq!((circle.color, circle.linetype.as_deref(), circle.weight), (Color::True(0, 255, 0), None, None));
+        assert_eq!(circle.shape, Shape::Circle { c: P2(100.0, 200.0), r: 50.0 });
+        assert_eq!(d.entities[2].shape, Shape::Arc { c: P2(0.0, 0.0), r: 10.0, start: 90.0, end: 180.0 });
+        assert_eq!(d.entities[2].layer, "0", "no layer named: layer 0");
+        // A layer an entity names and no table does is a layer still, with defaults; and the drawing's bounds.
+        let names: Vec<&str> = d.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["WALLS", "COLS", "0"]);
+        assert_eq!(d.layer("COLS").map(|l| (l.color, l.off, l.frozen)), Some((Color::Index(7), false, false)));
+        assert_eq!(d.bounds(), Some([P2(-10.0, 0.0), P2(4000.0, 250.0)]), "the arc from north to west, not its circle");
+        assert!(d.left_out.is_empty(), "{:?}", d.left_out);
+        assert_eq!((d.scale, d.unit.as_str()), (None, "unitless"));
+    }
+
+    #[test]
+    fn the_header_says_the_unit_the_version_and_the_extents() {
+        let header = |units: &str| {
+            pairs(&[
+                (9, "$ACADVER"),
+                (1, "AC1027"),
+                (9, "$INSUNITS"),
+                (70, units),
+                (9, "$LTSCALE"),
+                (40, "2"),
+                (9, "$EXTMIN"),
+                (10, "-1"),
+                (20, "-2"),
+                (30, "0"),
+                (9, "$EXTMAX"),
+                (10, "10"),
+                (20, "5"),
+                (30, "0"),
+            ])
+        };
+        let d = read_text(&file(&header("6"), "", "", &pairs(&[(0, "POINT"), (10, "1"), (20, "1")]))).unwrap();
+        assert_eq!((d.scale, d.unit.as_str(), d.version.as_str(), d.ltscale), (Some(1000.0), "m", "AC1027", 2.0));
+        assert_eq!(d.extents, Some([P2(-1.0, -2.0), P2(10.0, 5.0)]));
+        for (code, scale, unit) in [
+            ("1", Some(25.4), "in"),
+            ("2", Some(304.8), "ft"),
+            ("4", Some(1.0), "mm"),
+            ("5", Some(10.0), "cm"),
+            ("0", None, "unitless"),
+            ("19", None, "light years"),
+        ] {
+            let d = read_text(&file(&header(code), "", "", &pairs(&[(0, "POINT"), (10, "1"), (20, "1")]))).unwrap();
+            assert_eq!((d.scale, d.unit.as_str()), (scale, unit), "$INSUNITS {code}");
+        }
+        // Extents the wrong way round are none.
+        let bad = header("4").replace("10\n10\n20\n5\n", "10\n-10\n20\n5\n");
+        assert_eq!(read_text(&file(&bad, "", "", &pairs(&[(0, "POINT"), (10, "1"), (20, "1")]))).unwrap().extents, None);
+    }
+
+    #[test]
+    fn the_layer_table_gives_each_layers_colour_linetype_weight_and_state_and_the_linetypes_their_dashes() {
+        let tables = pairs(&[
+            (0, "TABLE"),
+            (2, "LTYPE"),
+            (70, "2"),
+            (0, "LTYPE"),
+            (2, "DASHED"),
+            (73, "2"),
+            (40, "7.5"),
+            (49, "5"),
+            (49, "-2.5"),
+            (0, "ENDTAB"),
+            (0, "TABLE"),
+            (2, "LAYER"),
+            (70, "3"),
+            (0, "LAYER"),
+            (2, "WALLS"),
+            (70, "0"),
+            (62, "1"),
+            (6, "DASHED"),
+            (370, "50"),
+            (0, "LAYER"),
+            (2, "OFF"),
+            (70, "0"),
+            (62, "-3"),
+            (0, "LAYER"),
+            (2, "FROZEN"),
+            (70, "1"),
+            (420, "16711680"),
+            (0, "ENDTAB"),
+        ]);
+        let d = read_text(&file("", &tables, "", &pairs(&[(0, "POINT"), (8, "WALLS"), (10, "1"), (20, "1")]))).unwrap();
+        assert_eq!(d.linetypes, vec![Linetype { name: "DASHED".into(), dashes: vec![5.0, -2.5] }]);
+        type Row<'a> = (&'a str, Color, &'a str, Option<f64>, bool, bool);
+        let got: Vec<Row> = d.layers.iter().map(|l| (l.name.as_str(), l.color, l.linetype.as_str(), l.weight, l.off, l.frozen)).collect();
+        assert_eq!(
+            got,
+            [
+                ("WALLS", Color::Index(1), "DASHED", Some(0.5), false, false),
+                ("OFF", Color::Index(3), "Continuous", None, true, false),
+                ("FROZEN", Color::True(255, 0, 0), "Continuous", None, false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_colour_index_is_the_standard_table() {
+        assert_eq!(aci(1), Some(Rgb(255, 0, 0)));
+        assert_eq!(aci(5), Some(Rgb(0, 0, 255)));
+        assert_eq!(aci(7), None, "the ink");
+        assert_eq!(aci(0), None, "by block");
+        assert_eq!(aci(10), Some(Rgb(255, 0, 0)));
+        assert_eq!(aci(11), Some(Rgb(255, 127, 127)), "pale red");
+        assert_eq!(aci(12), Some(Rgb(204, 0, 0)));
+        assert_eq!(aci(13), Some(Rgb(204, 102, 102)));
+        assert_eq!(aci(19), Some(Rgb(76, 38, 38)));
+        assert_eq!(aci(20), Some(Rgb(255, 63, 0)));
+        assert_eq!(aci(50), Some(Rgb(255, 255, 0)));
+        assert_eq!(aci(90), Some(Rgb(0, 255, 0)));
+        assert_eq!(aci(130), Some(Rgb(0, 255, 255)));
+        assert_eq!(aci(170), Some(Rgb(0, 0, 255)));
+        assert_eq!(aci(210), Some(Rgb(255, 0, 255)));
+        assert_eq!(aci(250), Some(Rgb(51, 51, 51)));
+        assert_eq!(aci(255), Some(Rgb(255, 255, 255)));
+        assert_eq!(Color::True(1, 2, 3).rgb(), Some(Rgb(1, 2, 3)));
+        assert_eq!(Color::ByLayer.rgb(), None);
+    }
+
+    #[test]
+    fn a_polylines_bulge_bends_its_segment_and_a_closed_one_closes() {
+        let d = drawing(&pairs(&[
+            (0, "LWPOLYLINE"),
+            (90, "2"),
+            (70, "0"),
+            (10, "0"),
+            (20, "0"),
+            (42, "1"),
+            (10, "100"),
+            (20, "0"),
+            (0, "LWPOLYLINE"),
+            (90, "3"),
+            (70, "1"),
+            (10, "0"),
+            (20, "0"),
+            (10, "10"),
+            (20, "0"),
+            (10, "10"),
+            (20, "10"),
+        ]));
+        let Shape::Polyline { pts, closed } = &d.entities[0].shape else { panic!("{:?}", d.entities[0]) };
+        assert!(!closed);
+        // A bulge of 1 is a half circle, counter-clockwise from (0, 0) to (100, 0): below the chord, round (50, 0).
+        assert!(near(pts[0], P2(0.0, 0.0)) && near(pts[pts.len() - 1], P2(100.0, 0.0)), "{pts:?}");
+        assert!(pts.iter().all(|p| (p.dist(P2(50.0, 0.0)) - 50.0).abs() < 1e-6), "{pts:?}");
+        assert!(has_point_near(pts, P2(50.0, -50.0)), "{pts:?}");
+        assert!(pts.len() > 10);
+        assert_eq!(d.entities[1].shape, Shape::Polyline { pts: vec![P2(0.0, 0.0), P2(10.0, 0.0), P2(10.0, 10.0)], closed: true });
+    }
+
+    #[test]
+    fn an_old_polyline_is_its_vertices_up_to_seqend() {
+        let d = drawing(&pairs(&[
+            (0, "POLYLINE"),
+            (8, "A"),
+            (66, "1"),
+            (70, "1"),
+            (0, "VERTEX"),
+            (8, "A"),
+            (10, "0"),
+            (20, "0"),
+            (0, "VERTEX"),
+            (8, "A"),
+            (10, "5"),
+            (20, "0"),
+            (0, "VERTEX"),
+            (8, "A"),
+            (10, "5"),
+            (20, "5"),
+            (0, "SEQEND"),
+            (8, "A"),
+            (0, "POINT"),
+            (10, "9"),
+            (20, "9"),
+        ]));
+        assert_eq!(
+            shapes(&d),
+            [&Shape::Polyline { pts: vec![P2(0.0, 0.0), P2(5.0, 0.0), P2(5.0, 5.0)], closed: true }, &Shape::Point(P2(9.0, 9.0))]
+        );
+    }
+
+    #[test]
+    fn a_block_is_placed_where_each_insert_puts_it_scaled_turned_and_arrayed_taking_its_layer_and_colour() {
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (8, "0"),
+            (2, "DOOR"),
+            (70, "0"),
+            (10, "0"),
+            (20, "0"),
+            (0, "LINE"),
+            (8, "0"),
+            (62, "0"),
+            (10, "0"),
+            (20, "0"),
+            (11, "10"),
+            (21, "0"),
+            (0, "CIRCLE"),
+            (8, "GLASS"),
+            (10, "0"),
+            (20, "0"),
+            (40, "1"),
+            (0, "ENDBLK"),
+        ]);
+        let entities = pairs(&[
+            (0, "INSERT"),
+            (8, "DOORS"),
+            (62, "3"),
+            (2, "DOOR"),
+            (10, "100"),
+            (20, "100"),
+            (41, "2"),
+            (42, "2"),
+            (50, "90"),
+            (70, "2"),
+            (71, "1"),
+            (44, "50"),
+            (45, "0"),
+        ]);
+        let d = read_text(&file("", "", &blocks, &entities)).unwrap();
+        assert_eq!(d.entities.len(), 4, "{:?}", d.entities);
+        let lines: Vec<&Entity> = d.entities.iter().filter(|e| matches!(e.shape, Shape::Line(..))).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].layer.as_str(), lines[0].color), ("DOORS", Color::Index(3)), "layer 0 and by block take the INSERT's");
+        let Shape::Line(a, b) = lines[0].shape else { panic!() };
+        assert!(near(a, P2(100.0, 100.0)) && near(b, P2(100.0, 120.0)), "scaled by 2, turned 90°: {a:?} {b:?}");
+        let Shape::Line(a, b) = lines[1].shape else { panic!() };
+        assert!(near(a, P2(100.0, 150.0)) && near(b, P2(100.0, 170.0)), "the second column, 50 along the turned x: {a:?} {b:?}");
+        let circles: Vec<&Entity> = d.entities.iter().filter(|e| matches!(e.shape, Shape::Circle { .. })).collect();
+        assert_eq!(circles[0].layer, "GLASS", "a block's own layer stays");
+        assert_eq!(circles[1].shape, Shape::Circle { c: P2(100.0, 150.0), r: 2.0 });
+    }
+
+    #[test]
+    fn a_block_in_a_block_is_placed_through_both_and_one_in_itself_stops_at_the_depth() {
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (2, "INNER"),
+            (10, "0"),
+            (20, "0"),
+            (0, "POINT"),
+            (10, "1"),
+            (20, "0"),
+            (0, "ENDBLK"),
+            (0, "BLOCK"),
+            (2, "OUTER"),
+            (10, "0"),
+            (20, "0"),
+            (0, "INSERT"),
+            (2, "INNER"),
+            (10, "10"),
+            (20, "0"),
+            (0, "ENDBLK"),
+            (0, "BLOCK"),
+            (2, "SELF"),
+            (10, "0"),
+            (20, "0"),
+            (0, "POINT"),
+            (10, "0"),
+            (20, "0"),
+            (0, "INSERT"),
+            (2, "SELF"),
+            (10, "1"),
+            (20, "0"),
+            (0, "ENDBLK"),
+        ]);
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "OUTER"), (10, "100"), (20, "0")]))).unwrap();
+        assert_eq!(shapes(&d), [&Shape::Point(P2(111.0, 0.0))]);
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "SELF"), (10, "0"), (20, "0")]))).unwrap();
+        assert_eq!(d.entities.len(), MAX_DEPTH, "{:?}", d.entities);
+        assert_eq!(d.left_out.get(&format!("a block nested deeper than {MAX_DEPTH}")), Some(&1));
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "NOWHERE"), (10, "0"), (20, "0")]))).unwrap();
+        assert_eq!(d.left_out.get("INSERT of a block the file doesn't define"), Some(&1));
+        // A base point other than the origin: the block's base lands on the insertion point.
+        let based = pairs(&[(0, "BLOCK"), (2, "B"), (10, "5"), (20, "5"), (0, "POINT"), (10, "5"), (20, "5"), (0, "ENDBLK")]);
+        let d = read_text(&file("", "", &based, &pairs(&[(0, "INSERT"), (2, "B"), (10, "1"), (20, "2")]))).unwrap();
+        assert_eq!(shapes(&d), [&Shape::Point(P2(1.0, 2.0))]);
+    }
+
+    #[test]
+    fn a_block_mirrored_or_stretched_keeps_its_arcs_as_arcs_only_while_they_stay_round() {
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (2, "A"),
+            (10, "0"),
+            (20, "0"),
+            (0, "ARC"),
+            (10, "0"),
+            (20, "0"),
+            (40, "1"),
+            (50, "0"),
+            (51, "90"),
+            (0, "ENDBLK"),
+        ]);
+        // Mirrored in x: the quarter from east to north becomes the one from north to west.
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "A"), (10, "0"), (20, "0"), (41, "-1")]))).unwrap();
+        assert_eq!(shapes(&d), [&Shape::Arc { c: P2(0.0, 0.0), r: 1.0, start: 90.0, end: 180.0 }]);
+        // Stretched: no longer round, so it's points on the ellipse.
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "A"), (10, "0"), (20, "0"), (41, "2"), (42, "1")]))).unwrap();
+        let Shape::Polyline { pts, closed: false } = &d.entities[0].shape else { panic!("{:?}", d.entities) };
+        assert!(near(pts[0], P2(2.0, 0.0)) && near(pts[pts.len() - 1], P2(0.0, 1.0)), "{pts:?}");
+        // An extrusion pointing down mirrors x too.
+        let d = drawing(&pairs(&[(0, "LINE"), (10, "1"), (20, "2"), (11, "3"), (21, "4"), (210, "0"), (220, "0"), (230, "-1")]));
+        assert_eq!(shapes(&d), [&Shape::Line(P2(-1.0, 2.0), P2(-3.0, 4.0))]);
+    }
+
+    #[test]
+    fn text_keeps_its_words_height_angle_and_alignment_and_decodes_the_codes() {
+        let d = drawing(&pairs(&[
+            (0, "TEXT"),
+            (10, "5"),
+            (20, "5"),
+            (40, "2.5"),
+            (50, "30"),
+            (1, "Room %%d %%c %%p %%% \\U+00E9 x"),
+            (0, "TEXT"),
+            (10, "0"),
+            (20, "0"),
+            (11, "8"),
+            (21, "9"),
+            (40, "1"),
+            (72, "1"),
+            (73, "3"),
+            (1, "Centred"),
+            (0, "TEXT"),
+            (10, "1"),
+            (20, "1"),
+            (11, "8"),
+            (21, "9"),
+            (40, "1"),
+            (72, "4"),
+            (1, "Middle"),
+            (0, "TEXT"),
+            (10, "0"),
+            (20, "0"),
+            (40, "1"),
+            (1, "   "),
+        ]));
+        assert_eq!(
+            shapes(&d),
+            [
+                &Shape::Text {
+                    at: P2(5.0, 5.0),
+                    height: 2.5,
+                    angle: 30.0,
+                    text: "Room ° Ø ± % é x".into(),
+                    align: Align { h: Horizontal::Left, v: Vertical::Baseline },
+                    tag: None
+                },
+                &Shape::Text {
+                    at: P2(8.0, 9.0),
+                    height: 1.0,
+                    angle: 0.0,
+                    text: "Centred".into(),
+                    align: Align { h: Horizontal::Center, v: Vertical::Top },
+                    tag: None
+                },
+                &Shape::Text {
+                    at: P2(8.0, 9.0),
+                    height: 1.0,
+                    angle: 0.0,
+                    text: "Middle".into(),
+                    align: Align { h: Horizontal::Center, v: Vertical::Middle },
+                    tag: None
+                },
+            ]
+        );
+        assert_eq!(d.left_out.get("empty"), Some(&1), "blank text");
+    }
+
+    /// A file whose text is in a code page, as bytes: the header names the page, one TEXT holds the words as the page's bytes.
+    fn codepage_file(page: &str, words: &[u8]) -> Vec<u8> {
+        let mut f = format!(
+            "0\nSECTION\n2\nHEADER\n9\n$DWGCODEPAGE\n3\n{page}\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nTEXT\n10\n0\n20\n0\n40\n2.5\n1\n"
+        )
+        .into_bytes();
+        f.extend_from_slice(words);
+        f.extend_from_slice(b"\n0\nENDSEC\n0\nEOF\n");
+        f
+    }
+
+    fn is_the_words(words: &str) -> impl Fn(&Entity) -> bool + '_ {
+        move |e| matches!(&e.shape, Shape::Text { text, align: Align { h: Horizontal::Left, v: Vertical::Baseline }, .. } if text == words)
+    }
+
+    #[test]
+    fn a_file_in_the_korean_code_page_reads_its_hangul() {
+        // "제1층", a floor's name as the issue shows it, in the bytes EUC-KR holds.
+        let d = read(&codepage_file("ANSI_949", &[0xC1, 0xA6, b'1', 0xC3, 0xFE])).unwrap();
+        assert!(d.entities.iter().any(is_the_words("제1층")), "{d:?}");
+    }
+
+    #[test]
+    fn a_page_this_does_not_know_reads_latin1_and_a_utf8_file_its_own_words_whatever_the_header_says() {
+        // A page without a decoder here keeps the Latin-1 it always had.
+        let d = read(&codepage_file("DOS437", &[0xC1])).unwrap();
+        assert!(d.entities.iter().any(is_the_words("Á")), "{d:?}");
+        // A file of 2007 and later is UTF-8 even when its header names a page.
+        let d = read(&codepage_file("ANSI_949", "제1층".as_bytes())).unwrap();
+        assert!(d.entities.iter().any(is_the_words("제1층")), "{d:?}");
+    }
+
+    #[test]
+    fn multi_line_text_is_a_text_a_line_stepped_down_from_its_attachment_point_without_its_formatting() {
+        let d = drawing(&pairs(&[
+            (0, "MTEXT"),
+            (10, "0"),
+            (20, "10"),
+            (40, "3"),
+            (71, "1"),
+            (3, "{\\fArial|b1|i0;First} line\\P"),
+            (1, "\\H1.5x;Second \\S1^2; \\A1;line"),
+            (0, "MTEXT"),
+            (10, "0"),
+            (20, "0"),
+            (40, "3"),
+            (71, "8"),
+            (11, "0"),
+            (21, "1"),
+            (1, "Up"),
+        ]));
+        let texts: Vec<(P2, &str, Align, f64)> = d
+            .entities
+            .iter()
+            .map(|e| match &e.shape {
+                Shape::Text { at, text, align, angle, .. } => (*at, text.as_str(), *align, *angle),
+                s => panic!("{s:?}"),
+            })
+            .collect();
+        // Top left at (0, 10): the first baseline a height down, the next 5/3 of a height further.
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(near(texts[0].0, P2(0.0, 7.0)) && texts[0].1 == "First line", "{:?}", texts[0]);
+        assert!(near(texts[1].0, P2(0.0, 2.0)) && texts[1].1 == "Second 1/2 line", "{:?}", texts[1]);
+        assert_eq!(texts[0].2, Align { h: Horizontal::Left, v: Vertical::Baseline });
+        // Bottom centre at the origin, turned to read upward: the one line's baseline is on the point.
+        assert!(near(texts[2].0, P2(0.0, 0.0)), "{:?}", texts[2]);
+        assert_eq!((texts[2].1, texts[2].2.h, texts[2].3), ("Up", Horizontal::Center, 90.0));
+    }
+
+    #[test]
+    fn a_hatch_gives_its_boundaries_as_a_fill_from_a_polyline_path_or_from_edges() {
+        let d = drawing(&pairs(&[
+            (0, "HATCH"),
+            (2, "SOLID"),
+            (70, "1"),
+            (91, "1"),
+            (92, "2"),
+            (72, "0"),
+            (73, "1"),
+            (93, "4"),
+            (10, "0"),
+            (20, "0"),
+            (10, "10"),
+            (20, "0"),
+            (10, "10"),
+            (20, "10"),
+            (10, "0"),
+            (20, "10"),
+            (97, "0"),
+            (98, "1"),
+            (10, "5"),
+            (20, "5"),
+            (0, "HATCH"),
+            (2, "ANSI31"),
+            (70, "0"),
+            (91, "1"),
+            (92, "0"),
+            (93, "2"),
+            (72, "1"),
+            (10, "0"),
+            (20, "0"),
+            (11, "10"),
+            (21, "0"),
+            (72, "2"),
+            (10, "5"),
+            (20, "0"),
+            (40, "5"),
+            (50, "0"),
+            (51, "180"),
+            (73, "1"),
+            (97, "0"),
+        ]));
+        assert_eq!(d.entities.len(), 2, "{:?}", d.entities);
+        assert_eq!(
+            d.entities[0].shape,
+            Shape::Fill { rings: vec![vec![P2(0.0, 0.0), P2(10.0, 0.0), P2(10.0, 10.0), P2(0.0, 10.0)]], solid: true }
+        );
+        let Shape::Fill { rings, solid: false } = &d.entities[1].shape else { panic!("{:?}", d.entities[1]) };
+        assert_eq!(rings.len(), 1);
+        assert!(near(rings[0][0], P2(0.0, 0.0)) && near(rings[0][1], P2(10.0, 0.0)), "{:?}", rings[0]);
+        assert!(has_point_near(&rings[0], P2(5.0, 5.0)), "the arc's top: {:?}", rings[0]);
+        assert!(rings[0].last().is_some_and(|p| !near(*p, P2(0.0, 0.0))), "the ring's end isn't its start again");
+    }
+
+    #[test]
+    fn an_ellipse_and_a_spline_are_points_on_their_curves() {
+        let d = drawing(&pairs(&[
+            (0, "ELLIPSE"),
+            (10, "0"),
+            (20, "0"),
+            (11, "10"),
+            (21, "0"),
+            (40, "0.5"),
+            (41, "0"),
+            (42, "6.283185307179586"),
+            (0, "SPLINE"),
+            (70, "8"),
+            (71, "2"),
+            (72, "6"),
+            (73, "3"),
+            (74, "0"),
+            (40, "0"),
+            (40, "0"),
+            (40, "0"),
+            (40, "1"),
+            (40, "1"),
+            (40, "1"),
+            (10, "0"),
+            (20, "0"),
+            (10, "5"),
+            (20, "10"),
+            (10, "10"),
+            (20, "0"),
+            (0, "SPLINE"),
+            (70, "0"),
+            (71, "3"),
+            (74, "2"),
+            (11, "0"),
+            (21, "0"),
+            (11, "1"),
+            (21, "1"),
+        ]));
+        let Shape::Polyline { pts, closed: true } = &d.entities[0].shape else { panic!("{:?}", d.entities[0]) };
+        assert!(has_point_near(pts, P2(10.0, 0.0)) && has_point_near(pts, P2(0.0, 5.0)) && has_point_near(pts, P2(-10.0, 0.0)), "{pts:?}");
+        assert_eq!(pts.len(), CURVE_STEPS, "a whole ellipse: its end isn't its start again");
+        // A quadratic B-spline over one span is a Bézier: its middle is (p0 + 2 p1 + p2) / 4.
+        let Shape::Polyline { pts, closed: false } = &d.entities[1].shape else { panic!("{:?}", d.entities[1]) };
+        assert!(near(pts[0], P2(0.0, 0.0)) && near(pts[pts.len() - 1], P2(10.0, 0.0)), "{pts:?}");
+        assert!(has_point_near(pts, P2(5.0, 5.0)), "{pts:?}");
+        // With fit points only, the line through them.
+        assert_eq!(d.entities[2].shape, Shape::Polyline { pts: vec![P2(0.0, 0.0), P2(1.0, 1.0)], closed: false });
+    }
+
+    #[test]
+    fn a_dimension_draws_its_block_a_solid_fills_and_an_attribute_shows_unless_invisible() {
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (2, "*D1"),
+            (10, "0"),
+            (20, "0"),
+            (0, "LINE"),
+            (10, "0"),
+            (20, "0"),
+            (11, "1"),
+            (21, "0"),
+            (0, "ENDBLK"),
+        ]);
+        let entities = pairs(&[
+            (0, "DIMENSION"),
+            (2, "*D1"),
+            (10, "0"),
+            (20, "0"),
+            (0, "SOLID"),
+            (10, "0"),
+            (20, "0"),
+            (11, "10"),
+            (21, "0"),
+            (12, "0"),
+            (22, "10"),
+            (13, "10"),
+            (23, "10"),
+            (0, "ATTRIB"),
+            (10, "0"),
+            (20, "0"),
+            (40, "1"),
+            (1, "hidden"),
+            (70, "1"),
+            (0, "ATTRIB"),
+            (10, "0"),
+            (20, "0"),
+            (40, "1"),
+            (1, "shown"),
+            (70, "0"),
+            (0, "SEQEND"),
+        ]);
+        let d = read_text(&file("", "", &blocks, &entities)).unwrap();
+        assert_eq!(d.entities.len(), 3, "{:?}", d.entities);
+        assert_eq!(d.entities[0].shape, Shape::Line(P2(0.0, 0.0), P2(1.0, 0.0)));
+        assert_eq!(
+            d.entities[1].shape,
+            Shape::Fill { rings: vec![vec![P2(0.0, 0.0), P2(10.0, 0.0), P2(10.0, 10.0), P2(0.0, 10.0)]], solid: true }
+        );
+        assert!(matches!(&d.entities[2].shape, Shape::Text { text, .. } if text == "shown"));
+    }
+
+    #[test]
+    fn paper_space_and_the_kinds_not_drawn_are_left_out_and_counted() {
+        let d = drawing(&pairs(&[
+            (0, "LINE"),
+            (67, "1"),
+            (10, "0"),
+            (20, "0"),
+            (11, "1"),
+            (21, "1"),
+            (0, "VIEWPORT"),
+            (10, "0"),
+            (20, "0"),
+            (0, "XLINE"),
+            (10, "0"),
+            (20, "0"),
+            (0, "XLINE"),
+            (10, "0"),
+            (20, "0"),
+            (0, "CIRCLE"),
+            (10, "0"),
+            (20, "0"),
+            (40, "0"),
+        ]));
+        assert!(d.entities.is_empty());
+        let left: Vec<(&str, usize)> = d.left_out.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        assert_eq!(left, [("VIEWPORT", 1), ("XLINE", 2), ("empty", 1), ("paper space", 1)]);
+    }
+
+    #[test]
+    fn a_binary_file_a_file_that_isnt_dxf_and_a_file_cut_short_are_refused_and_say_why() {
+        let e = read(b"AutoCAD Binary DXF\r\n\x1a\0\0\0").unwrap_err();
+        assert!(e.contains("binary"), "{e}");
+        let e = read(b"hello\nworld\n").unwrap_err();
+        assert!(e.contains("line 1") && e.contains("group code"), "{e}");
+        let e = read(b"0\nEOF\n").unwrap_err();
+        assert!(e.contains("no ENTITIES"), "{e}");
+        let e = read(b"0\nSECTION\n2\nENTITIES\n0\nLINE\n10\n").unwrap_err();
+        assert!(e.contains("line 7") && e.contains("ends after"), "{e}");
+        let e = read_text(&file("", "", "", &pairs(&[(0, "LINE"), (10, "nan"), (20, "0"), (11, "1"), (21, "1")]))).unwrap_err();
+        assert!(e.contains("isn't a number"), "{e}");
+        let e = read_text(&file("", "", "", &pairs(&[(0, "LINE"), (10, "1e300"), (20, "0"), (11, "1"), (21, "1")]))).unwrap_err();
+        assert!(e.contains("past what a drawing holds"), "{e}");
+        // Too big, before it's read.
+        let e = read(&vec![b' '; MAX_BYTES + 1]).unwrap_err();
+        assert!(e.contains("bytes"), "{e}");
+    }
+
+    #[test]
+    fn a_file_in_a_code_page_or_with_a_byte_order_mark_still_reads_and_blank_lines_are_passed_over() {
+        let mut bytes = b"\xEF\xBB\xBF0\nSECTION\n2\nENTITIES\n\n0\nTEXT\n10\n0\n20\n0\n40\n1\n1\ncaf".to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(b"\r\n0\nENDSEC\n0\nEOF\n\n\n");
+        let d = read(&bytes).unwrap();
+        assert!(matches!(&d.entities[0].shape, Shape::Text { text, .. } if text == "café"), "{:?}", d.entities);
+        // Windows line ends throughout.
+        let d = read_text(&file("", "", "", &pairs(&[(0, "POINT"), (10, "1"), (20, "2")])).replace('\n', "\r\n")).unwrap();
+        assert_eq!(shapes(&d), [&Shape::Point(P2(1.0, 2.0))]);
+    }
+
+    #[test]
+    fn hostile_counts_and_arrays_stop_at_the_bounds_rather_than_run_away() {
+        // A count the vertices don't bear out is ignored.
+        let d = drawing(&pairs(&[(0, "LWPOLYLINE"), (90, "1000000000"), (10, "0"), (20, "0"), (10, "1"), (20, "1")]));
+        assert_eq!(shapes(&d), [&Shape::Polyline { pts: vec![P2(0.0, 0.0), P2(1.0, 1.0)], closed: false }]);
+        // An array past what the drawing may draw is refused, not drawn for an hour.
+        let blocks = pairs(&[(0, "BLOCK"), (2, "A"), (10, "0"), (20, "0"), (0, "POINT"), (10, "0"), (20, "0"), (0, "ENDBLK")]);
+        let e = read_text(&file(
+            "",
+            "",
+            &blocks,
+            &pairs(&[(0, "INSERT"), (2, "A"), (10, "0"), (20, "0"), (70, "1000000"), (71, "1000000"), (44, "1"), (45, "1")]),
+        ))
+        .unwrap_err();
+        assert!(e.contains("more than"), "{e}");
+        // A block of a block of arrays that multiplies past the work bound is refused too.
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (2, "S"),
+            (10, "0"),
+            (20, "0"),
+            (0, "INSERT"),
+            (2, "S"),
+            (10, "1"),
+            (20, "0"),
+            (70, "4"),
+            (71, "4"),
+            (44, "1"),
+            (45, "1"),
+            (0, "ENDBLK"),
+        ]);
+        let e = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "S"), (10, "0"), (20, "0")]))).unwrap_err();
+        assert!(e.contains("more than"), "{e}");
+        // A hatch whose counts outrun its values ends where they do.
+        let d = drawing(&pairs(&[
+            (0, "HATCH"),
+            (91, "5"),
+            (92, "2"),
+            (72, "0"),
+            (73, "1"),
+            (93, "100000"),
+            (10, "0"),
+            (20, "0"),
+            (10, "1"),
+            (20, "0"),
+            (10, "1"),
+            (20, "1"),
+        ]));
+        assert_eq!(d.entities.len(), 1, "{:?}", d.entities);
+        // A spline with knots that don't match its controls, and a degree past sense, draws nothing and breaks nothing.
+        let d = drawing(&pairs(&[(0, "SPLINE"), (71, "99"), (40, "0"), (10, "0"), (20, "0"), (10, "1"), (20, "1")]));
+        assert!(d.entities.is_empty());
+        // Negative and zero scales, and a degenerate ellipse.
+        let d = read_text(&file(
+            "",
+            "",
+            &blocks,
+            &pairs(&[
+                (0, "INSERT"),
+                (2, "S"),
+                (10, "0"),
+                (20, "0"),
+                (41, "0"),
+                (0, "ELLIPSE"),
+                (10, "0"),
+                (20, "0"),
+                (11, "0"),
+                (21, "0"),
+                (40, "1"),
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(d.left_out.get("empty"), Some(&2));
+        // Scales that multiply past any number through nested blocks leave the shape out.
+        let blocks = pairs(&[
+            (0, "BLOCK"),
+            (2, "BIG"),
+            (10, "0"),
+            (20, "0"),
+            (0, "POINT"),
+            (10, "1"),
+            (20, "1"),
+            (0, "INSERT"),
+            (2, "BIG"),
+            (10, "0"),
+            (20, "0"),
+            (41, "1e11"),
+            (42, "1e11"),
+            (0, "ENDBLK"),
+        ]);
+        let d = read_text(&file("", "", &blocks, &pairs(&[(0, "INSERT"), (2, "BIG"), (10, "0"), (20, "0")]))).unwrap();
+        assert!(d.left_out.get("past what a drawing holds").is_some_and(|n| *n > 0), "{:?}", d.left_out);
+        assert!(d.entities.iter().all(|e| e.shape.fits()));
+    }
 }

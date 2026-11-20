@@ -1,6 +1,6 @@
 //! Reading a DXF: what comes in by layer, the unit it is read in, what is left out, and what is refused.
 
-use crate::dxf::{Options, Shape, read};
+use crate::dxf::drawing::{Options, Shape, read};
 use crate::geom::P2;
 
 /// A DXF of `entities`, with `header` between its `$`-variables: the pairs of a file, a group code to a line.
@@ -325,7 +325,7 @@ fn the_words_of_a_drawing_are_drawn_under_the_plan_and_are_no_lines_of_the_build
     // A word is drawn with the strokes its letters are drawn with, so it is seen under a plan like everything else.
     let m = crate::model::Model::new("Test");
     let mut m = m;
-    let layers = vec![crate::dxf::Layer {
+    let layers = vec![crate::dxf::drawing::Layer {
         name: "TESTI".into(),
         shapes: vec![Shape::Words { at: P2(0.0, 0.0), text: "AB".into(), height: 1000.0, angle: 0.0 }],
     }];
@@ -374,9 +374,10 @@ fn a_session_with_one_reads_a_dwg_wherever_it_reads_a_dxf() {
     let path = dir.join("convertito.dwg");
     std::fs::write(&path, b"AC1032\0\0\0\0\0\0").unwrap();
     let mut s = crate::engine::Session::new();
-    // What the applications hand over, here a stand-in: the core knows only bytes in, bytes out.
-    s.dwg = Some(std::sync::Arc::new(|bytes: &[u8]| {
-        assert!(crate::dxf::is_dwg(bytes), "it is given the DWG's own bytes");
+    // What the applications hand over, here a stand-in: the core gives it the DWG's path and takes DXF bytes back.
+    s.dwg = Some(std::sync::Arc::new(|at: &std::path::Path| {
+        let bytes = std::fs::read(at).map_err(|e| e.to_string())?;
+        assert!(crate::dxf::is_dwg(&bytes), "it is given the DWG's own file");
         Ok((
             b"0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nMURI\n10\n0\n20\n0\n11\n1000\n21\n0\n0\nENDSEC\n0\nEOF\n".to_vec(),
             vec!["3 PROXY left out".into()],
@@ -476,7 +477,7 @@ fn a_dimension_is_drawn_under_the_plan_and_is_no_line_of_the_building() {
     // Two lines a wall's thickness apart, square to a third: read as geometry a dimension is the very thing a trace
     // looks for, so it is drawn and nothing else.
     let mut m = crate::model::Model::new("Test");
-    let layers = vec![crate::dxf::Layer {
+    let layers = vec![crate::dxf::drawing::Layer {
         name: "QUOTE".into(),
         shapes: vec![Shape::Measure {
             from: P2(0.0, 0.0),
@@ -649,7 +650,7 @@ fn a_hatch_boundary_this_does_not_read_is_counted_and_the_hatch_keeps_the_rest()
 fn a_hatch_is_drawn_under_the_plan_and_is_no_line_of_the_building() {
     // A hatch's boundary runs along the faces of the wall it fills, so read as geometry it would double them.
     let mut m = crate::model::Model::new("Test");
-    let layers = vec![crate::dxf::Layer {
+    let layers = vec![crate::dxf::drawing::Layer {
         name: "retini".into(),
         shapes: vec![Shape::Fill {
             pattern: "ANSI31".into(),

@@ -97,7 +97,7 @@ fn run_types_are_made_changed_and_checked_with_type() {
     );
     assert!(fails(&mut s, "type", json!({"category": "beam", "name": "Flat", "width": 100})).contains("depth"));
     assert!(fails(&mut s, "type", json!({"category": "beam", "name": "Zero", "width": 0, "depth": 10})).contains("above zero"));
-    let e = fails(&mut s, "type", json!({"category": "duct", "name": "P", "width": 10}));
+    let e = fails(&mut s, "type", json!({"category": "kettle", "name": "P", "width": 10}));
     assert!(e.contains("beam"), "the message lists what has types: {e}");
     // The strip footing's, and the columns' own.
     run(&mut s, "type", json!({"category": "stripfooting", "name": "Strip 800 x 300", "width": 800, "depth": 300}));
@@ -233,7 +233,7 @@ use crate::geom::P2;
 use crate::render::{self, Drawing, POCHE, Prim, View};
 
 fn view() -> View {
-    View { scale: 0.1, cx: 3000.0, cy: 0.0, width: 1000, height: 800 }
+    View { angle: 0.0, scale: 0.1, cx: 3000.0, cy: 0.0, width: 1000, height: 800 }
 }
 
 fn made(s: &mut Session, id: &str, p: Value) -> u64 {
@@ -336,7 +336,7 @@ fn a_section_cuts_a_beam_across_its_section() {
     let mut s = Session::new();
     let beam = made(&mut s, "beam", json!({"points": [[0, 0], [6000, 0]], "offset": 2800}));
     let section = made(&mut s, "section", json!({"start": [3000, -2000], "end": [3000, 2000]}));
-    let d = render::section(&s.model, section, View { scale: 0.1, cx: 2000.0, cy: 1500.0, width: 1000, height: 800 });
+    let d = render::section(&s.model, section, View { angle: 0.0, scale: 0.1, cx: 2000.0, cy: 1500.0, width: 1000, height: 800 });
     let (lo, hi) = extent(&d, beam);
     // 200 wide, across the line at 2000 along it; 500 deep, its top at 2800.
     assert_eq!((lo, hi), (P2(1900.0, 2300.0), P2(2100.0, 2800.0)));
@@ -446,7 +446,9 @@ fn a_beam_is_an_ifc_beam_swept_along_its_axis_in_its_material() {
     assert!(file.contains("IFCDIRECTION((1.,0.,0.))") && file.contains("IFCDIRECTION((0.,1.,0.))"));
     // Of concrete, load bearing, in a system.
     assert!(file.contains("IFCMATERIAL('Concrete'"));
-    assert_eq!(entities(&file, "IFCRELASSOCIATESMATERIAL").len(), 1);
+    // The material is in its type's material profile set: one association for the type, one for the beam's usage of the set.
+    assert_eq!(entities(&file, "IFCRELASSOCIATESMATERIAL").len(), 2);
+    assert_eq!(entities(&file, "IFCMATERIALPROFILE").len(), 1);
     assert!(
         file.contains("IFCPROPERTYSET(")
             && file.contains("'Pset_BeamCommon'")
@@ -610,6 +612,10 @@ fn the_structure_comes_back_from_ifc() {
     // The types they were of came with them, in the maps of their own.
     assert!(t.model.types.structural_column.contains_key("C 250 x 600") && t.model.types.footing.contains_key("F 1800"));
     assert!(t.model.types.runs["beam"].contains_key("B 250 x 600") && t.model.types.runs["stripfooting"].contains_key("S 900 x 350"));
+    // A beam's material is in its type's material profile set in the file, and comes back from it.
+    assert_eq!(t.model.types.runs["beam"]["B 250 x 600"].material, "Concrete");
+    assert_eq!(t.model.types.runs["beam"]["B 250 x 600"].material, s.model.types.runs["beam"]["B 250 x 600"].material);
+    assert!(t.model.types.runs["stripfooting"]["S 900 x 350"].material == s.model.types.runs["stripfooting"]["S 900 x 350"].material);
     // An architectural column stays one; a floor says whether it is structural.
     assert_eq!(described(&t.model, "column").len(), 1);
     // And the project they come into holds what they need.
@@ -712,12 +718,12 @@ fn a_project_whose_run_type_is_round_and_not_as_deep_as_it_is_wide_is_refused() 
     let s = Session::new();
     let mut m = (*s.model).clone();
     assert_eq!(m.check(), Ok(()));
-    let t = crate::model::RunType { width: 100.0, depth: 200.0, round: true, material: String::new() };
+    let t = crate::model::RunType { width: 100.0, depth: 200.0, round: true, material: String::new(), profile: None };
     m.types.runs.entry("beam".into()).or_default().insert("Odd".into(), t);
     assert!(m.check().unwrap_err().contains("round section"), "{:?}", m.check());
     // Or of a category that has no runs, or a material the library hasn't.
     let mut m = (*s.model).clone();
-    m.types.runs.insert("duct".into(), Default::default());
+    m.types.runs.insert("kettle".into(), Default::default());
     assert!(m.check().unwrap_err().contains("no run types"));
     let mut m = (*s.model).clone();
     if let Some(t) = m.types.runs.get_mut("beam").and_then(|t| t.get_mut("Beam 200 x 500")) {

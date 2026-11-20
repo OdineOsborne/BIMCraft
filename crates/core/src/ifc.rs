@@ -9,13 +9,19 @@
 //! of the project's parameters, and of its phase and design option, goes in property sets of its own;
 //! the project's phases and design option sets in one on the project.
 
+use bimcraft_i18n::ui_msg;
+
+pub mod classes;
+mod v2x3;
+
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::family::ConnectorKind;
 use crate::geom::{self, P2};
 use serde_json::Value;
 
-use crate::model::{DEFAULT_HEIGHT, Element, Function, Guid, Id, Layer, Model, ParameterKind, Railing, heading, mix};
+use crate::model::{Element, Function, Guid, Id, Layer, Model, Operation, ParameterKind, Railing, RoomArea, heading, mix};
 use crate::phasing;
 use crate::stairs;
 use crate::view3d::P3;
@@ -54,21 +60,118 @@ const SYSTEMS: u64 = 45;
 const SYSTEM_MEMBERS: u64 = 46;
 const LOFTED: u64 = 47;
 const LOFTED_DEFINES: u64 = 48;
-const COST_SCHEDULE: u64 = 50;
-const COST_ITEM: u64 = 51;
-const COST_PRICES: u64 = 52;
-const COST_LISTED: u64 = 53;
-const SITE_HOLDS: u64 = 54;
+const QUANTITIES: u64 = 49;
+const QUANTITY_DEFINES: u64 = 50;
+const TYPES: u64 = 51;
+const TYPE_DEFINES: u64 = 52;
+const DEVICE: u64 = 53;
+const DEVICE_DEFINES: u64 = 54;
+const CONNECTOR: u64 = 55;
+const CONNECTOR_DEFINES: u64 = 56;
+const TYPE_MATERIALS: u64 = 57;
+const USAGE_MATERIALS: u64 = 58;
+const CLASSIFIES: u64 = 59;
+const REFERENCED: u64 = 60;
+const WALLED: u64 = 61;
+const WALLED_DEFINES: u64 = 62;
+const FACE_OPENING: u64 = 63;
+const FACE_VOIDS: u64 = 64;
+const CIRCUIT_PARTS: u64 = 65;
+const CIRCUIT_PROPERTIES: u64 = 66;
+const CIRCUIT_DEFINES: u64 = 67;
+const BREAKER: u64 = 68;
+const BREAKER_PROPERTIES: u64 = 69;
+const BREAKER_DEFINES: u64 = 70;
+const DISTRIBUTION: u64 = 71;
+const DISTRIBUTION_MEMBERS: u64 = 72;
+const GRID: u64 = 73;
+const GRID_CONTAINS: u64 = 74;
+const PLOT_PROPERTIES: u64 = 75;
+const PLOT_DEFINES: u64 = 76;
+const PLOT_NAMES: u64 = 77;
+const PLOT_NAMES_DEFINES: u64 = 78;
+const PANEL_PROPERTIES: u64 = 79;
+const PANEL_DEFINES: u64 = 80;
+const DISTRIBUTION_SERVES: u64 = 81;
+const CIRCUIT_MEMBERS: u64 = 82;
+const CLASSIFIED: u64 = 83;
+const INFO: u64 = 84;
+const INFO_DEFINES: u64 = 85;
+const MAP: u64 = 86;
+const MAP_DEFINES: u64 = 87;
+const CRS: u64 = 88;
+const CRS_DEFINES: u64 = 89;
+const COST_SCHEDULE: u64 = 90;
+const COST_ITEM: u64 = 91;
+const COST_PRICES: u64 = 92;
+const COST_LISTED: u64 = 93;
+const SITE_HOLDS: u64 = 94;
 
-/// The property set an element's values of the project's parameters go in.
+/// Site footprint metadata in curve order: Names, Guids and Levels (native GUIDs).
+pub const PROPERTY_LINES: &str = "BIMCraft_PropertyLines";
+
+/// The property set an element's values of the project's parameters go in, less those whose parameter names another set for
+/// its category.
 pub const PARAMETERS: &str = "Project Parameters";
+
+/// The set an element's `Pset_ElectricalDeviceCommon`'s values go in, of a device's power connector.
+const DEVICE_SET: &str = "Pset_ElectricalDeviceCommon";
+
+/// Whether a project parameter's values may go in IFC in property set `name`: not one BIMCraft reads into fields of its own, nor
+/// its project parameters' own set, which is where a parameter naming no set goes.
+pub fn foreign_set(name: &str) -> bool {
+    name != PARAMETERS && name != SEPARATION && !name.starts_with("BIMCraft_")
+}
+
+/// Whether the export writes property `name` of set `set` itself, from what an element is: its `LoadBearing` and `Status` in
+/// its `Pset_*Common`, a device's poles, power factor and voltage. A value of a parameter of that name there is the export's.
+pub fn own_property(set: &str, name: &str) -> bool {
+    let common = set.starts_with("Pset_") && set.ends_with("Common");
+    (common && matches!(name, "LoadBearing" | "Status"))
+        || (set == DEVICE_SET && matches!(name, "NumberOfPoles" | "PowerFactor" | "RatedVoltage"))
+}
+
+/// A number for `text`, the same each time: what keys a GlobalId made for a name.
+fn key_of(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
 
 /// The property set a run's justification and category go in (its system is an IfcSystem it is assigned to).
 pub const RUN: &str = "BIMCraft_Run";
 
+/// The property set a distribution board's data goes in: `Mains` (amperes), `Slots`, `DistributionSystem` (its name) and `SupplyFrom`
+/// (the GlobalId of the board that supplies it). The system is also an IfcDistributionSystem the board is assigned to, which is
+/// what another tool reads it from.
+pub const PANEL: &str = "BIMCraft_Panel";
+
+/// The property set a circuit's own data goes in, on its `IfcDistributionCircuit`: `Number`, `Rating` (the breaker, amperes), `Poles`,
+/// `Voltage` (the name, when it names one), `Classification`, `DemandFactor`, `Panel` (the GlobalId of its board, which is the
+/// board's GUID) and `Wires` (JSON). Its devices are what is assigned to it, with its breaker, an `IfcProtectiveDevice`.
+pub const CIRCUIT_SET: &str = "BIMCraft_Circuit";
+
 /// The property set a lofted mass records how its footprint and its top outline pair up in, corner for corner (the body is
 /// a closed face set that doesn't say): `Loft`, JSON `{bottom, top}`.
 pub const LOFT: &str = "BIMCraft_Mass";
+
+/// A wall's authored location line (`Location`), and the GlobalIds of the roof or floor its top and base follow
+/// (`AttachTop`, `AttachBase`). Its Axis representation lies on that location line.
+pub const WALL: &str = "BIMCraft_Wall";
+
+/// The object type a room separation line's virtual element carries, which the import reads it back by.
+pub const SEPARATION: &str = "RoomSeparation";
+
+/// A lone grid axis cannot form an IfcGrid's two nonempty, disjoint axis sets. Its curve annotation carries this object
+/// type so import can restore it as a native grid rather than inventing another axis.
+pub const GRID_AXIS: &str = "BIMCraft_GridAxis";
+
+/// The property set what a placed device's connector says that IFC's `Pset_ElectricalDeviceCommon` has no property for goes
+/// in: its load in VA (in all, and `LoadVAPhase1`… for each phase), its system and its classification.
+pub const CONNECTOR_SET: &str = "BIMCraft_Connector";
+
+/// The property set on the project its information goes in, each field under the name Revit gives it
+/// (`project_info::FIELDS`): what IFC's own attributes (the project's phase, the building's name and address) don't hold, and
+/// those too, as typed, so they come back as they were.
+pub const PROJECT_INFO: &str = "BIMCraft_ProjectInformation";
 
 /// The property set an element's phase and design option go in; on the project, its phases and design option sets.
 pub const PHASING: &str = "BIMCraft_Phasing";
@@ -121,7 +224,7 @@ fn real(x: f64) -> String {
 }
 
 /// A direction's ratio: as a real, to twelve places, so a turn reads back to the millionth of a degree.
-fn ratio(x: f64) -> String {
+pub(crate) fn ratio(x: f64) -> String {
     let x = if x.is_finite() && x != 0.0 { x } else { 0.0 };
     format!("{x:.12}").trim_end_matches('0').to_string()
 }
@@ -164,7 +267,7 @@ fn fold(g: Guid) -> u64 {
 }
 
 /// UTC date and time of a Unix time, ISO 8601.
-fn utc(secs: u64) -> String {
+pub(crate) fn utc(secs: u64) -> String {
     // Days to civil date: Howard Hinnant's algorithm.
     let z = (secs / 86_400) as i64 + 719_468;
     let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
@@ -194,14 +297,217 @@ struct Step {
     body: u64,
     /// Each material written: it, and the surface style its colour shades with.
     materials: BTreeMap<String, (u64, Option<u64>)>,
+    /// What goes in each element's `Pset_*Common`: its entity, the set's name and its properties, written once at the end.
+    common: BTreeMap<Id, (u64, &'static str, Vec<u64>)>,
+    /// The values of the project's parameters that go in a set of another name than its own, by entity and set: written in that
+    /// set where the export writes one of the name for the entity, else in a set of their own at the end.
+    sets: BTreeMap<(u64, String), (Id, Vec<u64>)>,
+    /// The occurrences of each type object, by its key (see `TypeKey`). Written once at the end.
+    typed: BTreeMap<TypeKey, TypeBuild>,
+    /// The profile definition of each section written, shared by the material profile set of the type that has it and the bodies of
+    /// its occurrences.
+    sections: BTreeMap<Section, u64>,
+    /// What each OmniClass number and title classifies: type objects, else occurrences with none. Written once at the end.
+    classified: BTreeMap<(String, String), Vec<u64>>,
+    /// The `IfcClassification` of each system by its name, written the first time a family or a parameter asks for it.
+    systems: BTreeMap<String, u64>,
+    /// The schema written.
+    schema: Schema,
+    /// IFC2x3's owner history, which every rooted entity there has; 0 in the others, which do without.
+    owner: u64,
+    /// IFC2x3's map conversion and its CRS, said before there's a project to hold them: each set's name, GlobalId roles and
+    /// properties.
+    mapped: Vec<(&'static str, (u64, u64), Vec<u64>)>,
+}
+
+/// The IFC schema a file is written in: IFC4 (ISO 16739-1:2018); IFC4.3 (ISO 16739-1:2024, `IFC4X3_ADD2`), which IFC4's
+/// entities are written in as they are, but for the attributes 4.3 added (a point list's tags, a virtual element's type); or
+/// IFC2x3 (ISO/PAS 16739:2005, TC1), for the programs that read nothing newer, which each entity is turned into as it is
+/// written (`v2x3`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Schema {
+    #[default]
+    #[serde(rename = "ifc4")]
+    Ifc4,
+    #[serde(rename = "ifc4x3")]
+    Ifc4x3,
+    #[serde(rename = "ifc2x3")]
+    Ifc2x3,
+}
+
+impl Schema {
+    /// Its name in a file's `FILE_SCHEMA`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Schema::Ifc4 => "IFC4",
+            Schema::Ifc4x3 => "IFC4X3_ADD2",
+            Schema::Ifc2x3 => "IFC2X3",
+        }
+    }
+
+    /// The view its file says it is of: IFC4's design transfer view, IFC2x3's coordination view.
+    fn view(self) -> &'static str {
+        match self {
+            Schema::Ifc2x3 => "CoordinationView_V2.0",
+            Schema::Ifc4 | Schema::Ifc4x3 => "DesignTransferView",
+        }
+    }
+}
+
+/// A member's section as its type gives it: `width` and `depth` in mm (a round section is `width` across, so its depth is
+/// its width), kept as bits so a section can key a map.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Section {
+    width: u64,
+    depth: u64,
+    round: bool,
+    profile: Option<(crate::profiles::GeometryKey, String)>,
+}
+
+impl std::fmt::Debug for Section {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = f.debug_struct("Section");
+        out.field("width", &self.width).field("depth", &self.depth).field("round", &self.round);
+        if let Some(profile) = &self.profile {
+            out.field("profile", profile);
+        }
+        out.finish()
+    }
+}
+
+impl Section {
+    fn new(width: f64, depth: f64, round: bool) -> Section {
+        Section { width: width.to_bits(), depth: if round { width } else { depth }.to_bits(), round, profile: None }
+    }
+
+    fn with_profile(mut self, profile: Option<&crate::model::Profile>) -> Self {
+        self.profile = profile.map(|p| (p.geometry_key(), p.name.clone()));
+        self
+    }
+
+    fn width(&self) -> f64 {
+        f64::from_bits(self.width)
+    }
+
+    fn depth(&self) -> f64 {
+        f64::from_bits(self.depth)
+    }
+}
+
+/// What a type object's material profile set holds: its section, and the name of its material (empty for none: a column's type
+/// has no material).
+type Member = (Section, String);
+
+/// A type object's key: its IFC class, what comes ahead of and after its predefined type (each with its comma), its name and, for
+/// a beam's, column's or footing's, its member (two types of one name and two sections are two type objects).
+type TypeKey = (String, String, String, String, Option<Member>);
+
+/// A type object as the export builds it: the predefined type its occurrences share, their ids, and which of them use its
+/// material profile set by each cardinal point.
+struct TypeBuild {
+    predefined: String,
+    occurrences: Vec<u64>,
+    usages: BTreeMap<u8, Vec<u64>>,
+    /// The OmniClass number and title its family has, which the type object is classified by.
+    omniclass: Option<(String, String)>,
+}
+
+/// The cardinal point (IFC4's `IfcCardinalPointReference`) a beam is placed by: its `justify` line, the top (8), the middle (5)
+/// or the bottom (2) of its section, which an upright one, with no top or bottom, has in the middle.
+fn cardinal_point(justify: crate::model::Justify, upright: bool) -> u8 {
+    use crate::model::Justify;
+    match justify {
+        _ if upright => 5,
+        Justify::Top => 8,
+        Justify::Centre => 5,
+        Justify::Bottom => 2,
+    }
 }
 
 impl Step {
-    /// Writes `#n=ENTITY;` and returns n.
+    /// Writes `#n=ENTITY;` and returns n. `entity` is IFC4's; in IFC2x3 it is written as that has it (`v2x3::downgrade`),
+    /// a styled item's styles in the assignment they go in there.
     fn add(&mut self, entity: impl AsRef<str>) -> u64 {
+        let entity = entity.as_ref();
+        if self.schema != Schema::Ifc2x3 {
+            return self.write(entity);
+        }
+        if let Some(("IFCSTYLEDITEM", [item, styles, name])) = v2x3::split(entity).as_ref().map(|(n, a)| (*n, a.as_slice())) {
+            let assignment = self.write(&format!("IFCPRESENTATIONSTYLEASSIGNMENT({styles})"));
+            return self.write(&format!("IFCSTYLEDITEM({item},(#{assignment}),{name})"));
+        }
+        let entity = v2x3::downgrade(entity, self.owner);
+        self.write(&entity)
+    }
+
+    /// Writes `#n=ENTITY;` as it is and returns n.
+    fn write(&mut self, entity: &str) -> u64 {
         self.next += 1;
-        let _ = writeln!(self.out, "#{}={};", self.next, entity.as_ref());
+        let _ = writeln!(self.out, "#{}={};", self.next, entity);
         self.next
+    }
+
+    /// Where the file's coordinates lie on a map: the projected CRS (its name, description, geodetic datum, vertical datum,
+    /// projection and zone, in `unit`) and the conversion of the context `ctx` to it (eastings, northings, height, the x
+    /// axis's abscissa and ordinate, scale). IFC2x3 has neither entity, so there they are the project's `ePSet_ProjectedCRS`
+    /// and `ePSet_MapConversion`, as buildingSMART's guide to georeferencing has them, with the same values; `project` is
+    /// none while it isn't written yet.
+    /// The map conversion: `conversion` its eastings, northings, height and x axis, `(unit, grid)` its scale, the file's unit to
+    /// the map's and the ground-to-grid factor.
+    fn map_conversion(&mut self, ctx: u64, project: Option<u64>, crs: [String; 6], unit: u64, at: [String; 5], (k, grid): (f64, f64)) {
+        // IFC4.3's Scale is the unit's alone and its factors the grid's, in plan only, so heights stay true (FactorZ 1); IFC4 has
+        // one Scale for all three, which carries both.
+        if self.schema == Schema::Ifc4x3 {
+            let target = self.add(format!("IFCPROJECTEDCRS({},#{unit})", crs.join(",")));
+            let g = ratio(grid);
+            self.add(format!("IFCMAPCONVERSIONSCALED(#{ctx},#{target},{},{},{g},{g},1.)", at.join(","), ratio(k)));
+            return;
+        }
+        let [e, n, h, xa, xo] = at;
+        let conversion = [e, n, h, xa, xo, ratio(k * grid)];
+        if self.schema != Schema::Ifc2x3 {
+            let target = self.add(format!("IFCPROJECTEDCRS({},#{unit})", crs.join(",")));
+            self.add(format!("IFCMAPCONVERSION(#{ctx},#{target},{})", conversion.join(",")));
+            return;
+        }
+        let named = |w: &mut Step, names: [(&str, &str); 6], values: [String; 6]| -> Vec<u64> {
+            names
+                .iter()
+                .zip(values)
+                .filter(|(_, v)| v != "$")
+                .map(|((name, kind), v)| w.add(format!("IFCPROPERTYSINGLEVALUE('{name}',$,{kind}({v}),$)")))
+                .collect()
+        };
+        let crs_names = [
+            ("Name", "IFCLABEL"),
+            ("Description", "IFCTEXT"),
+            ("GeodeticDatum", "IFCIDENTIFIER"),
+            ("VerticalDatum", "IFCIDENTIFIER"),
+            ("MapProjection", "IFCIDENTIFIER"),
+            ("MapZone", "IFCIDENTIFIER"),
+        ];
+        let conversion_names = [
+            ("Eastings", "IFCLENGTHMEASURE"),
+            ("Northings", "IFCLENGTHMEASURE"),
+            ("OrthogonalHeight", "IFCLENGTHMEASURE"),
+            ("XAxisAbscissa", "IFCREAL"),
+            ("XAxisOrdinate", "IFCREAL"),
+            ("Scale", "IFCREAL"),
+        ];
+        let crs = named(self, crs_names, crs);
+        let conversion = named(self, conversion_names, conversion);
+        self.mapped.push(("ePSet_ProjectedCRS", (CRS, CRS_DEFINES), crs));
+        self.mapped.push(("ePSet_MapConversion", (MAP, MAP_DEFINES), conversion));
+        if let Some(project) = project {
+            self.map_sets(project);
+        }
+    }
+
+    /// The sets `map_conversion` is holding for `project`, written on it.
+    fn map_sets(&mut self, project: u64) {
+        for (name, roles, props) in std::mem::take(&mut self.mapped) {
+            self.define(project, name, &props, roles, 0);
+        }
     }
 
     /// The GlobalId of what plays `role` for `id`: an element's or a storey's own is its GUID; what else an element writes
@@ -225,10 +531,142 @@ impl Step {
         self.add(format!("IFCPROPERTYSINGLEVALUE({},{note},IFCTEXT({}),$)", s(name), s(value)))
     }
 
-    /// A property set `name` of `props` for `ent`; its GlobalIds from `(set, relation)` and `key`.
+    /// A property set `name` of `props` for `ent`, and the project parameters' values that go in it; its GlobalIds from
+    /// `(set, relation)` and `key`.
     fn define(&mut self, ent: u64, name: &str, props: &[u64], (set, relation): (u64, u64), key: u64) {
-        let set = self.add(format!("IFCPROPERTYSET({},$,{},$,({}))", self.guid(set, key), s(name), refs(props)));
+        let props = match self.sets.remove(&(ent, name.to_string())) {
+            Some((_, more)) => [props, &more].concat(),
+            None => props.to_vec(),
+        };
+        let set = self.add(format!("IFCPROPERTYSET({},$,{},$,({}))", self.guid(set, key), s(name), refs(&props)));
         self.add(format!("IFCRELDEFINESBYPROPERTIES({},$,$,$,(#{ent}),#{set})", self.guid(relation, key)));
+    }
+
+    /// Says `ent` is an occurrence of the type object `class` (with its `predefined` type) named `name`.
+    fn typed(&mut self, class: &str, predefined: &str, name: &str, ent: u64) {
+        self.typed_with(class, "", predefined, "", name, ent);
+    }
+
+    /// As `typed`, for a type with attributes beside its PredefinedType: `before` it and `after` it, each with its comma (a
+    /// furniture type's assembly place comes before; a door's operation after). Occurrences whose predefined types differ make
+    /// their type's NOTDEFINED: a roof type is flat only when every roof of it is. An empty `predefined` is a class that has none.
+    fn typed_with(&mut self, class: &str, before: &str, predefined: &str, after: &str, name: &str, ent: u64) {
+        let key = (class.to_string(), before.to_string(), after.to_string(), name.to_string(), None);
+        self.build(key, predefined).occurrences.push(ent);
+    }
+
+    /// As `typed`, for a beam, a column or a footing: its type holds `member` (its section and material) as a material profile
+    /// set, and `ent` uses that set, placed by `cardinal` (an `IfcCardinalPointReference`).
+    fn typed_member(&mut self, class: &str, predefined: &str, name: &str, member: Member, cardinal: u8, ent: u64) {
+        let key = (class.to_string(), String::new(), String::new(), name.to_string(), Some(member));
+        let build = self.build(key, predefined);
+        build.occurrences.push(ent);
+        build.usages.entry(cardinal).or_default().push(ent);
+    }
+
+    /// The type object `key`'s build, new with `predefined`; occurrences whose predefined types differ make it NOTDEFINED.
+    fn build(&mut self, key: TypeKey, predefined: &str) -> &mut TypeBuild {
+        let build = self.typed.entry(key).or_insert_with(|| TypeBuild {
+            predefined: predefined.to_string(),
+            occurrences: Vec::new(),
+            usages: BTreeMap::new(),
+            omniclass: None,
+        });
+        if build.predefined != predefined {
+            build.predefined = ".NOTDEFINED.".into();
+        }
+        build
+    }
+
+    /// Writes each type object once, with its `IfcRelDefinesByType` to its occurrences and, for a beam's, column's or footing's,
+    /// its material profile set (one `IfcMaterialProfile`: its material and its section) with the `IfcMaterialProfileSetUsage`
+    /// its occurrences use, one for each cardinal point. All the GlobalIds come from the class, the name and the member, so they
+    /// are the same on every export.
+    fn write_types(&mut self, m: &Model) {
+        for ((class, before, after, name, member), TypeBuild { predefined, occurrences, usages, omniclass }) in
+            std::mem::take(&mut self.typed)
+        {
+            let member_text = member.as_ref().map(|x| format!("{x:?}")).unwrap_or_default();
+            let key = name
+                .bytes()
+                .chain(class.bytes())
+                .chain(member_text.bytes())
+                .fold(0xCBF2_9CE4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3));
+            // Six attributes after the name (description to element type), then `before`, the predefined type and `after`.
+            let predefined = if predefined.is_empty() { predefined } else { format!(",{predefined}") };
+            // IFC2x3 has no profile sets, and no type object for some classes (a roof's, a footing's): a member's material is
+            // its occurrences' own there, and its section is in their bodies alone.
+            if self.schema == Schema::Ifc2x3 {
+                if v2x3::has_type(&class) {
+                    let kind =
+                        self.add(format!("{class}({},$,{},$,$,$,$,$,${before}{predefined}{after})", self.guid(TYPES, key), s(&name)));
+                    self.add(format!("IFCRELDEFINESBYTYPE({},$,$,$,({}),#{kind})", self.guid(TYPE_DEFINES, key), refs(&occurrences)));
+                }
+                if let Some((_, material)) = member.filter(|(_, material)| !material.is_empty()) {
+                    let material = self.material(m, &material);
+                    self.add(format!(
+                        "IFCRELASSOCIATESMATERIAL({},$,$,$,({}),#{material})",
+                        self.guid(USAGE_MATERIALS, key),
+                        refs(&occurrences)
+                    ));
+                }
+                continue;
+            }
+            let kind = self.add(format!("{class}({},$,{},$,$,$,$,$,${before}{predefined}{after})", self.guid(TYPES, key), s(&name)));
+            self.add(format!("IFCRELDEFINESBYTYPE({},$,$,$,({}),#{kind})", self.guid(TYPE_DEFINES, key), refs(&occurrences)));
+            if let Some(o) = omniclass {
+                self.classified.entry(o).or_default().push(kind);
+            }
+            let Some((section, material)) = member else { continue };
+            let profile = self.section_profile(section);
+            let material = if material.is_empty() { "$".to_string() } else { format!("#{}", self.material(m, &material)) };
+            let entry = self.add(format!("IFCMATERIALPROFILE({},$,{material},#{profile},$,$)", s(&name)));
+            let set = self.add(format!("IFCMATERIALPROFILESET({},$,(#{entry}),$)", s(&name)));
+            self.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{kind}),#{set})", self.guid(TYPE_MATERIALS, key)));
+            for (cardinal, users) in usages {
+                let usage = self.add(format!("IFCMATERIALPROFILESETUSAGE(#{set},{cardinal},$)"));
+                let relation = self.guid(USAGE_MATERIALS, key.wrapping_add(u64::from(cardinal)));
+                self.add(format!("IFCRELASSOCIATESMATERIAL({relation},$,$,$,({}),#{usage})", refs(&users)));
+            }
+        }
+    }
+
+    /// OmniClass, once, as the `IfcClassification` its references are of, and each number and title as an
+    /// `IfcClassificationReference` associated with what it classifies. The GlobalIds follow the number and the title.
+    fn write_classifications(&mut self) {
+        let classified = std::mem::take(&mut self.classified);
+        if classified.is_empty() {
+            return;
+        }
+        let system = self.classification("OmniClass", None);
+        for ((number, title), objects) in classified {
+            let key = number
+                .bytes()
+                .chain([0])
+                .chain(title.bytes())
+                .fold(0xCBF2_9CE4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3));
+            let name = if title.is_empty() { "$".to_string() } else { s(&title) };
+            let reference = self.add(format!("IFCCLASSIFICATIONREFERENCE($,{},{name},#{system},$,$)", s(&number)));
+            self.add(format!("IFCRELASSOCIATESCLASSIFICATION({},$,$,$,({}),#{reference})", self.guid(CLASSIFIES, key), refs(&objects)));
+        }
+    }
+
+    /// The `IfcClassification` named `system`, one for each name whichever writer asks first; `edition` is the first asker's.
+    fn classification(&mut self, system: &str, edition: Option<&str>) -> u64 {
+        if let Some(&written) = self.systems.get(system) {
+            return written;
+        }
+        let edition = edition.map_or_else(|| "$".to_string(), s);
+        let written = self.add(format!("IFCCLASSIFICATION($,{edition},$,{},$,$,$)", s(system)));
+        self.systems.insert(system.to_string(), written);
+        written
+    }
+
+    /// Quantity set `name` of `(name, kind, value)` for `ent`: kind `LENGTH` in mm, `AREA` in m², `VOLUME` in m³.
+    fn quantities(&mut self, ent: u64, name: &str, values: &[(&str, &str, f64)], key: u64) {
+        let qs: Vec<u64> = values.iter().map(|(n, kind, v)| self.add(format!("IFCQUANTITY{kind}({},$,$,{},$)", s(n), real(*v)))).collect();
+        let set = self.add(format!("IFCELEMENTQUANTITY({},$,{},$,$,({}))", self.guid(QUANTITIES, key), s(name), refs(&qs)));
+        self.add(format!("IFCRELDEFINESBYPROPERTIES({},$,$,$,(#{ent}),#{set})", self.guid(QUANTITY_DEFINES, key)));
     }
 
     /// A material by name, written once; one the library has, with its colour, for viewers to
@@ -244,10 +682,9 @@ impl Step {
         }
         let id = self.add(format!("IFCMATERIAL({},$,$)", s(name)));
         let style = m.materials.get(name).map(|x| {
-            let [r, g, b] = x.color.map(|c| real(f64::from(c) / 255.0));
-            let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
-            let shading = self.add(format!("IFCSURFACESTYLESHADING(#{colour},$)"));
-            let style = self.add(format!("IFCSURFACESTYLE({},.BOTH.,(#{shading}))", s(name)));
+            // How see-through the material is, 0 for opaque to 1 for clear; none for an opaque one.
+            let clear = if x.transparency == 0 { "$".to_string() } else { real(f64::from(x.transparency.min(100)) / 100.0) };
+            let style = self.surface_style(&s(name), x.color, &clear);
             let item = self.add(format!("IFCSTYLEDITEM($,(#{style}),$)"));
             let rep = self.add(format!("IFCSTYLEDREPRESENTATION(#{},'Style','Material',(#{item}))", self.context));
             self.add(format!("IFCMATERIALDEFINITIONREPRESENTATION($,$,(#{rep}),#{id})"));
@@ -255,6 +692,15 @@ impl Step {
         });
         self.materials.insert(name.to_string(), (id, style));
         (id, style)
+    }
+
+    /// A surface style named `name` (a STEP string, or `$` for none) that shades in `rgb`, `clear` how see-through (`$`
+    /// for opaque).
+    fn surface_style(&mut self, name: &str, rgb: [u8; 3], clear: &str) -> u64 {
+        let [r, g, b] = rgb.map(|c| real(f64::from(c) / 255.0));
+        let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
+        let shading = self.add(format!("IFCSURFACESTYLESHADING(#{colour},{clear})"));
+        self.add(format!("IFCSURFACESTYLE({name},.BOTH.,(#{shading}))"))
     }
 
     /// A closed surface of triangles, each corner written once.
@@ -277,17 +723,51 @@ impl Step {
                 && b != c
                 && a != c
             {
-                faces.push(format!("({a},{b},{c})"));
+                faces.push([a, b, c]);
             }
         }
+        // IFC2x3 has no face sets: the triangles are the faces of a closed shell, each corner a point written once.
+        if self.schema == Schema::Ifc2x3 {
+            let points: Vec<u64> =
+                pts.iter().map(|p| self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(p[0]), real(p[1]), real(p[2])))).collect();
+            let faces: Vec<u64> = faces
+                .iter()
+                .map(|face| {
+                    let corners: Vec<u64> = face.iter().filter_map(|i| points.get(i - 1).copied()).collect();
+                    let lp = self.add(format!("IFCPOLYLOOP(({}))", refs(&corners)));
+                    let bound = self.add(format!("IFCFACEOUTERBOUND(#{lp},.T.)"));
+                    self.add(format!("IFCFACE((#{bound}))"))
+                })
+                .collect();
+            let shell = self.add(format!("IFCCLOSEDSHELL(({}))", refs(&faces)));
+            return self.add(format!("IFCFACETEDBREP(#{shell})"));
+        }
+        let faces: Vec<String> = faces.iter().map(|[a, b, c]| format!("({a},{b},{c})")).collect();
         let coords: Vec<String> = pts.iter().map(|p| format!("({},{},{})", real(p[0]), real(p[1]), real(p[2]))).collect();
-        let list = self.add(format!("IFCCARTESIANPOINTLIST3D(({}))", coords.join(",")));
+        // IFC4.3's has its points' tags after them, none here.
+        let tags = if self.schema == Schema::Ifc4x3 { ",$" } else { "" };
+        let list = self.add(format!("IFCCARTESIANPOINTLIST3D(({}){tags})", coords.join(",")));
         self.add(format!("IFCTRIANGULATEDFACESET(#{list},$,.T.,({}),$)", faces.join(",")))
+    }
+
+    /// What a representation of `faceset`s is: a tessellation, or IFC2x3's B-reps.
+    fn meshed(&self) -> &'static str {
+        if self.schema == Schema::Ifc2x3 { "'Brep'" } else { "'Tessellation'" }
+    }
+
+    /// The material a product is made of, where it is of several (`name` the set's, a STEP string): IFC4's constituent set,
+    /// IFC2x3's list.
+    fn made_of(&mut self, name: &str, materials: &[u64]) -> u64 {
+        if self.schema == Schema::Ifc2x3 {
+            return self.add(format!("IFCMATERIALLIST(({}))", refs(materials)));
+        }
+        let parts: Vec<u64> = materials.iter().map(|x| self.add(format!("IFCMATERIALCONSTITUENT($,$,#{x},$,$)"))).collect();
+        self.add(format!("IFCMATERIALCONSTITUENTSET({name},$,({}))", refs(&parts)))
     }
 
     /// A body of tessellated `items`, the closed face sets.
     fn tessellated(&mut self, items: &[u64]) -> u64 {
-        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", self.body, refs(items)));
+        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body',{},({}))", self.body, self.meshed(), refs(items)));
         self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"))
     }
 
@@ -305,6 +785,16 @@ impl Step {
             }
             None => self.add(format!("IFCAXIS2PLACEMENT3D(#{o},$,$)")),
         }
+    }
+
+    /// A placement at `xyz` with its z axis along `z` and its x axis along `x`, relative to `to`: a component tilted with its
+    /// work plane.
+    fn place_tilted(&mut self, to: u64, (x0, y0, z0): (f64, f64, f64), z: [f64; 3], x: [f64; 3]) -> u64 {
+        let o = self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(x0), real(y0), real(z0)));
+        let axis = self.add(format!("IFCDIRECTION(({},{},{}))", ratio(z[0]), ratio(z[1]), ratio(z[2])));
+        let along = self.add(format!("IFCDIRECTION(({},{},{}))", ratio(x[0]), ratio(x[1]), ratio(x[2])));
+        let a = self.add(format!("IFCAXIS2PLACEMENT3D(#{o},#{axis},#{along})"));
+        self.add(format!("IFCLOCALPLACEMENT(#{to},#{a})"))
     }
 
     /// A placement at `xyz` with its x axis along `dir`, relative to `to` (none = the world).
@@ -326,6 +816,51 @@ impl Step {
         let c = self.point(centre);
         let at = self.add(format!("IFCAXIS2PLACEMENT2D(#{c},$)"));
         self.add(format!("IFCRECTANGLEPROFILEDEF(.AREA.,$,#{at},{},{})", real(size.0), real(size.1)))
+    }
+
+    /// The profile definition of `section` (a circle of half its width, or a rectangle, centred on the origin), written once: the
+    /// material profile set of a type and the bodies of its occurrences share it.
+    fn section_profile(&mut self, section: Section) -> u64 {
+        if let Some(&written) = self.sections.get(&section) {
+            return written;
+        }
+        let profile = if let Some((key, name)) = &section.profile {
+            self.section(&key.profile(), name, (section.width(), section.depth()))
+        } else if section.round {
+            let c = self.point(P2(0.0, 0.0));
+            let centre = self.add(format!("IFCAXIS2PLACEMENT2D(#{c},$)"));
+            self.add(format!("IFCCIRCLEPROFILEDEF(.AREA.,$,#{centre},{})", real(section.width() / 2.0)))
+        } else {
+            self.rectangle(P2(0.0, 0.0), P2(section.width(), section.depth()))
+        };
+        self.sections.insert(section, profile);
+        profile
+    }
+
+    /// A steel section `width` by `depth` as IFC's parameterized profile of its shape, named `name`, centred on the box round
+    /// it, as BIMCraft's are; a turned one's axes turned half round.
+    fn section(&mut self, p: &crate::model::Profile, name: &str, (width, depth): (f64, f64)) -> u64 {
+        use crate::profiles::Shape;
+        let c = self.point(P2(0.0, 0.0));
+        let x = if p.turned { format!("#{}", self.add("IFCDIRECTION((-1.,0.))")) } else { "$".into() };
+        let at = self.add(format!("IFCAXIS2PLACEMENT2D(#{c},{x})"));
+        let name = if name.is_empty() { "$".to_string() } else { s(name) };
+        let radius = if p.radius > 0.0 { real(p.radius) } else { "$".into() };
+        let (w, d) = (real(width), real(depth));
+        self.add(match p.shape {
+            Shape::I => {
+                format!("IFCISHAPEPROFILEDEF(.AREA.,{name},#{at},{w},{d},{},{},{radius},$,$)", real(p.web), real(p.flange))
+            }
+            Shape::U => {
+                format!("IFCUSHAPEPROFILEDEF(.AREA.,{name},#{at},{d},{w},{},{},{radius},$,$)", real(p.web), real(p.flange))
+            }
+            Shape::L => format!("IFCLSHAPEPROFILEDEF(.AREA.,{name},#{at},{d},{w},{},{radius},$,$)", real(p.thickness)),
+            Shape::T => {
+                format!("IFCTSHAPEPROFILEDEF(.AREA.,{name},#{at},{d},{w},{},{},{radius},$,$,$,$)", real(p.web), real(p.flange))
+            }
+            Shape::Rhs => format!("IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,{name},#{at},{w},{d},{},$,$)", real(p.thickness)),
+            Shape::Chs => format!("IFCCIRCLEHOLLOWPROFILEDEF(.AREA.,{name},#{at},{},{})", real(width / 2.0), real(p.thickness)),
+        })
     }
 
     /// A profile around `outer`, less `holes`.
@@ -354,24 +889,28 @@ impl Step {
     }
 
     /// `Pset_*Common` of something structural: it carries load.
-    fn load_bearing(&mut self, ent: u64, pset: &str, id: Id) {
+    fn load_bearing(&mut self, ent: u64, pset: &'static str, id: Id) {
         let load = self.add("IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$)");
-        self.define(ent, pset, &[load], (COMMON, COMMON_DEFINES), id);
+        self.common.entry(id).or_insert((ent, pset, Vec::new())).2.push(load);
     }
 
     /// A body: `profile` swept `depth` up from `bottom`, plus any extra representations.
     fn body(&mut self, profile: u64, bottom: f64, depth: f64, extra: &[u64]) -> u64 {
-        self.bodies(&[(profile, bottom, depth)], extra)
+        self.bodies(&[(profile, bottom, depth)], extra, None)
     }
 
-    /// A body of solids, each a profile swept `depth` up from `bottom`, plus any extra
-    /// representations.
-    fn bodies(&mut self, solids: &[(u64, f64, f64)], extra: &[u64]) -> u64 {
+    /// A body of solids, each a profile swept `depth` up from `bottom` and styled in `style` when there's one, plus any
+    /// extra representations.
+    fn bodies(&mut self, solids: &[(u64, f64, f64)], extra: &[u64], style: Option<u64>) -> u64 {
         let items: Vec<u64> = solids
             .iter()
             .map(|&(profile, bottom, depth)| {
                 let at = if bottom == 0.0 { self.world } else { self.axes((0.0, 0.0, bottom), None) };
-                self.add(format!("IFCEXTRUDEDAREASOLID(#{profile},#{at},#{},{})", self.z, real(depth)))
+                let solid = self.add(format!("IFCEXTRUDEDAREASOLID(#{profile},#{at},#{},{})", self.z, real(depth)));
+                if let Some(style) = style {
+                    self.add(format!("IFCSTYLEDITEM(#{solid},(#{style}),$)"));
+                }
+                solid
             })
             .collect();
         let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','SweptSolid',({}))", self.body, refs(&items)));
@@ -439,6 +978,31 @@ impl Step {
     fn brep(&mut self, face: &[[f64; 3]], base: f64, rise: f64) -> u64 {
         let ring = |up: f64| -> Vec<[f64; 3]> { face.iter().map(|p| [p[0], p[1], p[2] - base + up]).collect() };
         self.shell(&ring(0.0), &ring(rise))
+    }
+
+    /// A closed solid's shell (`model::Polyhedron`): each corner written once, so its faces share their edges; heights
+    /// from `base`.
+    fn polyhedron(&mut self, (corners, faces): &crate::model::Polyhedron, base: f64) -> u64 {
+        let pts: Vec<u64> =
+            corners.iter().map(|p| self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(p[0]), real(p[1]), real(p[2] - base)))).collect();
+        let faces: Vec<u64> = faces
+            .iter()
+            .map(|loops| {
+                let bounds: Vec<u64> = loops
+                    .iter()
+                    .enumerate()
+                    .map(|(k, l)| {
+                        let refs_: Vec<u64> = l.iter().filter_map(|&i| pts.get(i).copied()).collect();
+                        let lp = self.add(format!("IFCPOLYLOOP(({}))", refs(&refs_)));
+                        let kind = if k == 0 { "IFCFACEOUTERBOUND" } else { "IFCFACEBOUND" };
+                        self.add(format!("{kind}(#{lp},.T.)"))
+                    })
+                    .collect();
+                self.add(format!("IFCFACE(({}))", refs(&bounds)))
+            })
+            .collect();
+        let shell = self.add(format!("IFCCLOSEDSHELL(({}))", refs(&faces)));
+        self.add(format!("IFCFACETEDBREP(#{shell})"))
     }
 
     /// A closed shell from the counter-clockwise `bottom` ring up to `top`, the same points above
@@ -526,16 +1090,293 @@ fn code_key(code: &str) -> u64 {
     code.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x1000_0000_01b3))
 }
 
+/// The `Pset_*Common` an element's IFC entity carries; none for what has none BIMCraft writes.
+fn common_pset(e: &Element) -> Option<&'static str> {
+    Some(match e {
+        Element::Wall(_) => "Pset_WallCommon",
+        Element::Floor(_) => "Pset_SlabCommon",
+        Element::Roof(_) => "Pset_RoofCommon",
+        Element::Ceiling(_) => "Pset_CoveringCommon",
+        Element::Door(_) => "Pset_DoorCommon",
+        Element::Window(_) => "Pset_WindowCommon",
+        Element::Column(_) | Element::StructuralColumn(_) => "Pset_ColumnCommon",
+        Element::Beam(_) => "Pset_BeamCommon",
+        Element::Footing(_) | Element::StripFooting(_) => "Pset_FootingCommon",
+        Element::Stair(_) => "Pset_StairCommon",
+        Element::Ramp(_) => "Pset_RampCommon",
+        Element::Railing(_) => "Pset_RailingCommon",
+        _ => return None,
+    })
+}
+
+/// What the work does to an element, in IFC's words for `Pset_*Common.Status`.
+fn ifc_status(m: &Model, e: &Element) -> Option<&'static str> {
+    e.params()?;
+    let at = |key| phasing::value(m, e, key).and_then(|n| phasing::index(m, n));
+    let created = at(phasing::CREATED).unwrap_or(0);
+    Some(match at(phasing::DEMOLISHED) {
+        Some(d) if d == created => "TEMPORARY",
+        Some(_) => "DEMOLISH",
+        None if created == 0 => "EXISTING",
+        None => "NEW",
+    })
+}
+
+/// The length round a closed ring, mm.
+fn perimeter(ring: &[P2]) -> f64 {
+    ring.iter().zip(ring.iter().cycle().skip(1)).map(|(a, b)| a.dist(*b)).sum()
+}
+
+/// What a beam or a column measures, for its `Qto_BeamBaseQuantities` or `Qto_ColumnBaseQuantities`: its length (a column's
+/// height), the area of its section (m²), its outer surface (m²) and its volume (m³). The outer surface is the sides only,
+/// perimeter by length, without the two ends, as IFC 4.3 defines it for these sets. IFC gives the gross surface (with the
+/// ends) only when the outer surface and the section can't be given apart, so it isn't written: a reader adds two sections.
+/// Nothing is subtracted from it, so it has no net values: nothing is taken off where a beam meets a column or a slab yet.
+fn member_quantities(
+    width: f64,
+    depth: f64,
+    round: bool,
+    length: f64,
+    profile: Option<&crate::model::Profile>,
+) -> Vec<(&'static str, &'static str, f64)> {
+    let (area, perimeter) = if let Some(p) = profile {
+        (p.area(width, depth), p.perimeter(width, depth))
+    } else if round {
+        (std::f64::consts::PI * width * width / 4.0, std::f64::consts::PI * width)
+    } else {
+        (width * depth, 2.0 * (width + depth))
+    };
+    vec![
+        ("Length", "LENGTH", length),
+        ("CrossSectionArea", "AREA", area / 1e6),
+        ("OuterSurfaceArea", "AREA", perimeter * length / 1e6),
+        ("GrossVolume", "VOLUME", area * length / 1e9),
+    ]
+}
+
+/// What a wall measures, for its `Qto_WallBaseQuantities`: its length along its axis, its thickness and height, its side
+/// (length by height, m²) and that less the doors and windows in it (`holes`, as (width, height, sill), each cut to the
+/// wall's height), and both through its thickness (m³), its joins aside. An attached wall has no single height; its
+/// volumes follow its clipped prisms, its side areas those volumes over its thickness.
+fn wall_quantities(m: &Model, id: Id, wl: &crate::model::Wall, holes: &[(f64, f64, f64)]) -> Vec<(&'static str, &'static str, f64)> {
+    let (length, width) = (Axis::of(wl).length(), m.thickness(wl));
+    let mut values = vec![("Length", "LENGTH", length), ("Width", "LENGTH", width)];
+    if wl.attach_top.is_none() && wl.attach_base.is_none() {
+        let height = m.top_z(wl) - m.base_z(wl);
+        let gross = length * height;
+        let cut: f64 = holes.iter().map(|&(wd, h, sill)| wd.min(length) * h.min(height - sill).max(0.0)).sum();
+        let net = (gross - cut).max(0.0);
+        values.extend([
+            ("Height", "LENGTH", height),
+            ("GrossSideArea", "AREA", gross / 1e6),
+            ("NetSideArea", "AREA", net / 1e6),
+            ("GrossVolume", "VOLUME", gross * width / 1e9),
+            ("NetVolume", "VOLUME", net * width / 1e9),
+        ]);
+    } else {
+        let volume = |openings| walls::prisms(m, id, openings).iter().map(|p| prism_volume(&p.ring, &p.bottom, &p.top)).sum::<f64>();
+        let (gross, net) = (volume(false), volume(true));
+        // Of a type the project doesn't have, it is 0 thick: no side is known from its volume.
+        if width > 0.0 {
+            values.extend([("GrossSideArea", "AREA", gross / width / 1e6), ("NetSideArea", "AREA", net / width / 1e6)]);
+        }
+        values.extend([("GrossVolume", "VOLUME", gross / 1e9), ("NetVolume", "VOLUME", net / 1e9)]);
+    }
+    values
+}
+
+/// Grids span storeys, so their placement and containment belong to the building. Each real axis is written once.
+fn grids(w: &mut Step, m: &Model, building: u64, building_at: u64, context: u64) {
+    let grids: Vec<_> = m.elements.iter().filter_map(|(id, e)| if let Element::Grid(g) = e { Some((*id, g)) } else { None }).collect();
+    let Some((first_id, first)) = grids.first() else { return };
+    let along = (first.end - first.start).unit();
+    let (mut u, mut v, mut lines) = (Vec::new(), Vec::new(), Vec::new());
+    for (_, g) in &grids {
+        let (a, b) = (w.point(g.start), w.point(g.end));
+        let line = w.add(format!("IFCPOLYLINE((#{a},#{b}))"));
+        lines.push(line);
+        if grids.len() > 1 {
+            let axis = w.add(format!("IFCGRIDAXIS({},#{line},.T.)", s(&g.name)));
+            if along.cross((g.end - g.start).unit()).abs() < 1e-9 {
+                u.push(axis);
+            } else {
+                v.push(axis);
+            }
+        }
+    }
+    let at = w.place(Some(building_at), (0.0, 0.0, 0.0), None);
+    let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{context},'Axis','Curve2D',({}))", refs(&lines)));
+    let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+    let ent = if grids.len() == 1 {
+        w.add(format!("IFCANNOTATION({},$,{},$,'{GRID_AXIS}',#{at},#{shape})", w.guid(ELEMENT, *first_id), s(&first.name)))
+    } else {
+        // IFC requires U and V to be nonempty. For parallel axes, put the last real axis in V; IRREGULAR promises no
+        // rectangular layout. A lone axis instead uses the annotation above: sharing it across U/V violates WR2.
+        if v.is_empty()
+            && let Some(last) = u.pop()
+        {
+            v.push(last);
+        }
+        w.add(format!("IFCGRID({},$,'Grid',$,$,#{at},#{shape},({}),({}),$,.IRREGULAR.)", w.guid(GRID, 0), refs(&u), refs(&v)))
+    };
+    w.add(format!("IFCRELCONTAINEDINSPATIALSTRUCTURE({},$,$,$,(#{ent}),#{building})", w.guid(GRID_CONTAINS, 0)));
+}
+
+/// A prism's volume, mm³: signed triangles of its plan ring times their mean height between the planes.
+fn prism_volume(ring: &[P2], bottom: &walls::Plane, top: &walls::Plane) -> f64 {
+    let Some(&o) = ring.first() else { return 0.0 };
+    let rise = |p| top.at(p) - bottom.at(p);
+    ring.windows(2).skip(1).map(|w| (w[0] - o).cross(w[1] - o) / 2.0 * (rise(o) + rise(w[0]) + rise(w[1])) / 3.0).sum::<f64>().abs()
+}
+
+/// Where an IFC file's coordinates have their origin: the internal origin (geometry as the model holds it), the Project Base
+/// Point, the Survey Point, or the shared coordinates themselves (map coordinates in the file, turned to true north).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    #[default]
+    Internal,
+    Base,
+    Survey,
+    Shared,
+}
+
+impl Origin {
+    pub const NAMES: &str = "internal, base, survey or shared";
+
+    pub fn parse(s: &str) -> Option<Origin> {
+        Some(match s {
+            "internal" => Origin::Internal,
+            "base" => Origin::Base,
+            "survey" => Origin::Survey,
+            "shared" => Origin::Shared,
+            _ => return None,
+        })
+    }
+}
+
+/// The model as IFC4, its coordinates the internal ones.
 pub fn export(m: &Model) -> String {
+    export_with(m, true, Origin::Internal, Schema::Ifc4)
+}
+
+/// A plane angle as IFC's compound measure: degrees, minutes, seconds and millionths of a second, all of its sign.
+fn compound(deg: f64) -> String {
+    let micro = (deg.abs() * 3_600_000_000.0).round() as i64;
+    let sign = if deg < 0.0 { -1 } else { 1 };
+    let (d, rest) = (micro / 3_600_000_000, micro % 3_600_000_000);
+    let (min, rest) = (rest / 60_000_000, rest % 60_000_000);
+    let (sec, millionths) = (rest / 1_000_000, rest % 1_000_000);
+    format!("({},{},{},{})", sign * d, sign * min, sign * sec, sign * millionths)
+}
+
+/// The model as IFC4, its coordinates' origin at `at`, with the active site's true north and, where it names a coordinate
+/// reference system, its map conversion from that origin (`IfcMapConversion`, `IfcProjectedCRS`).
+pub fn export_at(m: &Model, at: Origin) -> String {
+    export_as(m, at, Schema::Ifc4)
+}
+
+/// [`export_at`], in `schema`.
+pub fn export_as(m: &Model, at: Origin, schema: Schema) -> String {
+    export_with(m, true, at, schema)
+}
+
+/// [`export_as`], with or without the components referenced in the rooms they stand in.
+pub(crate) fn export_with(m: &Model, reference_rooms: bool, at: Origin, schema: Schema) -> String {
+    let rooms = crate::rooms::Rooms::new(m);
     let own = m.elements.with_guids().map(|(id, g, _)| (id, g)).collect();
-    let mut w = Step { out: String::new(), next: 0, uid: m.uid, own, world: 0, z: 0, context: 0, body: 0, materials: BTreeMap::new() };
+    let mut w = Step {
+        out: String::new(),
+        next: 0,
+        uid: m.uid,
+        own,
+        world: 0,
+        z: 0,
+        context: 0,
+        body: 0,
+        materials: BTreeMap::new(),
+        common: BTreeMap::new(),
+        sets: BTreeMap::new(),
+        typed: BTreeMap::new(),
+        sections: BTreeMap::new(),
+        classified: BTreeMap::new(),
+        systems: BTreeMap::new(),
+        schema,
+        owner: 0,
+        mapped: Vec::new(),
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // IFC2x3 requires an owner history of every rooted entity: one for the file, by the project's author with BIMCraft.
+    if schema == Schema::Ifc2x3 {
+        let info = m.project_info().map(|(_, i)| i);
+        let author = info.map(|i| i.author.trim()).filter(|a| !a.is_empty()).unwrap_or("Unknown");
+        let organization = info.map(|i| i.organization.trim()).filter(|o| !o.is_empty()).unwrap_or("Unknown");
+        let person = w.add(format!("IFCPERSON($,{},$,$,$,$,$,$)", s(author)));
+        let organization = w.add(format!("IFCORGANIZATION($,{},$,$,$)", s(organization)));
+        let by = w.add(format!("IFCPERSONANDORGANIZATION(#{person},#{organization},$)"));
+        let maker = w.add("IFCORGANIZATION($,'BIMCraft',$,$,$)");
+        let app = w.add(format!("IFCAPPLICATION(#{maker},'{}','BIMCraft','BIMCraft')", env!("CARGO_PKG_VERSION")));
+        w.owner = w.add(format!("IFCOWNERHISTORY(#{by},#{app},$,.NOCHANGE.,$,$,$,{now})"));
+    }
     let origin = w.add("IFCCARTESIANPOINT((0.,0.,0.))");
     w.z = w.add("IFCDIRECTION((0.,0.,1.))");
     w.world = w.add(format!("IFCAXIS2PLACEMENT3D(#{origin},$,$)"));
-    let ctx = w.add(format!("IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#{},$)", w.world));
+    let co = &m.coordinates;
+    // The active site: one map conversion, from the file's origin.
+    let g = m.site();
+    let map = g.map();
+    let (turn_c, turn_s) = (g.rotation.to_radians().cos(), g.rotation.to_radians().sin());
+    // The file's origin, as an internal point (none: the shared coordinates' own).
+    let from = match at {
+        Origin::Internal => Some([0.0; 3]),
+        Origin::Base => Some(co.base),
+        Origin::Survey => Some(co.survey),
+        Origin::Shared => None,
+    };
+    // True north in the file's axes, where the project has a site: turned from project north in the model's, straight up in
+    // the map's.
+    let north = match (&m.georeference, from) {
+        (None, _) => "$".to_string(),
+        (Some(_), Some(_)) => format!("#{}", w.add(format!("IFCDIRECTION(({},{}))", ratio(turn_s), ratio(turn_c)))),
+        (Some(_), None) => format!("#{}", w.add("IFCDIRECTION((0.,1.))")),
+    };
+    let ctx = w.add(format!("IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#{},{north})", w.world));
     w.context = ctx;
     w.body = w.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Body','Model',*,*,*,*,#{ctx},$,.MODEL_VIEW.,$)"));
     let axis = w.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Axis','Model',*,*,*,*,#{ctx},$,.GRAPH_VIEW.,$)"));
+    // Where it lies on a map, where a coordinate reference system is named: a projected CRS in metres, and the model context's
+    // map conversion to it from the file's origin. IFC4's scale takes the file's unit (mm) to the map's, so it carries the
+    // unit with the ground-to-grid scale: 0.9996 in metres is 0.0009996. At the shared origin the file's coordinates are the
+    // map's, so the conversion only changes the unit.
+    if !g.crs.is_empty() {
+        // In its map system's unit, where it names one this version knows: a foot is a unit converted from the metre.
+        let to_meter = map.as_ref().map_or(1.0, |i| i.to_meter);
+        let metre = w.add("IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.)");
+        let unit = if (to_meter - 1.0).abs() < 1e-12 {
+            metre
+        } else {
+            let dims = w.add("IFCDIMENSIONALEXPONENTS(1,0,0,0,0,0,0)");
+            let measure = w.add(format!("IFCMEASUREWITHUNIT(IFCLENGTHMEASURE({}),#{metre})", ratio(to_meter)));
+            let name = if map.as_ref().is_some_and(|i| i.unit == "US survey foot") { "US SURVEY FOOT" } else { "FOOT" };
+            w.add(format!("IFCCONVERSIONBASEDUNIT(#{dims},.LENGTHUNIT.,'{name}',#{measure})"))
+        };
+        let or_none = |t: &Option<String>| t.as_deref().map_or_else(|| "$".to_string(), s);
+        let crs = [
+            s(&g.crs),
+            or_none(&g.description),
+            or_none(&g.geodetic_datum),
+            or_none(&g.vertical_datum),
+            or_none(&g.map_projection),
+            or_none(&g.map_zone),
+        ];
+        let mm = to_meter * 1000.0;
+        let (q, axis, grid) = match from {
+            Some(o) => (g.to_shared(o), (turn_c, turn_s), g.scale),
+            None => ([0.0; 3], (1.0, 0.0), 1.0),
+        };
+        let at = [real(q[0] / mm), real(q[1] / mm), real(q[2] / mm), ratio(axis.0), ratio(axis.1)];
+        w.map_conversion(ctx, None, crs, unit, at, (1.0 / mm, grid));
+    }
     let units = [
         "IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)",
         "IFCSIUNIT(*,.AREAUNIT.,$,.SQUARE_METRE.)",
@@ -550,11 +1391,97 @@ pub fn export(m: &Model) -> String {
         units.push(money);
     }
     let units = w.add(format!("IFCUNITASSIGNMENT(({}))", refs(&units)));
-    let project = w.add(format!("IFCPROJECT({},$,{},$,$,$,$,(#{ctx}),#{units})", w.guid(PROJECT, 0), s(&m.name)));
-    let site_at = w.place(None, (0.0, 0.0, 0.0), None);
-    let site = w.add(format!("IFCSITE({},$,'Site',$,$,#{site_at},$,$,.ELEMENT.,$,$,$,$,$)", w.guid(SITE, 0)));
+    // The project's information: its status is the project's phase, and its building's name and address the building's.
+    let info = m.project_info();
+    let said = |t: &str| if t.is_empty() { "$".to_string() } else { s(t) };
+    let phase = said(info.map_or("", |(_, i)| i.status.as_str()));
+    let project = w.add(format!("IFCPROJECT({},$,{},$,$,$,{phase},(#{ctx}),#{units})", w.guid(PROJECT, 0), s(&m.name)));
+    w.map_sets(project);
+    let site_at = match from {
+        Some(o) => w.place(None, (-o[0], -o[1], -o[2]), None),
+        None => {
+            let q = g.to_shared([0.0; 3]);
+            w.place(None, (q[0], q[1], q[2]), Some(P2(turn_c, turn_s)))
+        }
+    };
+    // Plot boundaries are curves, not solids. Their coordinates are site-local XY; their plan level is metadata.
+    let plots: Vec<(Id, &crate::model::PropertyLine)> = m
+        .elements
+        .iter()
+        .filter_map(|(id, e)| match e {
+            Element::PropertyLine(pl) => Some((*id, pl)),
+            _ => None,
+        })
+        .collect();
+    let footprint = if plots.is_empty() {
+        "$".to_string()
+    } else {
+        let plan = w.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('FootPrint','Model',*,*,*,*,#{ctx},$,.PLAN_VIEW.,$)"));
+        let curves: Vec<u64> = plots
+            .iter()
+            .map(|(_, pl)| {
+                let points: Vec<u64> = pl.points.iter().chain(pl.points.first()).map(|p| w.point(*p)).collect();
+                w.add(format!("IFCPOLYLINE(({}))", refs(&points)))
+            })
+            .collect();
+        let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{plan},'FootPrint','Curve2D',({}))", refs(&curves)));
+        format!("#{}", w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))")))
+    };
+    // The site's latitude, longitude and elevation, where its map system is known: of the file's origin, or of the internal one
+    // in map coordinates.
+    let frames = m.frames();
+    let geo = map
+        .as_ref()
+        .and_then(|_| frames.convert(from.unwrap_or([0.0; 3]), crate::coordinates::Frame::Internal, crate::coordinates::Frame::Wgs84).ok());
+    let (lat, lon, elevation) = match (geo, from) {
+        (Some(w), Some(o)) => (compound(w[1]), compound(w[0]), real(g.to_shared(o)[2])),
+        (Some(w), None) => (compound(w[1]), compound(w[0]), real(0.0)),
+        (None, _) => ("$".into(), "$".into(), "$".into()),
+    };
+    let site = w.add(format!("IFCSITE({},$,'Site',$,$,#{site_at},{footprint},$,.ELEMENT.,{lat},{lon},{elevation},$,$)", w.guid(SITE, 0)));
+    if !plots.is_empty() {
+        let total = plots.iter().map(|(_, pl)| geom::area(&pl.points).abs()).sum::<f64>() / 1e6;
+        let area = w.add(format!("IFCPROPERTYSINGLEVALUE('TotalArea',$,IFCAREAMEASURE({}),$)", real(total)));
+        w.define(site, "Pset_SiteCommon", &[area], (PLOT_PROPERTIES, PLOT_DEFINES), 0);
+        let mut metadata = Vec::new();
+        for key in ["Names", "Guids", "Levels"] {
+            let values: Vec<String> = plots
+                .iter()
+                .map(|(id, pl)| {
+                    let value = match key {
+                        "Names" => pl.name.clone(),
+                        "Guids" => m.guid(*id).to_string(),
+                        _ => pl.level.to_string(),
+                    };
+                    let kind = if key == "Names" { "IFCTEXT" } else { "IFCLABEL" };
+                    format!("{kind}({})", s(&value))
+                })
+                .collect();
+            metadata.push(w.add(format!("IFCPROPERTYLISTVALUE({},$,({}),$)", s(key), values.join(","))));
+        }
+        w.define(site, PROPERTY_LINES, &metadata, (PLOT_NAMES, PLOT_NAMES_DEFINES), 0);
+    }
     let building_at = w.place(Some(site_at), (0.0, 0.0, 0.0), None);
-    let building = w.add(format!("IFCBUILDING({},$,{},$,$,#{building_at},$,$,.ELEMENT.,$,$,$)", w.guid(BUILDING, 0), s(&m.name)));
+    let building_name = info.map(|(_, i)| i.building.as_str()).filter(|b| !b.is_empty()).unwrap_or(&m.name);
+    let address = match info.map(|(_, i)| i.address.as_str()).filter(|a| !a.trim().is_empty()) {
+        Some(a) => {
+            let lines: Vec<String> = a.lines().map(str::trim).filter(|l| !l.is_empty()).map(s).collect();
+            format!("#{}", w.add(format!("IFCPOSTALADDRESS($,$,$,$,({}),$,$,$,$,$)", lines.join(","))))
+        }
+        None => "$".to_string(),
+    };
+    let building =
+        w.add(format!("IFCBUILDING({},$,{},$,$,#{building_at},$,$,.ELEMENT.,$,$,{address})", w.guid(BUILDING, 0), s(building_name)));
+    if let Some((_, i)) = info {
+        let props: Vec<u64> = crate::project_info::FIELDS
+            .iter()
+            .filter_map(|(key, label)| Some((*label, i.get(key).filter(|v| !v.is_empty())?)))
+            .map(|(label, v)| w.text_property(label, None, v))
+            .collect();
+        if !props.is_empty() {
+            w.define(project, PROJECT_INFO, &props, (INFO, INFO_DEFINES), 0);
+        }
+    }
     w.add(format!("IFCRELAGGREGATES({},$,$,$,#{project},(#{site}))", w.guid(AGGREGATES, PROJECT)));
     w.add(format!("IFCRELAGGREGATES({},$,$,$,#{site},(#{building}))", w.guid(AGGREGATES, SITE)));
 
@@ -569,21 +1496,41 @@ pub fn export(m: &Model) -> String {
     if !all.is_empty() {
         w.add(format!("IFCRELAGGREGATES({},$,$,$,#{building},({}))", w.guid(AGGREGATES, BUILDING), refs(&all)));
     }
+    grids(&mut w, m, building, building_at, axis);
 
     let mut contained: BTreeMap<Guid, Vec<u64>> = BTreeMap::new();
     // What stands in the site itself and in no storey: the ground.
     let mut on_site: Vec<u64> = Vec::new();
+    // The components in each room, by the room's id: contained in their storey, and referenced in its space too.
+    let mut in_rooms: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     let mut spaces: BTreeMap<Guid, Vec<u64>> = BTreeMap::new();
     // Each element's own entity, for what it holds of the project's parameters.
     let mut products: BTreeMap<Id, u64> = BTreeMap::new();
+    // The project's information is the project, for its values of the project's parameters.
+    if let Some((id, _)) = info {
+        products.insert(id, project);
+    }
     // Walls as (entity, placement), for the openings in them.
     let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
     // Floors, ceilings and roofs as (entity, placement, its height), for the shafts through them.
     let mut hosts: BTreeMap<Id, (u64, u64, f64)> = BTreeMap::new();
     // Stairs and ramps as (entity, placement, its height, its parts), for the railings along them.
     let mut wholes: BTreeMap<Id, (u64, u64, f64, Vec<u64>)> = BTreeMap::new();
+    // Reinforcing bars as (level, host, entity): aggregated to their host, else in their level.
+    let mut bars: Vec<(Guid, Option<Id>, u64)> = Vec::new();
     // The runs in each system, by its name, for the IfcSystem they are assigned to.
     let mut systems: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    // The boards on each distribution system, by its name, for the IfcDistributionSystem they are assigned to.
+    let mut distribution: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    // The doors and windows in each wall as (width, height, sill), for what its sides measure less them.
+    let mut holes: BTreeMap<Id, Vec<(f64, f64, f64)>> = BTreeMap::new();
+    for e in m.elements.values() {
+        if let Element::Door(o) | Element::Window(o) = e
+            && let (Some(t), Some(host)) = (m.opening_type(e), m.elements.id(o.host))
+        {
+            holes.entry(host).or_default().push((t.width, t.height, o.sill));
+        }
+    }
     for (&id, e) in &m.elements {
         match e {
             Element::Wall(wl) => {
@@ -628,18 +1575,34 @@ pub fn export(m: &Model) -> String {
                     s(&wl.type_name)
                 ));
                 contained.entry(wl.level).or_default().push(ent);
+                let mut props = vec![w.text_property("Location", None, wl.location.name())];
+                for (name, to) in [("AttachTop", wl.attach_top), ("AttachBase", wl.attach_base)] {
+                    if let Some(to) = to.and_then(|g| m.elements.id(g)) {
+                        let global = w.guid(ELEMENT, to);
+                        props.push(w.add(format!("IFCPROPERTYSINGLEVALUE({},$,IFCIDENTIFIER({global}),$)", s(name))));
+                    }
+                }
+                w.define(ent, WALL, &props, (WALLED, WALLED_DEFINES), id);
                 products.insert(id, ent);
                 placed.insert(id, (ent, at));
+                w.typed("IFCWALLTYPE", ".STANDARD.", &wl.type_name, ent);
+                let values = wall_quantities(m, id, wl, holes.get(&id).map_or(&[][..], |h| h.as_slice()));
+                w.quantities(ent, "Qto_WallBaseQuantities", &values, id);
             }
             Element::Floor(f) => {
                 let Some(&(_, storey)) = storeys.get(&f.level) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                // Level, its outline less its openings swept up to its top; sloped, a shell round each
+                // Level, its outline less its openings swept up to its top; sloped or shaped, a shell round each
                 // piece of it.
                 let depth = m.floor_depth(f);
-                let shape = if m.floor_top(f).g == P2(0.0, 0.0) {
+                let level = m.floor_top(f).g == P2(0.0, 0.0) && f.shape.is_empty();
+                let solid = m.shape_solid(f);
+                let shape = if level {
                     let profile = w.profile(&f.boundary, &f.openings);
                     w.body(profile, f.offset - depth, depth, &[])
+                } else if let Some(solid) = &solid {
+                    let brep = w.polyhedron(solid, m.elevation(f.level));
+                    w.solid(&[brep], &[])
                 } else {
                     let faces: Vec<Vec<P3>> = m.floor_slabs(f).into_iter().map(|(face, _)| face).collect();
                     w.breps(&faces, m.elevation(f.level), depth)
@@ -653,9 +1616,35 @@ pub fn export(m: &Model) -> String {
                 contained.entry(f.level).or_default().push(ent);
                 products.insert(id, ent);
                 hosts.insert(id, (ent, at, m.elevation(f.level)));
+                w.typed("IFCSLABTYPE", ".FLOOR.", &f.type_name, ent);
                 if f.structural {
                     w.load_bearing(ent, "Pset_SlabCommon", id);
                 }
+                // A level slab measures as its outline less its openings, through its depth; a sloped or shaped one has no
+                // one plan area to give, so its depth, and its volumes: its plan through its depth plumb, as its underside
+                // follows its top.
+                let gross = geom::area(&f.boundary).abs();
+                let net = gross - f.openings.iter().map(|o| geom::area(o).abs()).sum::<f64>();
+                let values = if level {
+                    vec![
+                        ("Width", "LENGTH", depth),
+                        ("Perimeter", "LENGTH", perimeter(&f.boundary)),
+                        ("GrossArea", "AREA", geom::area(&f.boundary).abs() / 1e6),
+                        ("NetArea", "AREA", net / 1e6),
+                        ("GrossVolume", "VOLUME", geom::area(&f.boundary).abs() * depth / 1e9),
+                        ("NetVolume", "VOLUME", net * depth / 1e9),
+                    ]
+                } else {
+                    // A shaped one's, its solid's: under a variable layer its underside is level, so its depth isn't one.
+                    let (gross, net) = match &solid {
+                        Some(solid) => {
+                            (m.shape_solid_over(f, &[]).map_or(gross * depth, |s| crate::model::volume(&s)), crate::model::volume(solid))
+                        }
+                        None => (gross * depth, net * depth),
+                    };
+                    vec![("Width", "LENGTH", depth), ("GrossVolume", "VOLUME", gross / 1e9), ("NetVolume", "VOLUME", net / 1e9)]
+                };
+                w.quantities(ent, "Qto_SlabBaseQuantities", &values, id);
             }
             Element::Ceiling(c) => {
                 let Some(&(_, storey)) = storeys.get(&c.level) else { continue };
@@ -671,17 +1660,28 @@ pub fn export(m: &Model) -> String {
                 ));
                 contained.entry(c.level).or_default().push(ent);
                 products.insert(id, ent);
+                w.typed("IFCCOVERINGTYPE", ".CEILING.", &c.type_name, ent);
                 hosts.insert(id, (ent, at, m.elevation(c.level)));
+                let net: f64 =
+                    m.ceiling_slabs(c).iter().flat_map(|(face, rise)| m.less_shafts(face, *rise).0).map(|r| geom::area(&r).abs()).sum();
+                let values = [
+                    ("Width", "LENGTH", m.types.ceiling.get(&c.type_name).map_or(0.0, |t| t.thickness)),
+                    ("GrossArea", "AREA", geom::area(&c.boundary).abs() / 1e6),
+                    ("NetArea", "AREA", net / 1e6),
+                ];
+                w.quantities(ent, "Qto_CoveringBaseQuantities", &values, id);
             }
             Element::Room(r) => {
                 let Some(&(_, storey)) = storeys.get(&r.level) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
                 // A room that isn't enclosed has no shape to give.
-                let shape = match m.room_region(r) {
+                // As tall as its upper limit and offsets make it, from its base offset; in its colour on plans, if it has one.
+                let height = m.room_height(r);
+                let shape = match rooms.region(r) {
                     Some(region) => {
-                        let height = m.level_above(r.level).map_or(DEFAULT_HEIGHT, |up| m.elevation(up) - m.elevation(r.level));
                         let profile = w.profile(&region.outer, &region.holes);
-                        format!("#{}", w.body(profile, 0.0, height, &[]))
+                        let style = m.room_colour(r).map(|c| w.surface_style("$", c, "$"));
+                        format!("#{}", w.bodies(&[(profile, r.base_offset, height)], &[], style))
                     }
                     None => "$".into(),
                 };
@@ -691,6 +1691,19 @@ pub fn export(m: &Model) -> String {
                     s(&r.number),
                     s(&r.name)
                 ));
+                // Its areas both ways: gross at the walls' centre lines, net at their faces.
+                if let (Some(gross), Some(net)) = (rooms.region_at(r, RoomArea::Centre), rooms.region_at(r, RoomArea::Finish)) {
+                    let values = [
+                        ("Height", "LENGTH", height),
+                        ("GrossPerimeter", "LENGTH", gross.perimeter()),
+                        ("NetPerimeter", "LENGTH", net.perimeter()),
+                        ("GrossFloorArea", "AREA", gross.area() / 1e6),
+                        ("NetFloorArea", "AREA", net.area() / 1e6),
+                        ("GrossVolume", "VOLUME", gross.area() * height / 1e9),
+                        ("NetVolume", "VOLUME", net.area() * height / 1e9),
+                    ];
+                    w.quantities(ent, "Qto_SpaceBaseQuantities", &values, id);
+                }
                 spaces.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
             }
@@ -739,15 +1752,11 @@ pub fn export(m: &Model) -> String {
             // structural says it carries load.
             Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => {
                 let (Some(&(_, storey)), Some(t)) = (storeys.get(&col.level), m.column_type(e)) else { continue };
-                let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
+                let (bottom, top) = m.column_span(e);
                 let at = w.place(Some(storey), (col.at.0, col.at.1, col.base_offset), Some(heading(col.angle)));
-                let profile = if t.round {
-                    let c = w.point(P2(0.0, 0.0));
-                    let centre = w.add(format!("IFCAXIS2PLACEMENT2D(#{c},$)"));
-                    w.add(format!("IFCCIRCLEPROFILEDEF(.AREA.,$,#{centre},{})", real(t.width / 2.0)))
-                } else {
-                    w.rectangle(P2(0.0, 0.0), P2(t.width, t.depth))
-                };
+                // Its section is its type's, which the type's material profile set holds too.
+                let section = Section::new(t.width, t.depth, t.round).with_profile(t.profile.as_ref());
+                let profile = w.section_profile(section.clone());
                 let shape = w.body(profile, 0.0, top - bottom, &[]);
                 let (class, kind) =
                     if matches!(e, Element::Footing(_)) { ("IFCFOOTING", ".PAD_FOOTING.") } else { ("IFCCOLUMN", ".COLUMN.") };
@@ -764,25 +1773,49 @@ pub fn export(m: &Model) -> String {
                     Element::Footing(_) => w.load_bearing(ent, "Pset_FootingCommon", id),
                     _ => {}
                 }
+                // Placed by the middle of its section: the mid-depth centre, 5.
+                if matches!(e, Element::Footing(_)) {
+                    w.typed_member("IFCFOOTINGTYPE", ".PAD_FOOTING.", &col.type_name, (section, String::new()), 5, ent);
+                    let area = if t.round { std::f64::consts::PI * t.width * t.width / 4.0 } else { t.width * t.depth };
+                    let volume = area * (top - bottom) / 1e9;
+                    let values = [
+                        ("Length", "LENGTH", t.width),
+                        ("Width", "LENGTH", if t.round { t.width } else { t.depth }),
+                        ("Height", "LENGTH", top - bottom),
+                        ("GrossVolume", "VOLUME", volume),
+                        ("NetVolume", "VOLUME", volume),
+                    ];
+                    w.quantities(ent, "Qto_FootingBaseQuantities", &values, id);
+                } else {
+                    w.typed_member("IFCCOLUMNTYPE", ".COLUMN.", &col.type_name, (section, String::new()), 5, ent);
+                    let values = member_quantities(t.width, t.depth, t.round, top - bottom, t.profile.as_ref());
+                    w.quantities(ent, "Qto_ColumnBaseQuantities", &values, id);
+                }
             }
             // A run: its section swept along its axis, in its material, a member of the system it is in.
+            // See the plan and the 3D view for its joints: the file keeps the line and the section a reader
+            // comes back to, whatever the mitres show on screen.
             crate::model::run_arm!(r) => {
                 let (Some(&(_, storey)), Some(t), Some(g), Some((class, kind))) =
                     (storeys.get(&r.level), m.run_type(e), m.run_geom(e), crate::runs::ifc(e.category()))
                 else {
                     continue;
                 };
-                let axis = crate::view3d::unit(crate::view3d::sub(g.b, g.a));
                 // Placed at the start of its centre line; its section's x across it, level, its y up.
                 let at = w.place(Some(storey), (g.a[0], g.a[1], g.a[2] - m.elevation(r.level)), None);
-                let across = if g.vertical() { [1.0, 0.0, 0.0] } else { crate::view3d::unit([-axis[1], axis[0], 0.0]) };
-                let profile = if g.round {
+                // A beam's section is its type's, which the type's material profile set holds too.
+                let section = Section::new(g.width, g.depth, g.round).with_profile(t.profile.as_ref());
+                let profile = if matches!(e, Element::Beam(_)) {
+                    w.section_profile(section.clone())
+                } else if g.round {
                     let c = w.point(P2(0.0, 0.0));
                     let centre = w.add(format!("IFCAXIS2PLACEMENT2D(#{c},$)"));
                     w.add(format!("IFCCIRCLEPROFILEDEF(.AREA.,$,#{centre},{})", real(g.width / 2.0)))
                 } else {
                     w.rectangle(P2(0.0, 0.0), P2(g.width, g.depth))
                 };
+                let axis = crate::view3d::unit(crate::view3d::sub(g.b, g.a));
+                let across = if g.vertical() { [1.0, 0.0, 0.0] } else { crate::view3d::unit([-axis[1], axis[0], 0.0]) };
                 let along = w.aim(axis, across);
                 let shape = w.body_along(profile, along, g.length());
                 let ent = w.add(format!(
@@ -794,11 +1827,33 @@ pub fn export(m: &Model) -> String {
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
                 match e {
-                    Element::Beam(_) => w.load_bearing(ent, "Pset_BeamCommon", id),
-                    Element::StripFooting(_) => w.load_bearing(ent, "Pset_FootingCommon", id),
-                    _ => {}
+                    Element::Beam(_) => {
+                        w.load_bearing(ent, "Pset_BeamCommon", id);
+                        // Placed by the line its heights are on, the top, the middle or the bottom of its section.
+                        let cardinal = cardinal_point(r.justify, g.vertical());
+                        w.typed_member("IFCBEAMTYPE", ".BEAM.", &r.type_name, (section, t.material.clone()), cardinal, ent);
+                        let values = member_quantities(g.width, g.depth, g.round, g.length(), t.profile.as_ref());
+                        w.quantities(ent, "Qto_BeamBaseQuantities", &values, id);
+                    }
+                    Element::StripFooting(_) => {
+                        w.load_bearing(ent, "Pset_FootingCommon", id);
+                        let area = if g.round { std::f64::consts::PI * g.width * g.width / 4.0 } else { g.width * g.depth };
+                        let volume = area * g.length() / 1e9;
+                        let values = [
+                            ("Length", "LENGTH", g.length()),
+                            ("Width", "LENGTH", g.width),
+                            ("Height", "LENGTH", g.depth),
+                            ("CrossSectionArea", "AREA", area / 1e6),
+                            ("GrossVolume", "VOLUME", volume),
+                            ("NetVolume", "VOLUME", volume),
+                        ];
+                        w.quantities(ent, "Qto_FootingBaseQuantities", &values, id);
+                    }
+                    // A pipe, duct, conduit, tray, wire or cable: its type is of the segment class it is written as.
+                    _ => w.typed(&format!("{class}TYPE"), kind, &r.type_name, ent),
                 }
-                if !t.material.is_empty() {
+                // A beam's material is in its type's material profile set; the others' is the material itself.
+                if !t.material.is_empty() && !matches!(e, Element::Beam(_)) {
                     let material = w.material(m, &t.material);
                     w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{material})", w.guid(RUN_MATERIALS, id)));
                 }
@@ -817,7 +1872,13 @@ pub fn export(m: &Model) -> String {
                 if pieces.is_empty() {
                     continue;
                 }
-                let at = w.place(Some(storey), (cp.at.0, cp.at.1, cp.offset), Some(heading(cp.angle)));
+                // Upright, turned about z; tilted with its work plane, its own axes.
+                let placed = m.component_placement(cp);
+                let at = if placed.upright {
+                    w.place(Some(storey), (cp.at.0, cp.at.1, cp.offset), Some(heading(cp.angle)))
+                } else {
+                    w.place_tilted(storey, (cp.at.0, cp.at.1, cp.offset), placed.axes[2], placed.axes[0])
+                };
                 let mut items = Vec::new();
                 let mut made_of: Vec<u64> = Vec::new();
                 for piece in &pieces {
@@ -835,23 +1896,70 @@ pub fn export(m: &Model) -> String {
                 }
                 let shape = w.tessellated(&items);
                 // A door's or a window's family is placed in a wall, never as a component.
-                let (entity, kind, object_type) = f.category.ifc();
-                let name = s(&format!("{}:{}", cp.family, cp.type_name));
-                let object = object_type.map_or_else(|| name.clone(), s);
-                let ent = w.add(format!("{entity}({},$,{name},$,{object},#{at},#{shape},'{id}',{kind})", w.guid(ELEMENT, id)));
+                let (entity, kind, object_type) = f.ifc();
+                let label = format!("{}:{}", cp.family, cp.type_name);
+                let name = s(&label);
+                let object = object_type.map_or_else(|| name.clone(), |o| s(&o));
+                // What follows its tag, as IFC4 has its class: its predefined type, and what comes round it.
+                let class = classes::class(&entity);
+                let tail = class.map_or_else(|| format!(",{kind}"), |c| classes::fill(c.1, &kind));
+                let ent = w.add(format!("{entity}({},$,{name},$,{object},#{at},#{shape},'{id}'{tail})", w.guid(ELEMENT, id)));
                 contained.entry(cp.level).or_default().push(ent);
+                // Also in the room its family's room calculation point (else its insertion point) is in.
+                if let Some(room) = rooms.component(cp) {
+                    in_rooms.entry(room).or_default().push(ent);
+                }
                 products.insert(id, ent);
+                let omniclass = f.omniclass.as_ref().map(|o| (o.number.clone(), o.title.clone()));
+                // Its type object, of the class it is written as, where IFC4 has one: with its family's kind's predefined type,
+                // or the one it remembers but `USERDEFINED` (which a type object would have to say), else none defined.
+                let says = f.kind.is_some() || f.remembered().is_some();
+                let type_kind = if kind.is_empty() || says && kind != ".USERDEFINED." { &kind } else { ".NOTDEFINED." };
+                if let Some(attributes) = class.and_then(|c| c.2) {
+                    let (before, after) = classes::around(attributes);
+                    w.typed_with(&format!("{entity}TYPE"), &before, type_kind, &after, &label, ent);
+                    if omniclass.is_some() {
+                        let key = (format!("{entity}TYPE"), before, after, label.clone(), None);
+                        if let Some(b) = w.typed.get_mut(&key) {
+                            b.omniclass = omniclass;
+                        }
+                    }
+                } else if let Some(o) = omniclass {
+                    // No type object to classify: the occurrence is.
+                    w.classified.entry(o).or_default().push(ent);
+                }
                 // What it's made of: its material, or the set of them.
                 let relating = match made_of.as_slice() {
                     [] => None,
                     [one] => Some(*one),
-                    many => {
-                        let parts: Vec<u64> = many.iter().map(|x| w.add(format!("IFCMATERIALCONSTITUENT($,$,#{x},$,$)"))).collect();
-                        Some(w.add(format!("IFCMATERIALCONSTITUENTSET({},$,({}))", name, refs(&parts))))
-                    }
+                    many => Some(w.made_of(&name, many)),
                 };
                 if let Some(r) = relating {
                     w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{r})", w.guid(COMPONENT_MATERIALS, id)));
+                }
+                // A board's own data: in a property set of BIMCraft's, and its system an IfcDistributionSystem it is assigned to.
+                if let Some(panel) = &cp.panel {
+                    let mut props = Vec::new();
+                    if let Some(amps) = panel.mains {
+                        props.push(w.add(format!("IFCPROPERTYSINGLEVALUE('Mains',$,IFCELECTRICCURRENTMEASURE({}),$)", real(amps))));
+                    }
+                    if let Some(n) = panel.slots {
+                        props.push(w.add(format!("IFCPROPERTYSINGLEVALUE('Slots',$,IFCINTEGER({n}),$)")));
+                    }
+                    if let Some(name) = &panel.distribution {
+                        props.push(w.text_property("DistributionSystem", None, name));
+                        distribution.entry(name).or_default().push(ent);
+                    }
+                    if let Some(up) = panel.supply_from {
+                        props.push(w.text_property(
+                            "SupplyFrom",
+                            Some("The GlobalId of the board that supplies this one"),
+                            &compress(up.as_u128()),
+                        ));
+                    }
+                    if !props.is_empty() {
+                        w.define(ent, PANEL, &props, (PANEL_PROPERTIES, PANEL_DEFINES), id);
+                    }
                 }
             }
             Element::Stair(st) => {
@@ -876,7 +1984,7 @@ pub fn export(m: &Model) -> String {
                             (w.rectangle(P2((k - 0.5) * st.tread, 0.0), P2(st.tread, st.width)), base - run.z.0, run.z.0 - base + k * each)
                         })
                         .collect();
-                    let shape = w.bodies(&steps, &[]);
+                    let shape = w.bodies(&steps, &[], None);
                     parts.push(w.add(format!(
                         "IFCSTAIRFLIGHT({},$,'Flight',$,$,#{fat},#{shape},$,{},{},{},{},.STRAIGHT.)",
                         w.guid(FLIGHT, w.part(id, i)),
@@ -916,6 +2024,58 @@ pub fn export(m: &Model) -> String {
                 wholes.insert(id, (ent, at, base, parts));
             }
             // On a stair or a ramp, it's one of its parts; see below.
+            // A room separation line: a virtual element along its line, which bounds spaces and is nothing else.
+            Element::RoomSeparator(rs) => {
+                let Some(&(_, storey)) = storeys.get(&rs.level) else { continue };
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let (a, b) = (w.point(rs.start), w.point(rs.end));
+                let line = w.add(format!("IFCPOLYLINE((#{a},#{b}))"));
+                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{axis},'Axis','Curve2D',(#{line}))"));
+                let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+                // IFC4.3's says what it is: a boundary.
+                let kind = if w.schema == Schema::Ifc4x3 { ",.BOUNDARY." } else { "" };
+                let ent = w.add(format!(
+                    "IFCVIRTUALELEMENT({},$,'Room Separation Line',$,'{SEPARATION}',#{at},#{shape},'{id}'{kind})",
+                    w.guid(ELEMENT, id)
+                ));
+                contained.entry(rs.level).or_default().push(ent);
+                products.insert(id, ent);
+            }
+            // A reinforcing bar: a disk swept along each straight piece of its path (a sweep round a sharp corner is no solid
+            // IfcOpenShell builds), in the steel it is of.
+            Element::Rebar(rb) => {
+                let Some(&(_, storey)) = storeys.get(&rb.level) else { continue };
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let pts: Vec<u64> =
+                    rb.path.iter().map(|q| w.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(q[0]), real(q[1]), real(q[2])))).collect();
+                let radius = real(rb.diameter / 2.0);
+                let mut disks = Vec::new();
+                for (piece, ends) in pts.windows(2).zip(rb.path.windows(2)) {
+                    if let ([a, b], [p, q]) = (piece, ends)
+                        && crate::rebar::length(&[*p, *q]) > crate::model::TOL
+                    {
+                        let line = w.add(format!("IFCPOLYLINE((#{a},#{b}))"));
+                        // IFC2x3 requires where the sweep starts and ends: the whole of its one segment, 0 to 1.
+                        let ends = if w.schema == Schema::Ifc2x3 { "0.,1." } else { "$,$" };
+                        disks.push(w.add(format!("IFCSWEPTDISKSOLID(#{line},{radius},$,{ends})")));
+                    }
+                }
+                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','AdvancedSweptSolid',({}))", w.body, refs(&disks)));
+                let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+                let area = std::f64::consts::PI * rb.diameter * rb.diameter / 4.0;
+                let ent = w.add(format!(
+                    "IFCREINFORCINGBAR({},$,{},$,$,#{at},#{shape},'{id}',{},{},{},{},.NOTDEFINED.,.PLAIN.)",
+                    w.guid(ELEMENT, id),
+                    s(&format!("Bar {}", rb.diameter)),
+                    s(&rb.grade),
+                    real(rb.diameter),
+                    // In the file's square metres, to twelve places: a bar's section is a ten-thousandth of one.
+                    ratio(area / 1e6),
+                    real(crate::rebar::length(&rb.path))
+                ));
+                bars.push((rb.level, rb.host.and_then(|h| m.elements.id(h)), ent));
+                products.insert(id, ent);
+            }
             Element::Railing(rl) if rl.host.is_none() => {
                 let Some(&(_, storey)) = storeys.get(&rl.level) else { continue };
                 let ent = w.railing(m, id, rl, storey, m.elevation(rl.level), axis);
@@ -925,7 +2085,11 @@ pub fn export(m: &Model) -> String {
             Element::Roof(r) => {
                 let (Some(&(_, storey)), pieces) = (storeys.get(&r.level), m.roof_slabs(r)) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let breps: Vec<u64> = pieces.iter().map(|(face, rise)| w.brep(face, m.elevation(r.level), *rise)).collect();
+                // A shaped one is one closed faceted Brep, as a shaped floor is; any other a shell round each piece.
+                let breps: Vec<u64> = match m.roof_solid(r) {
+                    Some(solid) => vec![w.polyhedron(&solid, m.elevation(r.level))],
+                    None => pieces.iter().map(|(face, rise)| w.brep(face, m.elevation(r.level), *rise)).collect(),
+                };
                 let shape = w.solid(&breps, &[]);
                 let kind = match (&r.extrusion, r.slope == 0.0, r.gable || !r.gables.is_empty()) {
                     (Some(x), ..) => [".SHED_ROOF.", ".GABLE_ROOF."].get(x.profile.len().saturating_sub(2)).unwrap_or(&".FREEFORM."),
@@ -941,7 +2105,38 @@ pub fn export(m: &Model) -> String {
                 ));
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
+                // Its type is flat only where the roof is (the test its own kind takes above), else NOTDEFINED.
+                let flat = r.extrusion.is_none() && r.slope == 0.0;
+                w.typed("IFCROOFTYPE", if flat { ".FLAT_ROOF." } else { ".NOTDEFINED." }, &r.type_name, ent);
                 hosts.insert(id, (ent, at, m.elevation(r.level)));
+                // Gross follows the actual planes with authored openings filled; courtyards and joins remain.
+                // Net follows the same roof geometry used for export, less its openings and intersecting shafts.
+                // A roof whose faces can't be found (a gable edge its footprint doesn't have) has no area to say: none is written.
+                let mut gross_roof = r.clone();
+                gross_roof.openings.clear();
+                if let Ok(faces) = m.roof_faces(&gross_roof) {
+                    let mut gross = 0.0;
+                    let mut projected = 0.0;
+                    for (loops, plane) in faces {
+                        if let Some((outer, holes)) = loops.split_first() {
+                            let area = geom::area(outer).abs() - holes.iter().map(|h| geom::area(h).abs()).sum::<f64>();
+                            projected += area;
+                            gross += area * (1.0 + plane.g.dot(plane.g)).sqrt();
+                        }
+                    }
+                    let net: f64 = m
+                        .roof_prisms(r)
+                        .iter()
+                        .map(|(ring, bottom, top)| {
+                            let rise = ring.iter().map(|p| top.at(*p) - bottom.at(*p)).fold(0.0, f64::max);
+                            let area: f64 = m.less_shafts(&bottom.lift(ring), rise).0.iter().map(|p| geom::area(p).abs()).sum();
+                            area * (1.0 + top.g.dot(top.g)).sqrt()
+                        })
+                        .sum();
+                    let values =
+                        [("GrossArea", "AREA", gross / 1e6), ("NetArea", "AREA", net / 1e6), ("ProjectedArea", "AREA", projected / 1e6)];
+                    w.quantities(ent, "Qto_RoofBaseQuantities", &values, id);
+                }
             }
             _ => {}
         }
@@ -960,6 +2155,19 @@ pub fn export(m: &Model) -> String {
     }
     for (id, (ent, _, _, parts)) in &wholes {
         w.add(format!("IFCRELAGGREGATES({},$,$,$,#{ent},({}))", w.guid(PARTS, *id), refs(parts)));
+    }
+    // A bar is a part of the element it reinforces; one with none, or whose host isn't written, is in its level.
+    let mut reinforced: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
+    for (level, host, ent) in bars {
+        match host.filter(|h| products.contains_key(h)) {
+            Some(h) => reinforced.entry(h).or_default().push(ent),
+            None => contained.entry(level).or_default().push(ent),
+        }
+    }
+    for (host, parts) in &reinforced {
+        if let Some(ent) = products.get(host) {
+            w.add(format!("IFCRELAGGREGATES({},$,$,$,#{ent},({}))", w.guid(PARTS, *host), refs(parts)));
+        }
     }
     // A shaft voids each floor, ceiling and roof it passes through: an opening in each, its
     // outline swept up the shaft's whole height.
@@ -984,6 +2192,35 @@ pub fn export(m: &Model) -> String {
             w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{ent},#{opening})", w.guid(SHAFT_VOIDS, key)));
         }
     }
+    // What is on a face of a floor, a ceiling, a roof or a wall cuts it with its own voids where they reach it (T16b): an
+    // opening for each such component, its body those voids as closed face sets, in its host's frame.
+    for (&host, e) in &m.elements {
+        let frame: Box<dyn Fn(P3) -> P3> = match e {
+            Element::Floor(_) | Element::Ceiling(_) | Element::Roof(_) if hosts.contains_key(&host) => {
+                let z = hosts.get(&host).map_or(0.0, |h| h.2);
+                Box::new(move |p: P3| [p[0], p[1], p[2] - z])
+            }
+            Element::Wall(wl) if placed.contains_key(&host) => {
+                let (start, u, base) = (wl.start, Axis::of(wl).tangent(0.0), m.own_base(wl));
+                Box::new(move |p: P3| {
+                    let d = P2(p[0], p[1]) - start;
+                    [d.dot(u), d.dot(u.perp()), p[2] - base]
+                })
+            }
+            _ => continue,
+        };
+        let Some((ent, at)) = hosts.get(&host).map(|h| (h.0, h.1)).or_else(|| placed.get(&host).copied()) else { continue };
+        for (by, voids) in crate::view3d::reaching_voids(m, host) {
+            let items: Vec<u64> = voids.iter().map(|v| w.faceset(&v.iter().map(|t| t.map(&frame)).collect::<Vec<_>>())).collect();
+            let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
+            let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+            let o_at = w.place(Some(at), (0.0, 0.0, 0.0), None);
+            let key = mix(by) ^ host;
+            let opening =
+                w.add(format!("IFCOPENINGELEMENT({},$,'Opening',$,$,#{o_at},#{shape},'{by}',.OPENING.)", w.guid(FACE_OPENING, key)));
+            w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{ent},#{opening})", w.guid(FACE_VOIDS, key)));
+        }
+    }
     for (&id, e) in &m.elements {
         let (Element::Door(o) | Element::Window(o)) = e else { continue };
         let (Some(t), Some(wl), Some(&(wall, wall_at))) =
@@ -1001,14 +2238,23 @@ pub fn export(m: &Model) -> String {
             let inner = r - m.thickness(wl) / 2.0 - walls::centre(m, wl).abs();
             if inner > t.width / 2.0 { inner - (inner * inner - t.width * t.width / 4.0).sqrt() } else { t.width }
         });
-        let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, m.thickness(wl) + 20.0 + 2.0 * bow));
-        let shape = w.body(profile, 0.0, t.height, &[]);
-        let opening = w.add(format!("IFCOPENINGELEMENT({},$,'Opening',$,$,#{at},#{shape},$,.OPENING.)", w.guid(OPENING, id)));
+        // Of a family whose voids cut the wall, those voids, closed face sets standing at the middle of the opening as its
+        // forms do; else the rectangle of its width and height.
+        let voids = m.opening_voids_local(e);
+        let (opening_at, shape) = if voids.is_empty() {
+            let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, m.thickness(wl) + 20.0 + 2.0 * bow));
+            (at, w.body(profile, 0.0, t.height, &[]))
+        } else {
+            let items: Vec<u64> = voids.iter().map(|v| w.faceset(v)).collect();
+            let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
+            (w.place(Some(at), (t.width / 2.0, 0.0, 0.0), None), w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))")))
+        };
+        let opening = w.add(format!("IFCOPENINGELEMENT({},$,'Opening',$,$,#{opening_at},#{shape},$,.OPENING.)", w.guid(OPENING, id)));
         w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{wall},#{opening})", w.guid(VOIDS, id)));
         // The door or window itself: a 50 mm panel centred in the wall; of a family, its forms as a component's are,
         // closed face sets in their materials' colours, standing at the middle of the opening.
         let mut made_of: Vec<u64> = Vec::new();
-        let (fill_at, shape) = match m.opening_local(e).filter(|_| o.family.is_some()) {
+        let (fill_at, shape) = match m.opening_local(e) {
             Some((pieces, _)) => {
                 let mut items = Vec::new();
                 for piece in &pieces {
@@ -1024,7 +2270,7 @@ pub fn export(m: &Model) -> String {
                     }
                     items.push(set);
                 }
-                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
+                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body',{},({}))", w.body, w.meshed(), refs(&items)));
                 (w.place(Some(at), (t.width / 2.0, 0.0, 0.0), None), w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))")))
             }
             None => {
@@ -1034,30 +2280,48 @@ pub fn export(m: &Model) -> String {
         };
         let (h, wd) = (real(t.height), real(t.width));
         // Named `Family:Type` as Revit names them; a project's own type, by its name.
-        let name = s(&o.family.as_ref().map_or_else(|| o.type_name.clone(), |f| format!("{f}:{}", o.type_name)));
+        let label = o.family.as_ref().map_or_else(|| o.type_name.clone(), |f| format!("{f}:{}", o.type_name));
+        let name = s(&label);
+        let user_operation = t.operation.and_then(Operation::ifc_door_user).map_or_else(|| "$".into(), s);
+        // How it opens, as its family or its type says; a door that says nothing swings.
         let ent = if matches!(e, Element::Door(_)) {
-            let swing = if o.flip_hand { ".SINGLE_SWING_RIGHT." } else { ".SINGLE_SWING_LEFT." };
+            let operation = Operation::ifc_door(t.operation, o.flip_hand);
             w.add(format!(
-                "IFCDOOR({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.DOOR.,{swing},$)",
+                "IFCDOOR({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.DOOR.,{operation},{user_operation})",
                 w.guid(ELEMENT, id),
                 s(&o.mark)
             ))
         } else {
+            let partitioning = Operation::ifc_window_partitioning(t.operation);
             w.add(format!(
-                "IFCWINDOW({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.WINDOW.,.SINGLE_PANEL.,$)",
+                "IFCWINDOW({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.WINDOW.,{partitioning},$)",
                 w.guid(ELEMENT, id),
                 s(&o.mark)
             ))
         };
+        // Its type object: after its PredefinedType, the operation (a door's) or partitioning (a window's) its type has, that
+        // the occurrence's own sizes take precedence over the type's, and the custom operation where IFC has no enum.
+        let (class, predefined, how) = if matches!(e, Element::Door(_)) {
+            ("IFCDOORTYPE", ".DOOR.", Operation::ifc_door(t.operation, false))
+        } else {
+            ("IFCWINDOWTYPE", ".WINDOW.", Operation::ifc_window_partitioning(t.operation))
+        };
+        let user_operation = if matches!(e, Element::Door(_)) { user_operation } else { "$".into() };
+        w.typed_with(class, "", predefined, &format!(",{how},.T.,{user_operation}"), &label, ent);
         w.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{ent})", w.guid(FILLS, id)));
+        let qto = if matches!(e, Element::Door(_)) { "Qto_DoorBaseQuantities" } else { "Qto_WindowBaseQuantities" };
+        let values = [
+            ("Width", "LENGTH", t.width),
+            ("Height", "LENGTH", t.height),
+            ("Perimeter", "LENGTH", 2.0 * (t.width + t.height)),
+            ("Area", "AREA", t.width * t.height / 1e6),
+        ];
+        w.quantities(ent, qto, &values, id);
         // What a family's door or window is made of: its material, or the set of them.
         let relating = match made_of.as_slice() {
             [] => None,
             [one] => Some(*one),
-            many => {
-                let parts: Vec<u64> = many.iter().map(|x| w.add(format!("IFCMATERIALCONSTITUENT($,$,#{x},$,$)"))).collect();
-                Some(w.add(format!("IFCMATERIALCONSTITUENTSET({},$,({}))", s(&o.type_name), refs(&parts))))
-            }
+            many => Some(w.made_of(&s(&o.type_name), many)),
         };
         if let Some(r) = relating {
             w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{r})", w.guid(COMPONENT_MATERIALS, id)));
@@ -1082,7 +2346,9 @@ pub fn export(m: &Model) -> String {
                 Function::Substrate => "'Substrate'",
                 Function::Membrane => "'Membrane'",
             };
-            ids.push(w.add(format!("IFCMATERIALLAYER({material},{},$,$,$,{category},$)", real(l.thickness))));
+            // The variable layer (MOD-16) says so in its description: IFC has no word of its own for a layer that tapers.
+            let description = if l.variable { "'Variable'" } else { "$" };
+            ids.push(w.add(format!("IFCMATERIALLAYER({material},{},$,$,{description},{category},$)", real(l.thickness))));
         }
         w.add(format!("IFCMATERIALLAYERSET(({}),{},$)", refs(&ids), s(name)))
     };
@@ -1135,12 +2401,68 @@ pub fn export(m: &Model) -> String {
     }
     // A system is an IfcSystem its runs are assigned to; its GlobalIds follow its name, so they stay when another is added.
     for (name, members) in &systems {
-        let key = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let key = key_of(name);
         let system = w.add(format!("IFCSYSTEM({},$,{},$,$)", w.guid(SYSTEMS, key), s(name)));
         w.add(format!("IFCRELASSIGNSTOGROUP({},$,$,$,({}),$,#{system})", w.guid(SYSTEM_MEMBERS, key), refs(members)));
     }
     if !on_site.is_empty() {
         w.add(format!("IFCRELCONTAINEDINSPATIALSTRUCTURE({},$,$,$,({}),#{site})", w.guid(SITE_HOLDS, 0), refs(&on_site)));
+    }
+    // A distribution system is an IfcDistributionSystem, electrical, its boards assigned to it and the building it serves.
+    let mut distribution_entity: BTreeMap<&str, u64> = BTreeMap::new();
+    for (name, members) in &distribution {
+        let key = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let system = w.add(format!("IFCDISTRIBUTIONSYSTEM({},$,{},$,$,$,.ELECTRICAL.)", w.guid(DISTRIBUTION, key), s(name)));
+        distribution_entity.insert(name, system);
+        w.add(format!("IFCRELASSIGNSTOGROUP({},$,$,$,({}),$,#{system})", w.guid(DISTRIBUTION_MEMBERS, key), refs(members)));
+        w.add(format!("IFCRELSERVICESBUILDINGS({},$,$,$,#{system},(#{building}))", w.guid(DISTRIBUTION_SERVES, key)));
+    }
+    // A circuit is an IfcDistributionCircuit in the system of its board: its devices assigned to it with its breaker (an
+    // IfcProtectiveDevice, which has no place of its own), and the rest of what it holds in a property set of BIMCraft's.
+    for (&id, e) in m.elements.iter() {
+        let Element::Circuit(c) = e else { continue };
+        let Some(board) = m.elements.id(c.panel) else { continue };
+        let name = if c.name.trim().is_empty() { format!("Circuit {}", c.number) } else { c.name.clone() };
+        let circuit = w.add(format!("IFCDISTRIBUTIONCIRCUIT({},$,{},$,$,$,.ELECTRICAL.)", w.guid(ELEMENT, id), s(&name)));
+        let breaker = w.add(format!(
+            "IFCPROTECTIVEDEVICE({},$,{},$,$,$,$,$,.CIRCUITBREAKER.)",
+            w.guid(BREAKER, id),
+            s(&format!("Breaker {}", c.number))
+        ));
+        let device = [
+            w.add(format!("IFCPROPERTYSINGLEVALUE('NumberOfPoles',$,IFCINTEGER({}),$)", c.poles)),
+            w.add(format!("IFCPROPERTYSINGLEVALUE('RatedCurrent',$,IFCELECTRICCURRENTMEASURE({}),$)", real(c.rating_a))),
+        ];
+        w.define(breaker, "Pset_ElectricalDeviceCommon", &device, (BREAKER_PROPERTIES, BREAKER_DEFINES), id);
+        let mut members: Vec<u64> = c.devices.iter().filter_map(|g| products.get(&m.elements.id(*g)?).copied()).collect();
+        members.push(breaker);
+        w.add(format!("IFCRELASSIGNSTOGROUP({},$,$,$,({}),$,#{circuit})", w.guid(CIRCUIT_MEMBERS, id), refs(&members)));
+        let system = match m.elements.get(board) {
+            Some(Element::Component(b)) => {
+                b.panel.as_ref().and_then(|p| p.distribution.as_deref()).and_then(|d| distribution_entity.get(d))
+            }
+            _ => None,
+        };
+        if let Some(system) = system {
+            w.add(format!("IFCRELAGGREGATES({},$,$,$,#{system},(#{circuit}))", w.guid(CIRCUIT_PARTS, id)));
+        }
+        let mut props = vec![
+            w.add(format!("IFCPROPERTYSINGLEVALUE('Number',$,IFCINTEGER({}),$)", c.number)),
+            w.add(format!("IFCPROPERTYSINGLEVALUE('Rating',$,IFCELECTRICCURRENTMEASURE({}),$)", real(c.rating_a))),
+            w.add(format!("IFCPROPERTYSINGLEVALUE('Poles',$,IFCINTEGER({}),$)", c.poles)),
+            w.add(format!("IFCPROPERTYSINGLEVALUE('DemandFactor',$,IFCREAL({}),$)", real(c.demand_factor))),
+            w.text_property("Panel", Some("The GlobalId of the board it is on"), &compress(c.panel.as_u128())),
+        ];
+        if let Some(v) = &c.voltage {
+            props.push(w.text_property("Voltage", None, v));
+        }
+        if !c.classification.is_empty() {
+            props.push(w.text_property("Classification", None, &c.classification));
+        }
+        if let Some(wires) = c.wires.as_ref().and_then(|x| serde_json::to_string(x).ok()) {
+            props.push(w.text_property("Wires", Some("JSON: the section of each conductor, mm², in a wire type of the project"), &wires));
+        }
+        w.define(circuit, CIRCUIT_SET, &props, (CIRCUIT_PROPERTIES, CIRCUIT_DEFINES), id);
     }
     for (level, (storey, _)) in &storeys {
         if let Some(items) = contained.get(level) {
@@ -1158,31 +2480,118 @@ pub fn export(m: &Model) -> String {
             ));
         }
     }
-    // Each element's values of the project's parameters: a property set of its own, `Project
-    // Parameters`, lengths in the file's millimetres.
+    // Each element's values of the project's parameters: in the set its parameter names for its category, else a property set
+    // of its own, `Project Parameters`; lengths in the file's millimetres. A classification's codes go as references, below.
+    let mut classified: BTreeMap<(&str, &str), Vec<u64>> = BTreeMap::new();
     for (&id, &ent) in &products {
         let Some(e) = m.elements.get(id) else { continue };
         let Some(params) = e.params() else { continue };
-        let props: Vec<u64> = params
-            .iter()
-            .filter_map(|(name, v)| {
-                // The project's parameters for its category: a component's family's values are its family's.
-                let p = m.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == e.category()))?;
-                let value = match (p.kind, v) {
-                    (ParameterKind::Text, Value::String(t)) => format!("IFCTEXT({})", s(t)),
-                    (ParameterKind::Number, v) => format!("IFCREAL({})", real(v.as_f64()?)),
-                    (ParameterKind::Length, v) => format!("IFCLENGTHMEASURE({})", real(v.as_f64()?)),
-                    (ParameterKind::YesNo, Value::Bool(b)) => format!("IFCBOOLEAN({})", if *b { ".T." } else { ".F." }),
-                    _ => return None,
-                };
-                Some(w.add(format!("IFCPROPERTYSINGLEVALUE({},$,{value},$)", s(name))))
-            })
-            .collect();
-        if !props.is_empty() {
-            w.define(ent, PARAMETERS, &props, (PROPERTIES, DEFINES), id);
+        let mut sets: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+        // A type parameter goes out on each element of the type: IFC has it where a reader of the element looks.
+        let of_type = m.parameters.iter().filter(|(_, p)| p.scope == crate::model::Scope::Type).filter_map(|(n, p)| {
+            let mine = p.categories.iter().any(|c| c == e.category());
+            Some((n, mine.then(|| crate::parameters::value_of(m, e, n, p)).flatten()?))
+        });
+        for (name, v) in params.iter().chain(of_type) {
+            // The project's parameters for its category: a component's family's values are its family's.
+            let Some(p) = m.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == e.category())) else { continue };
+            if p.classification.is_some() {
+                if let Some(code) = v.as_str().filter(|c| !c.trim().is_empty()) {
+                    classified.entry((name.as_str(), code)).or_default().push(ent);
+                }
+                continue;
+            }
+            let set = p.sets.get(e.category()).map_or(PARAMETERS, String::as_str);
+            if own_property(set, name) {
+                continue;
+            }
+            let value = match (p.kind, v, v.as_f64()) {
+                (ParameterKind::Text, Value::String(t), _) => format!("IFCTEXT({})", s(t)),
+                (ParameterKind::Number, _, Some(x)) => format!("IFCREAL({})", real(x)),
+                (ParameterKind::Length, _, Some(x)) => format!("IFCLENGTHMEASURE({})", real(x)),
+                (ParameterKind::Integer, _, Some(x)) => format!("IFCINTEGER({})", x as i64),
+                (ParameterKind::Area, _, Some(x)) => format!("IFCAREAMEASURE({})", real(x)),
+                (ParameterKind::Volume, _, Some(x)) => format!("IFCVOLUMEMEASURE({})", real(x)),
+                (ParameterKind::Angle, _, Some(x)) => format!("IFCPLANEANGLEMEASURE({})", real(x.to_radians())),
+                (ParameterKind::YesNo, Value::Bool(b), _) => format!("IFCBOOLEAN({})", if *b { ".T." } else { ".F." }),
+                _ => continue,
+            };
+            sets.entry(set).or_default().push(w.add(format!("IFCPROPERTYSINGLEVALUE({},$,{value},$)", s(name))));
+        }
+        let common = common_pset(e);
+        for (set, props) in sets {
+            if set == PARAMETERS {
+                w.define(ent, PARAMETERS, &props, (PROPERTIES, DEFINES), id);
+            } else if let Some(c) = common.filter(|c| *c == set) {
+                // The element's `Pset_*Common` is written once, with what the export says in it.
+                w.common.entry(id).or_insert((ent, c, Vec::new())).2.extend(props);
+            } else {
+                w.sets.entry((ent, set.to_string())).or_insert((id, Vec::new())).1.extend(props);
+            }
         }
     }
     cost(&mut w, m, &products);
+    // Each classification system the project's parameters hold codes of, an `IfcClassification`; each code in it a reference,
+    // associated with the elements holding it.
+    for ((name, code), ents) in &classified {
+        let Some(c) = m.parameters.get(*name).and_then(|p| p.classification.as_ref()) else { continue };
+        let system = w.classification(&c.system, c.edition.as_deref());
+        let reference = w.add(format!("IFCCLASSIFICATIONREFERENCE($,{},$,#{system},$,$)", s(code)));
+        let key = key_of(&format!("{name}\u{0}{code}"));
+        w.add(format!("IFCRELASSOCIATESCLASSIFICATION({},$,$,$,({}),#{reference})", w.guid(CLASSIFIED, key), refs(ents)));
+    }
+    // A placed device's connector (the power one, else the first electrical one; a pipe's waits for IFC's ports): `Pset_ElectricalDeviceCommon`, with the poles, and for a power
+    // connector the power factor and the voltage (IFC4's types: a ratio, and a bounded value with its set point), and `BIMCraft_Connector` with what IFC has no property for.
+    for (&id, &ent) in &products {
+        let Some(Element::Component(cp)) = m.elements.get(id) else { continue };
+        let Some(connectors) = m.families.get(&cp.family).and_then(|f| f.connector_values(&cp.type_name, &cp.params).ok()) else {
+            continue;
+        };
+        let Some(c) = connectors.iter().find(|c| c.kind == ConnectorKind::Power).or(connectors.iter().find(|c| c.kind.electrical())) else {
+            continue;
+        };
+        let power = c.kind == ConnectorKind::Power;
+        let mut device = vec![w.add(format!("IFCPROPERTYSINGLEVALUE('NumberOfPoles',$,IFCINTEGER({}),$)", c.poles))];
+        if power {
+            device.push(w.add(format!("IFCPROPERTYSINGLEVALUE('PowerFactor',$,IFCNORMALISEDRATIOMEASURE({}),$)", real(c.power_factor))));
+            device.push(w.add(format!("IFCPROPERTYBOUNDEDVALUE('RatedVoltage',$,$,$,$,IFCELECTRICVOLTAGEMEASURE({}))", real(c.voltage))));
+        }
+        w.define(ent, DEVICE_SET, &device, (DEVICE, DEVICE_DEFINES), id);
+        let system = serde_json::to_value(c.system).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let mut own = vec![w.text_property("System", None, &system)];
+        if !c.classification.is_empty() {
+            own.push(w.text_property("Classification", None, &c.classification));
+        }
+        if power {
+            own.push(w.add(format!("IFCPROPERTYSINGLEVALUE('LoadVA',$,IFCREAL({}),$)", real(c.load_va))));
+            for (k, va) in c.load_va_by_phase.iter().enumerate() {
+                own.push(w.add(format!("IFCPROPERTYSINGLEVALUE('LoadVAPhase{}',$,IFCREAL({}),$)", k + 1, real(*va))));
+            }
+        }
+        w.define(ent, CONNECTOR_SET, &own, (CONNECTOR, CONNECTOR_DEFINES), id);
+    }
+    // A phased project's elements say what the work does to them, as IFC's `Status` (PEnum_ElementStatus) in their `Pset_*Common`: taken down in
+    // any phase, DEMOLISH (TEMPORARY when made in that phase too); made in the first phase, EXISTING; else NEW. A door or a
+    // window with no phase of its own follows its wall. A project with no phases says nothing: all of it is new work.
+    if phasing::any(m) {
+        for (&id, &ent) in &products {
+            let Some(e) = m.elements.get(id) else { continue };
+            let Some(pset) = common_pset(e) else { continue };
+            let Some(status) = ifc_status(m, e) else { continue };
+            let p = w.add(format!("IFCPROPERTYENUMERATEDVALUE('Status',$,(IFCLABEL('{status}')),$)"));
+            w.common.entry(id).or_insert((ent, pset, Vec::new())).2.push(p);
+        }
+    }
+    for (id, (ent, pset, props)) in std::mem::take(&mut w.common) {
+        w.define(ent, pset, &props, (COMMON, COMMON_DEFINES), id);
+    }
+    // The project parameters' values in sets of other programs': a set of each name an element.
+    for ((ent, set), (id, props)) in std::mem::take(&mut w.sets) {
+        let role = key_of(&set) | 1 << 63;
+        w.define(ent, &set, &props, (role, role ^ 1), id);
+    }
+    w.write_types(m);
+    w.write_classifications();
     // Each element's phase and design option, in a property set of its own. The first phase is no value in a
     // model; here an element holding another value names it as its `Phase Created` (said to be implied), for
     // another tool to read. A door or a window holds only what it says: one with no phase follows its wall.
@@ -1211,7 +2620,7 @@ pub fn export(m: &Model) -> String {
     // phases and filters a project in another language starts with are nothing it uses.
     // ponytail: JSON inside an IfcText, which only BIMCraft reads; IfcComplexProperty records if another tool needs them.
     let changed = [
-        ("Phase Filters", !phasing::is_default_filters(&m.phase_filters), serde_json::to_string(&m.phase_filters)),
+        (ui_msg!("Phase Filters"), !phasing::is_default_filters(&m.phase_filters), serde_json::to_string(&m.phase_filters)),
         ("Phase Overrides", !phasing::is_default_overrides(&m.phase_overrides), serde_json::to_string(&m.phase_overrides)),
         ("Design Option Sets", !m.option_sets.is_empty(), serde_json::to_string(&m.option_sets)),
     ];
@@ -1232,13 +2641,24 @@ pub fn export(m: &Model) -> String {
         w.define(project, PHASING, &props, (PHASED, PHASED_DEFINES), 0);
     }
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // The components standing in each room, referenced in its space (IFC4's "also in"), after everything else, so the rest
+    // of the file is as it was without them.
+    if reference_rooms {
+        for (room, items) in in_rooms {
+            if let Some(space) = products.get(&room) {
+                w.add(format!("IFCRELREFERENCEDINSPATIALSTRUCTURE({},$,$,$,({}),#{space})", w.guid(REFERENCED, room), refs(&items)));
+            }
+        }
+    }
+
     let app = s(&format!("BIMCraft {}", env!("CARGO_PKG_VERSION")));
     format!(
-        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition [DesignTransferView]'),'2;1');\n\
-         FILE_NAME({},'{}',(''),(''),{app},{app},'');\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition [{}]'),'2;1');\n\
+         FILE_NAME({},'{}',(''),(''),{app},{app},'');\nFILE_SCHEMA(('{}'));\nENDSEC;\nDATA;\n{}ENDSEC;\nEND-ISO-10303-21;\n",
+        schema.view(),
         s(&format!("{}.ifc", m.name)),
         utc(now),
+        schema.name(),
         w.out
     )
 }
@@ -1274,6 +2694,21 @@ mod tests {
         assert_eq!(a, guid(7, 5, 12));
         let all: BTreeSet<String> = (0..2000).flat_map(|id| [guid(7, 5, id), guid(7, 6, id), guid(8, 5, id)]).collect();
         assert_eq!(all.len(), 6000);
+    }
+
+    #[test]
+    fn every_role_a_global_id_plays_has_a_number_of_its_own() {
+        // Two roles of one number give two things written for one element (a wall's property set and a distribution
+        // system keyed to the same number) one GlobalId, which a reader takes for one object.
+        let mut seen: BTreeMap<u64, &str> = BTreeMap::new();
+        for line in include_str!("ifc.rs").lines() {
+            let Some((name, value)) = line.strip_prefix("const ").and_then(|rest| rest.split_once(": u64 = ")) else { continue };
+            let n: u64 = value.trim_end_matches(';').parse().unwrap_or_else(|_| panic!("{line}"));
+            if let Some(other) = seen.insert(n, name) {
+                panic!("{other} and {name} are both role {n}: give the newer one a number no role has");
+            }
+        }
+        assert!(seen.len() > 40, "the roles are read from the source: {seen:?}");
     }
 
     #[test]
@@ -1385,6 +2820,40 @@ mod tests {
         dangling(&f);
     }
 
+    #[test]
+    fn a_rooms_colour_styles_the_solid_of_its_spaces_body() {
+        let mut s = Session::new();
+        s.script(
+            r#"wall {"points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "closed": true}
+               room {"point": [4000, 3000]}"#,
+        )
+        .unwrap();
+        let styled = |f: &str| f.matches("=IFCSTYLEDITEM(").count();
+        let plain = styled(&export(&s.model));
+        let room = s.model.elements.iter().find(|(_, e)| e.category() == "room").map(|(id, _)| *id).unwrap();
+        assert!(room >= crate::ids::FIRST_ID);
+        s.execute("type", &json!({"category": "room", "name": "Standard", "colour": [214, 229, 210]})).unwrap();
+        let f = export(&s.model);
+        dangling(&f);
+        assert_eq!(styled(&f), plain + 1, "one style, for the one room with a colour");
+        // `#n=...` of reference `#n`, and the first reference in it after `after`.
+        let line = |n: &str| f.lines().find(|l| l.starts_with(&format!("{n}="))).unwrap_or_else(|| panic!("no {n}")).to_string();
+        let after = |l: &str, after: &str| {
+            format!("#{}", l.split_once(after).unwrap().1.chars().take_while(char::is_ascii_digit).collect::<String>())
+        };
+        // The space's body, its shape's representation's solid: the item its style is on.
+        let space = f.lines().find(|l| l.contains("=IFCSPACE(")).unwrap();
+        let shape = space.split(',').nth(6).unwrap();
+        let solid = after(&line(&after(&line(shape), "(#")), ",(#");
+        assert!(line(&solid).contains("=IFCEXTRUDEDAREASOLID("), "{}", line(&solid));
+        let item = f.lines().find(|l| l.contains(&format!("=IFCSTYLEDITEM({solid},"))).unwrap();
+        // Its surface style shades it in the room's colour.
+        let shading = after(&line(&after(item, ",(#")), ",(#");
+        let colour = line(&after(&line(&shading), "(#"));
+        let [r, g, b] = [214.0, 229.0, 210.0].map(|c: f64| real(c / 255.0));
+        assert!(colour.ends_with(&format!("=IFCCOLOURRGB($,{r},{g},{b});")), "{colour}");
+    }
+
     /// Every reference in `f` points at an entity written once.
     fn dangling(f: &str) {
         let mut defined = BTreeSet::new();
@@ -1423,6 +2892,11 @@ mod tests {
 
     /// The properties of the `BIMCraft_Phasing` set of entity `#ent`, as written, in the set's order; none when it has no such set.
     fn phasing_of(f: &str, ent: u64) -> Vec<String> {
+        set_of(f, ent, PHASING)
+    }
+
+    /// The properties of set `name` of entity `#ent`, as written, in the set's order; none when it has no such set.
+    fn set_of(f: &str, ent: u64, name: &str) -> Vec<String> {
         let body = |n: &str| -> String {
             let line = f.lines().find(|l| l.starts_with(&format!("#{n}="))).unwrap_or_else(|| panic!("no #{n}"));
             line.split_once('=').unwrap().1.trim_end_matches(';').to_string()
@@ -1434,7 +2908,7 @@ mod tests {
                 continue;
             }
             let set = body(set.trim_end_matches(");").trim_end_matches(';').trim_end_matches(')'));
-            if !set.contains(&format!("'{PHASING}'")) {
+            if !set.contains(&format!("'{name}'")) {
                 continue;
             }
             let props = set.rsplit_once(",(").unwrap().1.trim_end_matches(')');
@@ -1493,6 +2967,550 @@ mod tests {
         );
         assert_eq!(f.matches(&format!("'{PHASING}'")).count(), 3 + 1 + 1, "three walls and the door hold a value; and the project");
         dangling(&f);
+    }
+
+    #[test]
+    fn a_phased_projects_elements_say_what_the_work_does_to_them_in_their_common_set() {
+        use crate::graphics::testing::{house, run};
+        let status = |v: &str| format!("IFCPROPERTYENUMERATEDVALUE('Status',$,(IFCLABEL('{v}')),$)");
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        run(&mut s, "door", json!({"at": [2000, 0]}));
+        let window = run(&mut s, "window", json!({"at": [0, 3000]}))["id"].as_u64().unwrap();
+        run(&mut s, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        for (id, held) in [
+            (walls[0], json!({"Phase Demolished": "Demolition"})),
+            (walls[1], json!({"Phase Created": "New Construction"})),
+            (walls[2], json!({"Phase Created": "Demolition", "Phase Demolished": "Demolition"})),
+            (window, json!({"Phase Created": "New Construction"})),
+        ] {
+            run(&mut s, "modify", json!({"id": id, "params": held}));
+        }
+        let f = export(&s.model);
+        let wall = of_kind(&f, "IFCWALL");
+        let common = |ent| set_of(&f, ent, "Pset_WallCommon");
+        assert_eq!(common(wall[0]), [status("DEMOLISH")]);
+        assert_eq!(common(wall[1]), [status("NEW")]);
+        assert_eq!(common(wall[2]), [status("TEMPORARY")], "made and taken down in the same phase");
+        assert_eq!(common(wall[3]), [status("EXISTING")], "no value is the first phase");
+        // A door with no phase of its own follows its wall; a window holding one says its own.
+        assert_eq!(set_of(&f, of_kind(&f, "IFCDOOR")[0], "Pset_DoorCommon"), [status("DEMOLISH")]);
+        assert_eq!(set_of(&f, of_kind(&f, "IFCWINDOW")[0], "Pset_WindowCommon"), [status("NEW")]);
+        dangling(&f);
+    }
+
+    /// The occurrences an `IfcRelDefinesByType` of the type object `#kind` lists.
+    fn occurrences_of(f: &str, kind: u64) -> Vec<u64> {
+        let rel =
+            f.lines().find(|l| l.contains("=IFCRELDEFINESBYTYPE(") && l.trim_end_matches(';').ends_with(&format!(",#{kind})"))).unwrap();
+        let list = rel.split_once("$,$,$,(").unwrap().1.split_once("),#").unwrap().0;
+        list.split(',').map(|r| r.trim_start_matches('#').parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn each_type_is_written_once_and_related_to_its_occurrences() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        house(&mut s);
+        run(&mut s, "type", json!({"category": "beam", "name": "B 150x600", "width": 150, "depth": 600}));
+        for y in [0, 4000] {
+            run(&mut s, "beam", json!({"points": [[0, y], [5000, y]], "type": "B 150x600", "offset": 3000}));
+        }
+        run(&mut s, "structural_column", json!({"at": [0, 0], "width": 300, "depth": 300}));
+        run(&mut s, "floor", json!({"boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}));
+        let f = export(&s.model);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
+        let beams = of_kind(&f, "IFCBEAM");
+        assert_eq!(beams.len(), 2);
+        let kinds = of_kind(&f, "IFCBEAMTYPE");
+        assert_eq!(kinds.len(), 1, "one type for the two beams");
+        assert!(f.contains("IFCBEAMTYPE(") && f.contains("'B 150x600',$,$,$,$,$,$,.BEAM.)"));
+        assert_eq!(occurrences_of(&f, kinds[0]), beams);
+        let q = quantities_of(&f, beams[0], "Qto_BeamBaseQuantities");
+        assert!(near(q["Length"], 5000.0) && near(q["CrossSectionArea"], 0.09) && !q.contains_key("NetVolume"), "{q:?}");
+        assert!(near(q["GrossVolume"], 0.45) && near(q["OuterSurfaceArea"], 2.0 * (0.15 + 0.6) * 5.0), "the sides only: {q:?}");
+        assert!(!q.contains_key("GrossSurfaceArea"), "outer surface and section are given apart: {q:?}");
+        let columns = of_kind(&f, "IFCCOLUMN");
+        let types = of_kind(&f, "IFCCOLUMNTYPE");
+        assert_eq!((columns.len(), types.len()), (1, 1));
+        assert_eq!(occurrences_of(&f, types[0]), columns);
+        let q = quantities_of(&f, columns[0], "Qto_ColumnBaseQuantities");
+        assert!(near(q["CrossSectionArea"], 0.09) && near(q["GrossVolume"], 0.09 * q["Length"] / 1e3), "{q:?}");
+        assert!(near(q["OuterSurfaceArea"], 4.0 * 0.3 * q["Length"] / 1e3) && !q.contains_key("GrossSurfaceArea"), "{q:?}");
+        // Walls and slabs have theirs, one for each type used.
+        let walls: BTreeSet<String> =
+            s.model.elements.iter().filter_map(|(_, e)| if let Element::Wall(w) = e { Some(w.type_name.clone()) } else { None }).collect();
+        assert_eq!(of_kind(&f, "IFCWALLTYPE").len(), walls.len());
+        assert_eq!(of_kind(&f, "IFCSLABTYPE").len(), 1, "one type for the floor");
+        // The same on every export, so a diff of two shows only what changed.
+        assert_eq!(data(&f), data(&export(&s.model)));
+        dangling(&f);
+    }
+
+    /// What `f` holds from its DATA section on: the header's FILE_NAME carries the time to the second, so two exports a
+    /// second apart differ there, and a test comparing whole files would fail on a slow machine.
+    fn data(f: &str) -> &str {
+        f.split_once("DATA;").expect("an IFC file has a DATA section").1
+    }
+
+    /// The entity lines of kind `class` in `f`, as written.
+    fn entities(f: &str, class: &str) -> Vec<String> {
+        f.lines().filter(|l| l.contains(&format!("={class}("))).map(str::to_string).collect()
+    }
+
+    /// The attributes of an entity line, as the STEP text spells them (strings with their quotes), split at the commas
+    /// that are outside strings.
+    fn attributes(line: &str) -> Vec<String> {
+        let body = line.split_once('(').unwrap().1.strip_suffix(");").unwrap();
+        let (mut out, mut cur, mut quoted) = (Vec::new(), String::new(), false);
+        for c in body.chars() {
+            match c {
+                '\'' => {
+                    quoted = !quoted;
+                    cur.push(c);
+                }
+                ',' if !quoted => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        out.push(cur);
+        out
+    }
+
+    /// The attributes of the type object of `class` named `name` in `f`; there is one.
+    fn type_object(f: &str, class: &str, name: &str) -> Vec<String> {
+        let named: Vec<Vec<String>> =
+            entities(f, class).iter().map(|l| attributes(l.as_str())).filter(|a| a[2] == format!("'{name}'")).collect();
+        assert_eq!(named.len(), 1, "one {class} named {name}");
+        named.into_iter().next().unwrap()
+    }
+
+    /// The type name of the first element of `category` in the model: a door's, window's, ceiling's or roof's.
+    fn type_name_of(s: &Session, category: &str) -> String {
+        s.model
+            .elements
+            .values()
+            .filter(|e| e.category() == category)
+            .find_map(|e| match e {
+                Element::Door(o) | Element::Window(o) => Some(o.type_name.clone()),
+                Element::Ceiling(c) => Some(c.type_name.clone()),
+                Element::Roof(r) => Some(r.type_name.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// The type objects of `type_class` in `f`, once every `class` occurrence in `f` is related to one of them and to no
+    /// other: each occurrence listed by exactly one `IfcRelDefinesByType`.
+    fn typed_once(f: &str, class: &str, type_class: &str) -> Vec<u64> {
+        let types = of_kind(f, type_class);
+        let mut related: Vec<u64> = types.iter().flat_map(|t| occurrences_of(f, *t)).collect();
+        related.sort_unstable();
+        let mut all = of_kind(f, class);
+        all.sort_unstable();
+        assert_eq!(related, all, "each {class} related to exactly one {type_class}");
+        types
+    }
+
+    #[test]
+    fn doors_windows_roofs_and_ceilings_get_type_objects_each_occurrence_related_once() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        house(&mut s);
+        run(&mut s, "door", json!({"at": [2000, 0]}));
+        run(&mut s, "door", json!({"at": [5000, 0]}));
+        run(&mut s, "window", json!({"at": [8000, 3000]}));
+        run(&mut s, "ceiling", json!({"point": [4000, 3000]}));
+        run(&mut s, "roof", json!({}));
+        let f = export(&s.model);
+        dangling(&f);
+        // A door's type carries, after its PredefinedType, its OperationType, whether the occurrence's own parameters take
+        // precedence (its sizes are its own: yes) and a user-defined operation (none).
+        assert_eq!(typed_once(&f, "IFCDOOR", "IFCDOORTYPE").len(), 1, "one type for both doors");
+        let door = type_object(&f, "IFCDOORTYPE", &type_name_of(&s, "door"));
+        assert_eq!(door.len(), 13, "IfcDoorType's attributes");
+        assert_eq!(door[9..].join(","), ".DOOR.,.SINGLE_SWING_LEFT.,.T.,$");
+        // A window's type carries its PartitioningType the same way.
+        assert_eq!(typed_once(&f, "IFCWINDOW", "IFCWINDOWTYPE").len(), 1);
+        let window = type_object(&f, "IFCWINDOWTYPE", &type_name_of(&s, "window"));
+        assert_eq!(window.len(), 13, "IfcWindowType's attributes");
+        assert_eq!(window[9..].join(","), ".WINDOW.,.SINGLE_PANEL.,.T.,$");
+        assert_eq!(typed_once(&f, "IFCCOVERING", "IFCCOVERINGTYPE").len(), 1);
+        let ceiling = type_object(&f, "IFCCOVERINGTYPE", &type_name_of(&s, "ceiling"));
+        assert_eq!((ceiling.len(), ceiling[9].as_str()), (10, ".CEILING."));
+        assert_eq!(typed_once(&f, "IFCROOF", "IFCROOFTYPE").len(), 1);
+        let roof = type_object(&f, "IFCROOFTYPE", &type_name_of(&s, "roof"));
+        assert_eq!((roof.len(), roof[9].as_str()), (10, ".NOTDEFINED."), "a roof sloping 30 degrees, the default");
+    }
+
+    #[test]
+    fn a_roof_type_is_flat_only_when_every_roof_of_it_is_flat() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        run(&mut s, "roof", json!({"boundary": [[0, 0], [4000, 0], [4000, 4000], [0, 4000]], "slope": 0}));
+        let f = export(&s.model);
+        dangling(&f);
+        assert_eq!(typed_once(&f, "IFCROOF", "IFCROOFTYPE").len(), 1);
+        assert_eq!(type_object(&f, "IFCROOFTYPE", &type_name_of(&s, "roof"))[9], ".FLAT_ROOF.");
+        // A sloped roof of the same type: the type is no longer flat, and both roofs are of it.
+        run(&mut s, "roof", json!({"boundary": [[10000, 0], [14000, 0], [14000, 4000], [10000, 4000]]}));
+        let f = export(&s.model);
+        dangling(&f);
+        assert_eq!(typed_once(&f, "IFCROOF", "IFCROOFTYPE").len(), 1, "one type for both roofs");
+        assert_eq!(type_object(&f, "IFCROOFTYPE", &type_name_of(&s, "roof"))[9], ".NOTDEFINED.");
+    }
+
+    #[test]
+    fn components_get_type_objects_of_the_class_each_is_written_as_with_their_attribute_counts() {
+        use crate::graphics::testing::run;
+        // A starter family of each class a component is written as.
+        let families = [
+            ("Table", "IFCFURNITURE"),
+            ("Kitchen Sink", "IFCSANITARYTERMINAL"),
+            ("Floor Drain", "IFCWASTETERMINAL"),
+            ("Elbow 90", "IFCPIPEFITTING"),
+            ("Gate Valve", "IFCVALVE"),
+            ("Distribution Board", "IFCELECTRICDISTRIBUTIONBOARD"),
+            ("Outlet", "IFCOUTLET"),
+            ("Switch", "IFCSWITCHINGDEVICE"),
+            ("Ceiling Luminaire", "IFCLIGHTFIXTURE"),
+            ("Air Terminal", "IFCBUILDINGELEMENTPROXY"),
+        ];
+        let mut s = Session::new();
+        for (i, (family, _)) in families.iter().enumerate() {
+            run(&mut s, "component", json!({"family": family, "at": [i as f64 * 2000.0, 0.0]}));
+        }
+        let f = export(&s.model);
+        dangling(&f);
+        for (family, class) in families {
+            let type_class = format!("{class}TYPE");
+            typed_once(&f, class, &type_class);
+            let type_name = s
+                .model
+                .elements
+                .values()
+                .find_map(|e| match e {
+                    Element::Component(cp) if cp.family == family => Some(cp.type_name.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let attrs = type_object(&f, &type_class, &format!("{family}:{type_name}"));
+            // Furniture's type has its AssemblyPlace (mandatory) ahead of its PredefinedType; the others have ten attributes.
+            let count = if class == "IFCFURNITURE" { 11 } else { 10 };
+            // Its predefined type is its family's kind's (a kitchen sink's .SINK.), or not defined.
+            let fam = s.model.families.get(family).unwrap();
+            let predefined = if fam.kind.is_some() { fam.ifc().1 } else { ".NOTDEFINED.".into() };
+            assert_eq!((attrs.len(), attrs[count - 1].as_str()), (count, predefined.as_ref()), "{type_class}");
+            if class == "IFCFURNITURE" {
+                assert_eq!(attrs[9], ".NOTDEFINED.", "its assembly place");
+            }
+        }
+    }
+
+    #[test]
+    fn discipline_runs_get_the_type_objects_of_their_segment_classes() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        run(&mut s, "pipe", json!({"points": [[0, 6000], [6000, 6000]], "offset": 500}));
+        run(&mut s, "duct", json!({"points": [[0, 7000], [6000, 7000]], "offset": 2500}));
+        run(&mut s, "conduit", json!({"points": [[0, 8000], [6000, 8000]], "offset": 2500}));
+        run(&mut s, "cable_tray", json!({"points": [[0, 9000], [6000, 9000]], "offset": 2700}));
+        run(&mut s, "wire", json!({"points": [[0, 10000], [6000, 10000]], "offset": 2500}));
+        run(&mut s, "cabling", json!({"points": [[0, 11000], [6000, 11000]], "offset": 2500}));
+        let f = export(&s.model);
+        dangling(&f);
+        // The PredefinedType of each type is the one its runs are written with (the last attribute of each type object).
+        let kinds = |class: &str| -> Vec<String> { entities(&f, class).iter().map(|l| attributes(l).pop().unwrap()).collect() };
+        typed_once(&f, "IFCPIPESEGMENT", "IFCPIPESEGMENTTYPE");
+        assert_eq!(kinds("IFCPIPESEGMENTTYPE"), [".RIGIDSEGMENT."]);
+        typed_once(&f, "IFCDUCTSEGMENT", "IFCDUCTSEGMENTTYPE");
+        assert_eq!(kinds("IFCDUCTSEGMENTTYPE"), [".RIGIDSEGMENT."]);
+        // A conduit and a cable tray are both cable carrier segments, each its own type.
+        assert_eq!(typed_once(&f, "IFCCABLECARRIERSEGMENT", "IFCCABLECARRIERSEGMENTTYPE").len(), 2);
+        let mut carriers = kinds("IFCCABLECARRIERSEGMENTTYPE");
+        carriers.sort();
+        assert_eq!(carriers, [".CABLETRAYSEGMENT.", ".CONDUITSEGMENT."]);
+        // A wire and structured cabling are both cable segments.
+        typed_once(&f, "IFCCABLESEGMENT", "IFCCABLESEGMENTTYPE");
+        let cables = kinds("IFCCABLESEGMENTTYPE");
+        assert!(!cables.is_empty() && cables.iter().all(|k| k == ".CABLESEGMENT."), "{cables:?}");
+    }
+
+    /// The whole line of entity `#n` in `f`, as written.
+    fn line(f: &str, n: u64) -> String {
+        let head = format!("#{n}=");
+        f.lines().find(|l| l.starts_with(&head)).unwrap_or_else(|| panic!("no #{n}")).to_string()
+    }
+
+    /// The number a STEP reference names: `#12` is 12.
+    fn number(reference: &str) -> u64 {
+        reference.trim_start_matches('#').parse().unwrap_or_else(|_| panic!("not a reference: {reference}"))
+    }
+
+    /// What `IfcRelAssociatesMaterial` gives entity `#ent`: the number of the material, set or usage. There is exactly one.
+    fn material_of(f: &str, ent: u64) -> u64 {
+        let given: Vec<u64> = f
+            .lines()
+            .filter(|l| l.contains("=IFCRELASSOCIATESMATERIAL("))
+            .filter_map(|l| {
+                let (list, material) = l.split_once("$,$,$,(")?.1.split_once("),#")?;
+                list.split(',').any(|r| r == format!("#{ent}")).then(|| number(material.trim_end_matches(");")))
+            })
+            .collect();
+        assert_eq!(given.len(), 1, "#{ent} is associated with one material, set or usage");
+        given[0]
+    }
+
+    /// The one profile of material profile set `#set`: its material (none when `$`) and its profile definition, by number.
+    fn the_profile(f: &str, set: u64) -> (Option<u64>, u64) {
+        let set = attributes(&line(f, set));
+        assert_eq!(set.len(), 4, "IfcMaterialProfileSet's attributes");
+        let profiles = set[2].trim_matches(|c| c == '(' || c == ')');
+        assert!(!profiles.contains(','), "one profile: {profiles}");
+        let profile = attributes(&line(f, number(profiles)));
+        assert_eq!(profile.len(), 6, "IfcMaterialProfile's attributes");
+        ((profile[2] != "$").then(|| number(&profile[2])), number(&profile[3]))
+    }
+
+    /// The set and the cardinal point of the usage entity `#ent` is associated with.
+    fn usage_of(f: &str, ent: u64) -> (u64, String) {
+        let usage = line(f, material_of(f, ent));
+        assert!(usage.contains("=IFCMATERIALPROFILESETUSAGE("), "{usage}");
+        let a = attributes(&usage);
+        assert_eq!((a.len(), a[2].as_str()), (3, "$"), "IfcMaterialProfileSetUsage's attributes: {usage}");
+        (number(&a[0]), a[1].clone())
+    }
+
+    /// The set of the type object `#kind`, its profile definition's line and its material's line (empty when it has none).
+    fn section_of(f: &str, kind: u64) -> (u64, String, String) {
+        let set = material_of(f, kind);
+        assert!(line(f, set).contains("=IFCMATERIALPROFILESET("), "{}", line(f, set));
+        let (material, profile) = the_profile(f, set);
+        (set, line(f, profile), material.map(|m| line(f, m)).unwrap_or_default())
+    }
+
+    #[test]
+    fn a_beam_type_holds_its_section_in_a_material_profile_set_that_each_beam_uses() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        house(&mut s);
+        run(&mut s, "type", json!({"category": "beam", "name": "B 150x600", "width": 150, "depth": 600, "material": "Concrete"}));
+        run(&mut s, "beam", json!({"points": [[0, 0], [5000, 0]], "type": "B 150x600", "offset": 3000}));
+        run(&mut s, "beam", json!({"points": [[0, 4000], [5000, 4000]], "type": "B 150x600", "offset": 3000, "justify": "bottom"}));
+        let f = export(&s.model);
+        dangling(&f);
+        // The type holds one set: one profile, of the type's material, a 150 by 600 rectangle.
+        let kind = of_kind(&f, "IFCBEAMTYPE");
+        assert_eq!(kind.len(), 1);
+        let (set, profile, material) = section_of(&f, kind[0]);
+        assert_eq!(of_kind(&f, "IFCMATERIALPROFILESET"), [set], "one set for the type");
+        assert!(line(&f, set).contains("=IFCMATERIALPROFILESET('B 150x600',$,(#"), "{}", line(&f, set));
+        assert!(material.contains("=IFCMATERIAL('Concrete'"), "{material}");
+        assert!(profile.contains("=IFCRECTANGLEPROFILEDEF(.AREA."), "{profile}");
+        let rectangle = attributes(&profile);
+        assert_eq!((rectangle[3].as_str(), rectangle[4].as_str()), ("150.", "600."), "{profile}");
+        // Both beams use the set, each by a usage with the cardinal point it is placed by: the top of its section (a beam's
+        // default) is 8, its bottom 2.
+        let beams = of_kind(&f, "IFCBEAM");
+        assert_eq!(beams.len(), 2);
+        let usages: Vec<(u64, String)> = beams.iter().map(|b| usage_of(&f, *b)).collect();
+        assert!(usages.iter().all(|(of, _)| *of == set), "{usages:?}");
+        let mut points: Vec<&str> = usages.iter().map(|(_, c)| c.as_str()).collect();
+        points.sort_unstable();
+        assert_eq!(points, ["2", "8"]);
+        // The profile is written once, and both bodies sweep it.
+        assert_eq!(of_kind(&f, "IFCRECTANGLEPROFILEDEF").len(), 1);
+        let shared = the_profile(&f, set).1;
+        let swept = entities(&f, "IFCEXTRUDEDAREASOLID").iter().filter(|l| attributes(l)[0] == format!("#{shared}")).count();
+        assert_eq!(swept, 2, "both bodies sweep the type's profile");
+        // The material is in the set, so a beam has no other: one for the type, one for each cardinal point's usage.
+        assert_eq!(of_kind(&f, "IFCRELASSOCIATESMATERIAL").len(), 3);
+        assert_eq!(data(&f), data(&export(&s.model)), "the same on every export");
+    }
+
+    #[test]
+    fn a_beam_type_with_no_material_gives_its_profile_none_and_a_round_one_a_circle() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        run(&mut s, "type", json!({"category": "beam", "name": "Plain", "width": 120, "depth": 300}));
+        run(&mut s, "beam", json!({"points": [[0, 0], [4000, 0]], "type": "Plain", "offset": 3000, "justify": "centre"}));
+        run(&mut s, "type", json!({"category": "beam", "name": "Tube 160", "width": 160, "round": true, "material": "Metal"}));
+        run(&mut s, "beam", json!({"points": [[0, 2000], [4000, 2000]], "type": "Tube 160", "offset": 3000}));
+        let f = export(&s.model);
+        dangling(&f);
+        let kinds = of_kind(&f, "IFCBEAMTYPE");
+        assert_eq!(kinds.len(), 2);
+        let by_name = |name: &str| *kinds.iter().find(|k| line(&f, **k).contains(&format!("'{name}'"))).unwrap();
+        let (_, profile, material) = section_of(&f, by_name("Plain"));
+        assert_eq!(material, "", "no material, no IfcMaterial");
+        assert!(attributes(&profile)[3] == "120." && attributes(&profile)[4] == "300.", "{profile}");
+        // A round section is a circle of half its diameter, as its body is.
+        let (_, tube, material) = section_of(&f, by_name("Tube 160"));
+        assert!(tube.contains("=IFCCIRCLEPROFILEDEF(.AREA."), "{tube}");
+        assert_eq!(attributes(&tube)[3], "80.", "{tube}");
+        assert!(material.contains("=IFCMATERIAL('Metal'"), "{material}");
+        // Centred on the line it was drawn at is 5.
+        let plain = of_kind(&f, "IFCBEAM").into_iter().find(|b| occurrences_of(&f, by_name("Plain")).contains(b)).unwrap();
+        assert_eq!(usage_of(&f, plain).1, "5");
+    }
+
+    #[test]
+    fn a_columns_type_holds_a_circle_of_its_diameter_or_a_rectangle_and_its_columns_use_it() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        run(&mut s, "structural_column", json!({"at": [0, 0], "type": "Concrete Round 400"}));
+        run(&mut s, "structural_column", json!({"at": [3000, 0], "type": "Concrete Round 400"}));
+        run(&mut s, "structural_column", json!({"at": [6000, 0], "type": "Concrete 200 x 500"}));
+        run(&mut s, "column", json!({"at": [9000, 0]}));
+        let f = export(&s.model);
+        dangling(&f);
+        let types = of_kind(&f, "IFCCOLUMNTYPE");
+        assert_eq!(types.len(), 3, "the round, the 200 by 500 and the default column");
+        let mut circles = 0;
+        for kind in &types {
+            let (set, profile, material) = section_of(&f, *kind);
+            assert_eq!(material, "", "a column's type has no material");
+            // Every column of the type uses its set, centred: the mid-depth centre, 5.
+            for column in occurrences_of(&f, *kind) {
+                assert_eq!(usage_of(&f, column), (set, "5".to_string()));
+            }
+            if profile.contains("=IFCCIRCLEPROFILEDEF(") {
+                circles += 1;
+                // 400 across: a radius of 200, for both columns of that type.
+                assert_eq!(attributes(&profile)[3], "200.", "{profile}");
+                assert_eq!(occurrences_of(&f, *kind).len(), 2);
+            }
+        }
+        assert_eq!(circles, 1);
+        assert!(entities(&f, "IFCRECTANGLEPROFILEDEF").iter().any(|r| attributes(r)[3] == "200." && attributes(r)[4] == "500."));
+        // Three usages: the two round columns share one, all five columns were related once.
+        assert_eq!(of_kind(&f, "IFCMATERIALPROFILESETUSAGE").len(), 3);
+    }
+
+    #[test]
+    fn a_pad_footings_type_has_a_profile_set_and_a_strip_footing_or_a_pipe_has_none() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        run(&mut s, "footing", json!({"at": [0, 0]}));
+        run(&mut s, "strip_footing", json!({"points": [[0, 3000], [4000, 3000]]}));
+        run(&mut s, "pipe", json!({"points": [[0, 6000], [4000, 6000]], "offset": 500}));
+        let f = export(&s.model);
+        dangling(&f);
+        let kind = of_kind(&f, "IFCFOOTINGTYPE");
+        assert_eq!(kind.len(), 1, "the pad's type; the strip footing has none");
+        let (set, profile, _) = section_of(&f, kind[0]);
+        assert_eq!(of_kind(&f, "IFCMATERIALPROFILESET"), [set]);
+        let pad = s.model.types.footing.values().next().unwrap();
+        assert!(profile.contains("=IFCRECTANGLEPROFILEDEF("), "{profile}");
+        assert_eq!(attributes(&profile)[3..5], [real(pad.width), real(pad.depth)]);
+        let footing = occurrences_of(&f, kind[0]);
+        assert_eq!(usage_of(&f, footing[0]), (set, "5".to_string()));
+        // A strip footing and a pipe keep the plain material they have.
+        for class in ["IFCFOOTING", "IFCPIPESEGMENT"] {
+            let plain: Vec<String> =
+                of_kind(&f, class).into_iter().filter(|e| !footing.contains(e)).map(|e| line(&f, material_of(&f, e))).collect();
+            assert_eq!(plain.len(), 1, "{class}");
+            assert!(plain[0].contains("=IFCMATERIAL("), "{}", plain[0]);
+        }
+    }
+
+    #[test]
+    fn types_of_one_name_and_two_sections_stay_two_types_each_with_its_own_set_and_global_ids() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        // The architectural and the structural column categories each have their own types; both may call one "C 300".
+        run(&mut s, "type", json!({"category": "column", "name": "C 300", "width": 300, "depth": 300}));
+        run(&mut s, "type", json!({"category": "structuralcolumn", "name": "C 300", "width": 250, "depth": 600}));
+        run(&mut s, "column", json!({"at": [0, 0], "type": "C 300"}));
+        run(&mut s, "structural_column", json!({"at": [3000, 0], "type": "C 300"}));
+        let f = export(&s.model);
+        dangling(&f);
+        let kinds = of_kind(&f, "IFCCOLUMNTYPE");
+        assert_eq!(kinds.len(), 2, "two sections, two types");
+        let mut sections: Vec<(String, String)> = kinds
+            .iter()
+            .map(|k| {
+                let (_, profile, _) = section_of(&f, *k);
+                (attributes(&profile)[3].clone(), attributes(&profile)[4].clone())
+            })
+            .collect();
+        sections.sort();
+        assert_eq!(sections, [("250.".to_string(), "600.".to_string()), ("300.".to_string(), "300.".to_string())]);
+        // No two entities of the file share a GlobalId.
+        let mut ids = BTreeSet::new();
+        for l in f.lines().filter(|l| l.contains("=IFCREL") || l.contains("TYPE(") || l.contains("=IFCCOLUMN(")) {
+            let first = attributes(l).swap_remove(0);
+            if first.len() == 24 && first.starts_with('\'') {
+                assert!(ids.insert(first.clone()), "GlobalId {first} is written twice: {l}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_type_object_of_the_sample_house_relates_occurrences_of_its_class_once() {
+        let f = sample_ifc();
+        dangling(&f);
+        let type_classes: BTreeSet<String> = f
+            .lines()
+            .filter_map(|l| {
+                let class = l.split_once('=')?.1.split_once('(')?.0;
+                (class.starts_with("IFC") && !class.starts_with("IFCREL") && class.ends_with("TYPE")).then(|| class.to_string())
+            })
+            .collect();
+        let expected = ["IFCCOVERINGTYPE", "IFCDOORTYPE", "IFCFURNITURETYPE", "IFCROOFTYPE", "IFCSLABTYPE", "IFCWALLTYPE", "IFCWINDOWTYPE"];
+        assert_eq!(type_classes, expected.map(str::to_string).into_iter().collect::<BTreeSet<_>>());
+        let mut listed = BTreeSet::new();
+        for class in &type_classes {
+            let occurrence = class.strip_suffix("TYPE").unwrap();
+            let of_class = of_kind(&f, occurrence);
+            for t in of_kind(&f, class) {
+                for o in occurrences_of(&f, t) {
+                    assert!(of_class.contains(&o), "#{o} is listed by {class} but is not a {occurrence}");
+                    assert!(listed.insert(o), "#{o} is related to more than one type");
+                }
+            }
+            // Attributes IFC4 gives the type: thirteen for a door's or a window's, eleven for a furniture's, else ten.
+            let count = match class.as_str() {
+                "IFCDOORTYPE" | "IFCWINDOWTYPE" => 13,
+                "IFCFURNITURETYPE" => 11,
+                _ => 10,
+            };
+            for line in entities(&f, class) {
+                assert_eq!(attributes(&line).len(), count, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_structural_elements_common_set_holds_both_what_it_carries_and_its_status() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        let col = run(&mut s, "structural_column", json!({"at": [0, 0]}))["id"].as_u64().unwrap();
+        run(&mut s, "modify", json!({"id": col, "params": {"Phase Created": "New Construction"}}));
+        let f = export(&s.model);
+        let ent = of_kind(&f, "IFCCOLUMN")[0];
+        assert_eq!(
+            set_of(&f, ent, "Pset_ColumnCommon"),
+            ["IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$)", "IFCPROPERTYENUMERATEDVALUE('Status',$,(IFCLABEL('NEW')),$)"],
+            "one set, not two of the same name"
+        );
+        assert_eq!(f.matches("'Pset_ColumnCommon'").count(), 1);
+        dangling(&f);
+    }
+
+    #[test]
+    fn a_project_with_no_phasing_gives_no_status() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        house(&mut s);
+        run(&mut s, "structural_column", json!({"at": [0, 0]}));
+        let f = export(&s.model);
+        assert!(!f.contains("'Status'"), "all of it is new work: nothing to say");
+        assert!(!f.contains("'Pset_WallCommon'"));
+        assert_eq!(
+            set_of(&f, of_kind(&f, "IFCCOLUMN")[0], "Pset_ColumnCommon"),
+            ["IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$)"]
+        );
     }
 
     #[test]
@@ -1583,5 +3601,206 @@ mod tests {
         // An option set does.
         run(&mut s, "option", json!({"set": "Facade", "options": ["Brick", "Glass"]}));
         assert_eq!(export(&s.model).matches(&format!("'{PHASING}'")).count(), 1);
+    }
+
+    /// The quantities of set `name` of entity `#ent`, by their names; none when it has no such set.
+    fn quantities_of(f: &str, ent: u64, name: &str) -> BTreeMap<String, f64> {
+        let body = |n: &str| -> String {
+            let line = f.lines().find(|l| l.starts_with(&format!("#{n}="))).unwrap_or_else(|| panic!("no #{n}"));
+            line.split_once('=').unwrap().1.trim_end_matches(';').to_string()
+        };
+        for rel in f.lines().filter(|l| l.contains("=IFCRELDEFINESBYPROPERTIES(")) {
+            let (related, set) = rel.split_once("$,$,$,(").unwrap().1.split_once("),#").unwrap();
+            if !related.split(',').any(|r| r == format!("#{ent}")) {
+                continue;
+            }
+            let set = body(set.trim_end_matches(';').trim_end_matches(')'));
+            if !set.starts_with("IFCELEMENTQUANTITY(") || !set.contains(&format!("'{name}'")) {
+                continue;
+            }
+            let qs = set.rsplit_once(",(").unwrap().1.trim_end_matches(')');
+            return qs
+                .split(',')
+                .map(|q| {
+                    // `IFCQUANTITYAREA('NetSideArea',$,$,12.5,$)`
+                    let q = body(q.trim_start_matches('#'));
+                    let fields: Vec<&str> = q.split_once('(').unwrap().1.split(',').collect();
+                    (fields[0].trim_matches('\'').to_string(), fields[3].parse().unwrap())
+                })
+                .collect();
+        }
+        BTreeMap::new()
+    }
+
+    #[test]
+    fn walls_slabs_doors_and_windows_carry_their_base_quantities() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        let door = run(&mut s, "door", json!({"at": [2000, 0]}))["id"].as_u64().unwrap();
+        let window = run(&mut s, "window", json!({"at": [4000, 0]}))["id"].as_u64().unwrap();
+        run(
+            &mut s,
+            "floor",
+            json!({"boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "openings": [[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]]}),
+        );
+        let f = export(&s.model);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
+        let (m, wall) = (&s.model, walls[0]);
+        let Some(Element::Wall(wl)) = m.elements.get(wall) else { panic!("no wall") };
+        let (height, thick) = (m.top_z(wl) - m.base_z(wl), m.thickness(wl));
+        let size = |id: u64| m.opening_type(m.elements.get(id).unwrap()).unwrap();
+        let (d, wn) = (size(door), size(window));
+        let sill = match m.elements.get(window) {
+            Some(Element::Window(o)) => o.sill,
+            _ => panic!("no window"),
+        };
+        let q = quantities_of(&f, of_kind(&f, "IFCWALL")[0], "Qto_WallBaseQuantities");
+        let gross = 8000.0 * height / 1e6;
+        let cut = (d.width * d.height + wn.width * wn.height.min(height - sill)) / 1e6;
+        assert!(near(q["Length"], 8000.0) && near(q["Width"], thick) && near(q["Height"], height), "{q:?}");
+        assert!(near(q["GrossSideArea"], gross), "{q:?}");
+        assert!(near(q["NetSideArea"], gross - cut), "less the door and the window: {q:?}");
+        assert!(near(q["NetVolume"], (gross - cut) * thick / 1e3), "{q:?}");
+        // A wall with nothing in it: net is gross.
+        let q = quantities_of(&f, of_kind(&f, "IFCWALL")[1], "Qto_WallBaseQuantities");
+        assert!(near(q["NetSideArea"], q["GrossSideArea"]), "{q:?}");
+        let q = quantities_of(&f, of_kind(&f, "IFCDOOR")[0], "Qto_DoorBaseQuantities");
+        assert!(near(q["Width"], d.width) && near(q["Height"], d.height) && near(q["Area"], d.width * d.height / 1e6), "{q:?}");
+        assert!(near(q["Perimeter"], 2.0 * (d.width + d.height)), "{q:?}");
+        let q = quantities_of(&f, of_kind(&f, "IFCWINDOW")[0], "Qto_WindowBaseQuantities");
+        assert!(near(q["Area"], wn.width * wn.height / 1e6), "{q:?}");
+        let slab = *of_kind(&f, "IFCSLAB").last().unwrap();
+        let q = quantities_of(&f, slab, "Qto_SlabBaseQuantities");
+        assert!(near(q["GrossArea"], 48.0) && near(q["NetArea"], 47.0) && near(q["Perimeter"], 28000.0), "{q:?}");
+        assert!(near(q["NetVolume"], 47.0 * q["Width"] / 1e3), "{q:?}");
+        dangling(&f);
+    }
+
+    #[test]
+    fn an_attached_wall_of_no_known_thickness_has_no_side_areas() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        let roof = run(&mut s, "roof", json!({"boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "slope": 30, "overhang": 0}));
+        run(&mut s, "modify", json!({"id": walls[0], "attach_top": roof["id"]}));
+        // A wall whose type the project doesn't have, as a file can hold: its thickness is 0, and its side is no volume over it.
+        let mut m = (*s.model).clone();
+        let Some(Element::Wall(wl)) = m.elements.get_mut(walls[0]) else { panic!("no wall") };
+        wl.type_name = "No Such Type".into();
+        let wl = wl.clone();
+        assert_eq!(m.thickness(&wl), 0.0);
+        let q = wall_quantities(&m, walls[0], &wl, &[]);
+        assert!(q.iter().all(|(_, _, v)| v.is_finite()), "{q:?}");
+        let names: Vec<&str> = q.iter().map(|(n, _, _)| *n).collect();
+        assert!(!names.contains(&"GrossSideArea") && !names.contains(&"NetSideArea"), "{names:?}");
+        assert!(names.contains(&"GrossVolume") && names.contains(&"NetVolume"), "{names:?}");
+    }
+
+    #[test]
+    fn a_roof_whose_faces_fail_has_no_area_quantities() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        house(&mut s);
+        let roof = run(&mut s, "roof", json!({"boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "slope": 30, "overhang": 0}));
+        let id = roof["id"].as_u64().unwrap();
+        // A gable edge the footprint doesn't have, as a file can hold: its faces can't be found, so no area is known.
+        let mut m = (*s.model).clone();
+        let Some(Element::Roof(r)) = m.elements.get_mut(id) else { panic!("no roof") };
+        r.gables = vec![99];
+        let r = r.clone();
+        assert!(m.roof_faces(&r).is_err());
+        let f = export(&m);
+        let ent = of_kind(&f, "IFCROOF")[0];
+        assert_eq!(quantities_of(&f, ent, "Qto_RoofBaseQuantities"), BTreeMap::new(), "no zeros written as if measured");
+        // The same roof as drawn has them.
+        let f = export(&s.model);
+        let q = quantities_of(&f, of_kind(&f, "IFCROOF")[0], "Qto_RoofBaseQuantities");
+        assert!(q["GrossArea"] > q["ProjectedArea"] && q["ProjectedArea"] > 0.0, "{q:?}");
+    }
+
+    /// Every closed shell in `f` is closed: each edge of its faces, from one point to the next round a bound, is run once
+    /// each way, so the shell has no gap and its faces turn one way.
+    fn closed(f: &str) {
+        let bodies: BTreeMap<u64, &str> = f
+            .lines()
+            .filter(|l| l.starts_with('#'))
+            .filter_map(|l| {
+                let (head, body) = l.split_once('=')?;
+                Some((head[1..].parse().ok()?, body.trim_end_matches(';')))
+            })
+            .collect();
+        let list = |body: &str| -> Vec<u64> {
+            let inner = body.split_once("((").map_or("", |(_, r)| r.split("))").next().unwrap_or(""));
+            inner.split(',').filter_map(|r| r.trim().trim_start_matches('#').parse().ok()).collect()
+        };
+        let shells: Vec<&str> = bodies.values().copied().filter(|b| b.starts_with("IFCCLOSEDSHELL(")).collect();
+        assert!(!shells.is_empty(), "no closed shell");
+        for shell in shells {
+            let mut edges: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+            for face in list(shell) {
+                for bound in list(bodies[&face]) {
+                    let b = bodies[&bound];
+                    assert!(b.ends_with(",.T.)"), "{b}");
+                    let lp: u64 = b.split_once("(#").unwrap().1.split(',').next().unwrap().parse().unwrap();
+                    let pts = list(bodies[&lp]);
+                    for (a, z) in pts.iter().zip(pts.iter().cycle().skip(1)) {
+                        *edges.entry((*a, *z)).or_default() += 1;
+                    }
+                }
+            }
+            for (&(a, z), &n) in &edges {
+                assert_eq!(n, 1, "edge #{a} to #{z} run {n} times");
+                assert!(edges.contains_key(&(z, a)), "edge #{a} to #{z} has no face the other side: {shell}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shaped_slab_is_one_closed_brep_and_sloped_and_shaped_slabs_give_their_volumes() {
+        use crate::graphics::testing::run;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
+        let boundary = json!([[0, 0], [8000, 0], [8000, 6000], [0, 6000]]);
+        let mut s = Session::new();
+        let f = run(&mut s, "floor", json!({"boundary": boundary, "openings": [[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]]}))
+            ["id"]
+            .as_u64()
+            .unwrap();
+        let shape = json!({"id": f, "points": [{"at": [5000, 3000], "z": -30}], "lines": [{"a": [5000, 3000], "b": [8000, 6000]}]});
+        run(&mut s, "edit_shape", shape);
+        let text = export(&s.model);
+        // One solid: its top's planes, the same planes under them, and its sides round its outline and its opening.
+        assert_eq!(of_kind(&text, "IFCFACETEDBREP").len(), 1, "one solid for the slab");
+        closed(&text);
+        dangling(&text);
+        let q = quantities_of(&text, *of_kind(&text, "IFCSLAB").last().unwrap(), "Qto_SlabBaseQuantities");
+        let depth = q["Width"];
+        assert!(depth > 0.0 && near(q["NetVolume"], 47.0 * depth / 1e3) && near(q["GrossVolume"], 48.0 * depth / 1e3), "{q:?}");
+        // A sloped slab: its plan area through its depth plumb.
+        let mut s = Session::new();
+        run(&mut s, "floor", json!({"boundary": boundary, "slope": 10, "arrow": [[0, 0], [8000, 0]]}));
+        let text = export(&s.model);
+        let q = quantities_of(&text, *of_kind(&text, "IFCSLAB").last().unwrap(), "Qto_SlabBaseQuantities");
+        let plumb = q["Width"];
+        assert!(near(q["NetVolume"], 48.0 * plumb / 1e3) && near(q["GrossVolume"], 48.0 * plumb / 1e3), "{q:?}");
+    }
+
+    #[test]
+    fn a_shaped_slab_over_a_variable_layer_has_a_level_underside_in_ifc() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        let layers = json!([{"function": "finish", "thickness": 10}, {"function": "substrate", "thickness": 60, "variable": true}, {"thickness": 200}]);
+        run(&mut s, "type", json!({"category": "floor", "name": "Terrace", "layers": layers}));
+        let boundary = json!([[0, 0], [8000, 0], [8000, 6000], [0, 6000]]);
+        let f = run(&mut s, "floor", json!({"boundary": boundary, "type": "Terrace"}))["id"].as_u64().unwrap();
+        run(&mut s, "edit_shape", json!({"id": f, "points": [{"at": [4000, 3000], "z": -30}]}));
+        let text = export(&s.model);
+        closed(&text);
+        // 48 m² of 270 mm less the pyramid the drain takes out of its top: 48 m² by 30 mm over 3.
+        let q = quantities_of(&text, *of_kind(&text, "IFCSLAB").last().unwrap(), "Qto_SlabBaseQuantities");
+        let want = 48.0 * 0.270 - 48.0 * 0.030 / 3.0;
+        assert!((q["NetVolume"] - want).abs() < 1e-6 && (q["GrossVolume"] - want).abs() < 1e-6, "{q:?}");
+        // Every corner of its underside is at -270 mm.
+        assert!(text.contains("IFCCARTESIANPOINT((0.,0.,-270.))") && !text.contains("IFCCARTESIANPOINT((4000.,3000.,-300.))"));
     }
 }

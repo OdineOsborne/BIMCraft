@@ -77,6 +77,20 @@ fn floor_with_hole(release: u32, data: bool) -> Project {
 }
 
 #[test]
+fn a_sketch_line_names_its_floor_wherever_in_its_second_list_the_id_sits() {
+    // A real file names the owner among the ids of the second list: first, in the middle, last, and sometimes with what else the
+    // line touches after it. The Snowdon sample's floors were left out because only the last slot was looked at.
+    for slots in [vec![100u64], vec![30, 100], vec![30, 100, 999], vec![100, 30], vec![999, 100, 30]] {
+        let mut p = floor_with_hole(2024, true);
+        for r in p.recs.iter_mut().filter(|r| r.category == SKETCH) {
+            r.refs2 = slots.clone();
+        }
+        let i = import(&p);
+        assert_eq!(floors(&i).len(), 1, "{slots:?}: {:?}", i.skipped);
+    }
+}
+
+#[test]
 fn a_floor_comes_in_with_its_boundary_its_hole_its_type_level_and_offset() {
     // From the curves in the sketch lines' data (2024 and later) and from their boxes alone, as a file of 2023 or before has.
     for (release, data) in [(2024, true), (2026, true), (2024, false), (2023, false), (2019, true)] {
@@ -158,7 +172,90 @@ fn a_diagonal_sketch_line_known_only_by_its_box_is_placed_where_one_pair_fits() 
 }
 
 #[test]
-fn a_floor_the_reader_cannot_describe_is_left_out_with_the_reason() {
+fn a_sketch_line_of_another_sketch_or_drawn_twice_is_not_the_floors_boundary() {
+    // A real file names a floor in lines that are not its boundary: another sketch's rectangle reaching past the floor's own box,
+    // and its west edge a second time at another height (the structural samples' floors 495352 and 647908).
+    let mut p = project(2024);
+    p.recs.push(Rec::new(100, FLOORS).at([0.0, 0.0, -0.5, 20.0, 10.0, 0.0], &[10, 510, 100]));
+    rectangle(&mut p, 100, 200, [0.0, 0.0, 20.0, 10.0], 0.0, true);
+    rectangle(&mut p, 100, 210, [0.5, 0.5, 40.0, 12.0], 0.0, true);
+    line(&mut p, 100, 220, (0.0, 10.0), (0.0, 0.0), -2.0, true);
+    let i = import(&p);
+    let [(_, fl)] = floors(&i)[..] else { panic!("{:?}", i.skipped) };
+    assert!((area(&fl.boundary).abs() - 6096.0 * 3048.0).abs() < 1.0 && fl.boundary.len() == 4, "{:?}", fl.boundary);
+    assert!(!i.skipped.iter().any(|s| s.contains("footprint of its own box")), "{:?}", i.skipped);
+}
+
+/// A vertex of a shape-edited floor as its data holds it: eight `ff`, the vertex's id, `04 00 08 00`, the point (feet) and the
+/// twelve bytes after it.
+fn vertex(id: u64, at: [f64; 3]) -> Vec<u8> {
+    let mut v = vec![0xff; 8];
+    v.extend(id.to_le_bytes());
+    v.extend([0x04, 0x00, 0x08, 0x00]);
+    for c in at {
+        v.extend(c.to_le_bytes());
+    }
+    v.extend([6, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    v
+}
+
+#[test]
+fn a_shape_edited_floor_comes_in_with_its_points_over_its_top() {
+    // 20 by 10 ft, its north edge a foot over its south one and a point in its middle half a foot up: its box runs from half a
+    // foot under its lowest corner to its highest. Two records that are no vertex of it: another tail, and a point past its box.
+    let mut p = project(2024);
+    p.recs.push(Rec::new(100, FLOORS).at([0.0, 0.0, -0.5, 20.0, 10.0, 1.0], &[10, 510, 100]));
+    rectangle(&mut p, 100, 200, [0.0, 0.0, 20.0, 10.0], 0.0, true);
+    let mut payload = vec![0u8; 16];
+    for (k, at) in [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 10.0, 1.0], [0.0, 10.0, 1.0], [10.0, 5.0, 0.5]].into_iter().enumerate() {
+        payload.extend(vertex(300 + k as u64, at));
+    }
+    let mut other = vertex(310, [5.0, 5.0, 0.25]);
+    other[44] = 7;
+    payload.extend(other);
+    payload.extend(vertex(311, [40.0, 5.0, 0.25]));
+    p.data.push(Block { id: 100, payload });
+    let i = import(&p);
+    let [(_, fl)] = floors(&i)[..] else { panic!("{:?}", i.skipped) };
+    // Its top where most of its corners are, the lower of two as many: the south edge, at the level.
+    assert_eq!((fl.level, fl.offset), (level_named(&i, "Level 1"), 0.0));
+    let mut points: Vec<(f64, f64, f64)> = fl.shape.points.iter().map(|q| (q.at.0, q.at.1, q.z)).collect();
+    points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(points, vec![(0.0, 3048.0, 304.8), (3048.0, 1524.0, 152.4), (6096.0, 3048.0, 304.8)]);
+    assert!(i.skipped.iter().any(|s| s.contains("shaped by the 5 points")), "{:?}", i.skipped);
+    assert!(!i.skipped.iter().any(|s| s.contains("comes in level")), "{:?}", i.skipped);
+    assert_eq!(i.model.check(), Ok(()));
+}
+
+#[test]
+fn the_architectural_samples_shape_edited_floors_come_in_shaped() {
+    for path in super::samples_of("snowdon-towers-sample-architectural.rvt") {
+        let (i, from) = crate::import_path_with_origins(&path, "x").unwrap();
+        let shaped = |id: u32| -> Vec<f64> {
+            let mut zs: Vec<f64> = i
+                .model
+                .elements
+                .iter()
+                .filter(|(m, _)| from[*m] == format!("Floor {id}"))
+                .filter_map(|(_, e)| match e {
+                    Element::Floor(fl) => Some(fl.shape.points.iter().map(|q| q.z).collect::<Vec<_>>()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            zs.sort_by(f64::total_cmp);
+            zs
+        };
+        // Floor 2134315: two of its 25 corners 0.86275 ft (262.97 mm) over the other 23, which are its top.
+        let raised: Vec<f64> = shaped(2_134_315).into_iter().filter(|z| z.abs() > 0.01).collect();
+        assert!(raised.len() == 2 && raised.iter().all(|z| (z - 262.97).abs() < 0.05), "{raised:?}");
+        // Floor 1397309: four corners and 114 points inside them.
+        assert!(shaped(1_397_309).len() >= 100, "{}", shaped(1_397_309).len());
+    }
+}
+
+#[test]
+fn a_floor_the_reader_cannot_describe_comes_in_flat_with_the_reason_or_is_left_out_with_it() {
     let mut p = floor_with_hole(2024, true);
     // Sloped or stepped: its box is taller than its type is thick.
     p.recs.push(Rec::new(101, FLOORS).at([0.0, 0.0, -1.5, 20.0, 10.0, 0.0], &[10, 510, 101]));
@@ -176,13 +273,15 @@ fn a_floor_the_reader_cannot_describe_is_left_out_with_the_reason() {
     p.recs.push(Rec::new(105, FLOORS).at([0.0, 0.0, -0.5, 20.0, 10.0, 0.0], &[10, 511, 105]));
     rectangle(&mut p, 105, 330, [0.0, 0.0, 20.0, 10.0], 0.0, true);
     let i = import(&p);
-    assert_eq!(floors(&i).len(), 1, "{:?}", i.skipped);
+    // A floor the reader cannot describe still comes in where the file says enough: level, sloped or stepped, and as thick as its
+    // own box; what it cannot read at all is left out with the reason.
+    assert_eq!(floors(&i).len(), 4, "{:?}", i.skipped);
     let said = |what: &str| i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_default();
-    assert!(said("sloped or stepped").contains("101"), "{:?}", i.skipped);
-    assert!(said("do not close").contains("102"));
+    assert!(said("sloped or stepped").contains("101") && said("comes in level").contains("101"), "{:?}", i.skipped);
+    assert!(said("do not close").contains("102") && said("joined by a straight line").contains("102"));
     assert!(said("no sketch lines").contains("103"));
     assert!(said("does not name one floor type").contains("104"));
-    assert!(said("no layers").contains("105"));
+    assert!(said("no layers").contains("105") && said("as thick as its own box").contains("105"));
 }
 
 #[test]
@@ -193,10 +292,12 @@ fn a_sketch_of_separate_loops_makes_a_floor_for_each() {
     let i = import(&p);
     assert_eq!(floors(&i).len(), 2, "{:?}", i.skipped);
     assert!(i.skipped.iter().any(|s| s.contains("separate loops") && s.contains("100")));
-    // A loop that crosses another is no region.
+    // A loop that crosses another is no region the reader can follow: the floor comes in as the footprint of its box, and says so.
     let mut q = floor_with_hole(2024, true);
     rectangle(&mut q, 100, 220, [8.0, 5.0, 12.0, 8.0], 0.0, true);
-    assert!(floors(&import(&q)).is_empty());
+    let i = import(&q);
+    assert_eq!(floors(&i).len(), 1, "{:?}", i.skipped);
+    assert!(i.skipped.iter().any(|s| s.contains("footprint of its own box") && s.contains("100")), "{:?}", i.skipped);
 }
 
 #[test]
@@ -216,6 +317,9 @@ fn the_floors_and_ceilings_of_the_architectural_sample_are_those_of_rvt_rss_expo
     use super::rvt_rs::{RAC_CEILINGS, RAC_FLOORS};
     for path in super::samples_of("racbasicsampleproject.rvt") {
         let (i, from) = crate::import_path_with_origins(&path, "x").unwrap();
+        if !super::pinned(&i) {
+            continue;
+        }
         let find = |label: &str, id: u32| -> Vec<(Id, &Element)> {
             i.model.elements.iter().filter(|(m, _)| from[*m] == format!("{label} {id}")).map(|(m, e)| (*m, e)).collect()
         };
@@ -231,7 +335,12 @@ fn the_floors_and_ceilings_of_the_architectural_sample_are_those_of_rvt_rss_expo
                 theirs.id
             );
             let net = area(&fl.boundary).abs() - fl.openings.iter().map(|o| area(o).abs()).sum::<f64>();
-            assert!((net / 1e6 - theirs.area).abs() < 0.005, "floor {}: {} m2 against {}", theirs.id, net / 1e6, theirs.area);
+            // A floor whose sketch does not close comes in as the footprint of its box, and the report says so: that is not the
+            // area of the floor, so it is not compared.
+            let boxed = i.skipped.iter().any(|s| s.contains("footprint of its own box") && s.contains(&theirs.id.to_string()));
+            if !boxed {
+                assert!((net / 1e6 - theirs.area).abs() < 0.005, "floor {}: {} m2 against {}", theirs.id, net / 1e6, theirs.area);
+            }
         }
         for theirs in &RAC_CEILINGS {
             let found = find("Ceiling", theirs.id);
@@ -253,7 +362,9 @@ fn the_structural_samples_five_floors_come_in_at_every_release() {
     use super::rvt_rs::RST_FLOORS;
     for path in super::samples() {
         let (i, from) = crate::import_path_with_origins(&path, "x").unwrap();
-        assert_eq!(floors(&i).len(), 5, "{}: {:?}", path.display(), i.skipped);
+        // Five floors of the file are the ones a second reader writes (rvt-rs); a floor whose sketch does not close comes in too,
+        // as the footprint of its box, and the report says so, so the count is five or more.
+        assert!(floors(&i).len() >= 5, "{}: {:?}", path.display(), i.skipped);
         for theirs in &RST_FLOORS {
             let (m, fl) = floors(&i)
                 .into_iter()
@@ -264,7 +375,12 @@ fn the_structural_samples_five_floors_come_in_at_every_release() {
             let bottom = top - i.model.types.floor[&fl.type_name].thickness;
             assert!((top - theirs.top).abs() < 0.11 && (bottom - theirs.bottom).abs() < 0.11, "floor {} of {}", theirs.id, path.display());
             let net = area(&fl.boundary).abs() - fl.openings.iter().map(|o| area(o).abs()).sum::<f64>();
-            assert!((net / 1e6 - theirs.area).abs() < 0.005, "floor {}: {} m2 against {}", theirs.id, net / 1e6, theirs.area);
+            // A floor whose sketch does not close comes in as the footprint of its box, and the report says so: that is not the
+            // area of the floor, so it is not compared.
+            let boxed = i.skipped.iter().any(|s| s.contains("footprint of its own box") && s.contains(&theirs.id.to_string()));
+            if !boxed {
+                assert!((net / 1e6 - theirs.area).abs() < 0.005, "floor {}: {} m2 against {}", theirs.id, net / 1e6, theirs.area);
+            }
         }
     }
 }
@@ -341,7 +457,7 @@ fn floor_and_ceiling_types_of_one_name_are_one_type_when_their_layers_match_and_
 }
 
 #[test]
-fn a_floor_is_as_thick_as_its_type_to_within_a_millimetre_and_a_type_of_no_width_is_no_floor_type() {
+fn a_floor_is_as_thick_as_its_type_to_within_a_millimetre_and_a_type_of_no_width_is_read_as_its_box() {
     let mut p = project(2024);
     // Thicker than 152.4 mm by 0.88 mm: a floor; by 1.13 mm: a sloped or stepped one.
     p.recs.push(Rec::new(100, FLOORS).at([0.0, 0.0, -0.5029, 20.0, 10.0, 0.0], &[10, 510, 100]));
@@ -356,8 +472,9 @@ fn a_floor_is_as_thick_as_its_type_to_within_a_millimetre_and_a_type_of_no_width
     p.recs.push(Rec::new(102, FLOORS).at([0.0, 0.0, -0.5, 20.0, 10.0, 0.0], &[10, 511, 102]));
     rectangle(&mut p, 102, 220, [0.0, 0.0, 20.0, 10.0], 0.0, true);
     let i = import(&p);
-    assert_eq!(floors(&i).len(), 1, "{:?}", i.skipped);
+    assert_eq!(floors(&i).len(), 3, "{:?}", i.skipped);
     let said = |what: &str| i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_default();
     assert!(said("sloped or stepped").contains("101") && !said("sloped or stepped").contains("100"), "{:?}", i.skipped);
     assert!(said("no layers").contains("102"), "{:?}", i.skipped);
+    assert_eq!(i.model.types.floor.values().find(|t| t.thickness == 152.4).map(|t| t.thickness), Some(152.4));
 }

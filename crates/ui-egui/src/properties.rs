@@ -4,25 +4,32 @@
 //! command (`modify`, or `type` from the Type Properties dialog), so it is checked, rolled back
 //! when it breaks a rule, and undone like any other change.
 
-use std::collections::{BTreeMap, BTreeSet};
+use crate::popup::Modal;
+
+use bimcraft_i18n::msg;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use bimcraft_core::element_json;
-use bimcraft_core::family::{Kind as Holds, Val};
-use bimcraft_core::model::{Element, Function, Guid, Id, Layer, Location, Model, PARAMETER_CATEGORIES, ParameterKind, Pattern};
+use bimcraft_core::element_json_with;
+use bimcraft_core::family::{Kind as Holds, Under, Val};
+use bimcraft_core::library::Kind as LibKind;
+use bimcraft_core::model::{Element, Function, Guid, Id, Layer, Location, Model, ParameterKind, Pattern, ProjectParameter, Scope};
+use bimcraft_core::rooms::Rooms;
 use bimcraft_core::schedule::{self, Field, Filter, Op, Sort};
 use bimcraft_core::snap::Kind as Snap;
 use bimcraft_core::texture::{Kind as TextureKind, Texture};
 use bimcraft_core::units::Units;
 use egui::{
-    Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
-    ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, TextureHandle, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Popup, Rect, RichText,
+    ScrollArea, Sense, Shape, Slider, Stroke, StrokeKind, TextEdit, TextureHandle, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
 use crate::icons::{self, Icon};
 use crate::lang::{self, t, tf};
 use crate::style::pal;
+use crate::typeprops::{self, Head, Naming};
 use crate::{BimApp, Sheet, Status, Tool};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -46,6 +53,8 @@ enum Kind {
     ViewName,
     /// A level, or none for a wall of unconnected height.
     TopLevel,
+    /// A room's Upper Limit: a level, or Not Bounded (none), its Limit Offset then its height over its own level.
+    UpperLimit,
     /// A wall's height: typed when its top is unconnected, else what its levels make it.
     Height,
     /// A length, or nothing, which its hint names when blank (a plan's top at the level above, a
@@ -68,10 +77,18 @@ enum Kind {
     Values,
     /// A wall's location line: a drop-down.
     LocationLine,
+    /// A detail line's line style: a drop-down of the project's.
+    LineStyle,
+    /// A filled region's boundary: a line style, or invisible lines (none).
+    RegionLines,
     /// Which line of a run's section its heights are: a drop-down.
     Justification,
-    /// Whether a roof or a floor is there (a wall's attachment); read only.
+    /// Whether a roof or a floor is there (a wall's attachment), and a link that selects it; read only.
     Attached,
+    /// An element it points at (a door's host wall): a link that selects it; read only.
+    Link,
+    /// One of these values (as the command names it, and its label): a drop-down, the first when it has none.
+    Choice(&'static [(&'static str, &'static str)]),
 }
 
 use Kind::*;
@@ -91,57 +108,88 @@ fn field_of(e: &Value, key: &str, kind: Kind) -> Value {
     }
 }
 
+/// Whether parameter `key` means anything for the one element `e` (as its JSON has it): a detail line's Center Mark Visible is
+/// for an arc or a circle, its Revision for a cloud; on any other line they would only be switches that do nothing.
+fn relevant(e: &Value, key: &str) -> bool {
+    match (e["shape"].as_str(), key) {
+        (Some(shape), "centre_mark") => matches!(shape, "arc" | "circle"),
+        (Some(_), "revision") => !e["cloud"].is_null(),
+        // A wall's Top Offset is from its top constraint: an unconnected wall stands `height` tall and has none.
+        (_, "top_offset") => !e["top_level"].is_null(),
+        _ => true,
+    }
+}
+
 /// `{key: val}` for `modify`, nested through the dots: modify merges into fields that are objects.
 fn nested(key: &str, val: Value) -> Value {
     key.rsplit('.').fold(val, |v, k| json!({ k: v }))
 }
 
+/// The rows only a work plane-based family's components show, and the one only the others' do: as Revit's, both show their
+/// height over their level as Elevation from Level.
+const WORK_PLANE_ROWS: [&str; 3] = ["Schedule Level", "Work Plane", "Offset from Host"];
+const LEVEL_ROWS: [&str; 1] = ["Level"];
+
+/// Whether row `label` shows for components that are (`based`) or aren't of work plane-based families.
+fn work_plane_row(label: &str, based: bool) -> bool {
+    if based { !LEVEL_ROWS.contains(&label) } else { !WORK_PLANE_ROWS.contains(&label) }
+}
+
 fn rows(category: &str) -> &'static [Row] {
     match category {
         "wall" => &[
-            ("Constraints", "location", "Location Line", LocationLine),
-            ("Constraints", "level", "Base Constraint", Level),
-            ("Constraints", "base_offset", "Base Offset", Length),
-            ("Constraints", "attach_base", "Base is Attached", Attached),
-            ("Constraints", "top_level", "Top Constraint", TopLevel),
-            ("Constraints", "height", "Unconnected Height", Height),
-            ("Constraints", "attach_top", "Top is Attached", Attached),
+            (msg!("Constraints"), "location", msg!("Location Line"), LocationLine),
+            ("Constraints", "level", msg!("Base Constraint"), Level),
+            ("Constraints", "base_offset", msg!("Base Offset"), Length),
+            ("Constraints", "attach_base", msg!("Base is Attached"), Attached),
+            ("Constraints", "top_level", msg!("Top Constraint"), TopLevel),
+            ("Constraints", "top_offset", msg!("Top Offset"), Length),
+            ("Constraints", "height", msg!("Unconnected Height"), Height),
+            ("Constraints", "attach_top", msg!("Top is Attached"), Attached),
+            ("Constraints", "room_bounding", msg!("Room Bounding"), Flag),
             ("Dimensions", "length", "Length", LengthShown),
             ("Dimensions", "radius", "Radius", LengthShown),
-            ("Other", "start", "Start", Point),
-            ("Other", "end", "End", Point),
+            (msg!("Other"), "start", msg!("Start"), Point),
+            ("Other", "end", msg!("End"), Point),
         ],
         "door" => &[
             ("Constraints", "level", "Level", LevelName),
-            ("Identity Data", "mark", "Mark", Text),
-            ("Other", "host", "Host Wall", Shown),
+            (msg!("Identity Data"), "mark", "Mark", Text),
+            ("Other", "host", msg!("Host Wall"), Link),
             ("Other", "offset", "Offset", Length),
-            ("Other", "flip_facing", "Flip Facing", Flag),
-            ("Other", "flip_hand", "Flip Hand", Flag),
+            ("Other", "flip_facing", msg!("Flip Facing"), Flag),
+            ("Other", "flip_hand", msg!("Flip Hand"), Flag),
         ],
         "window" => &[
             ("Constraints", "level", "Level", LevelName),
             ("Constraints", "sill", "Sill Height", Length),
             ("Identity Data", "mark", "Mark", Text),
-            ("Other", "host", "Host Wall", Shown),
+            ("Other", "host", "Host Wall", Link),
             ("Other", "offset", "Offset", Length),
             ("Other", "flip_facing", "Flip Facing", Flag),
         ],
         "room" => &[
             ("Constraints", "level", "Level", Level),
+            ("Constraints", "top_level", msg!("Upper Limit"), UpperLimit),
+            ("Constraints", "limit_offset", msg!("Limit Offset"), Length),
+            ("Constraints", "base_offset", "Base Offset", Length),
             ("Dimensions", "area_m2", "Area", AreaShown),
             ("Dimensions", "perimeter_m", "Perimeter", MetresShown),
+            ("Dimensions", "unbounded_height", msg!("Unbounded Height"), LengthShown),
+            ("Dimensions", "volume_m3", "Volume (m³)", Shown),
             ("Identity Data", "number", "Number", Text),
             ("Identity Data", "name", "Name", Text),
-            ("Other", "point", "Location", Point),
+            ("Other", "point", msg!("Location"), Point),
+            ("Other", "frozen", msg!("Frozen"), Flag),
         ],
         "floor" => &[
             ("Constraints", "level", "Level", Level),
-            ("Constraints", "offset", "Height Offset From Level", Length),
-            ("Dimensions", "slope", "Slope (°)", Number),
+            ("Constraints", "offset", msg!("Height Offset From Level"), Length),
+            ("Dimensions", "slope", msg!("Slope (°)"), Number),
             ("Dimensions", "area_m2", "Area", AreaShown),
             ("Dimensions", "thickness", "Thickness", LengthShown),
             ("Structural", "structural", "Structural", Flag),
+            ("Graphics", "pattern_angle", msg!("Pattern Angle (°)"), Number),
         ],
         "ceiling" => &[
             ("Constraints", "level", "Level", Level),
@@ -161,60 +209,130 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "base_offset", "Base Offset", Length),
             ("Constraints", "top_level", "Top Constraint", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
-            ("Dimensions", "top", "Top Outline", Outline),
+            ("Dimensions", "top", msg!("Top Outline"), Outline),
             ("Dimensions", "area_m2", "Area", AreaShown),
-            ("Dimensions", "volume_m3", "Volume (m³)", Shown),
+            ("Dimensions", "volume_m3", msg!("Volume (m³)"), Shown),
             ("Dimensions", "gross_floor_area_m2", "Gross Floor Area", AreaShown),
             ("Identity Data", "name", "Name", Text),
         ],
-        "level" => &[("Constraints", "elevation", "Elevation", Length), ("Identity Data", "name", "Name", Text)],
+        "level" => &[
+            ("Constraints", "elevation", "Elevation", Length),
+            ("Dimensions", "computation_height", msg!("Computation Height"), Length),
+            ("Identity Data", "name", "Name", Text),
+        ],
+        "propertyline" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Identity Data", "name", "Name", Text),
+            ("Dimensions", "points", msg!("Boundary"), Outline),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+        ],
         "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
-        "dimension" => {
-            &[("Dimensions", "values", "Value", Values), ("Other", "kind", "Kind", Shown), ("Other", "at", "Line Through", Point)]
-        }
+        "dimension" => &[
+            ("Dimensions", "values", "Value", Values),
+            ("Text", "prefix", msg!("Prefix"), Text),
+            ("Text", "suffix", msg!("Suffix"), Text),
+            ("Text", "above", msg!("Above"), Text),
+            ("Text", "below", msg!("Below"), Text),
+            ("Text", "replace", msg!("Replace With Text"), Text),
+            ("Other", "equality", msg!("Equality Display"), Flag),
+            ("Other", "kind", "Kind", Shown),
+            ("Other", "orient", msg!("Orientation"), Shown),
+            ("Other", "at", msg!("Line Through"), Point),
+        ],
         "text" => &[
             ("Text", "text", "Text", Text),
-            ("Graphics", "size", "Text Size (mm)", Number),
-            ("Other", "angle", "Rotation (°)", Number),
+            ("Text", "override_format", msg!("Override Formatting"), Flag),
+            ("Other", "angle", msg!("Rotation (°)"), Number),
             ("Other", "at", "Location", Point),
         ],
-        "spot" => {
-            &[("Dimensions", "elevation", "Elevation", LengthShown), ("Other", "host", "Host", Shown), ("Other", "at", "Location", Point)]
-        }
+        "spot" => &[
+            ("Dimensions", "elevation", "Elevation", LengthShown),
+            ("Other", "host", msg!("Host"), Link),
+            ("Other", "at", "Location", Point),
+        ],
+        "spotcoordinate" => &[
+            ("Graphics", "leader", msg!("Leader"), Flag),
+            ("Graphics", "shoulder", msg!("Has Shoulder"), Flag),
+            ("Dimensions", "north", msg!("North / South"), LengthShown),
+            ("Dimensions", "east", msg!("East / West"), LengthShown),
+            ("Dimensions", "elevation", "Elevation", LengthShown),
+            ("Other", "host", msg!("Host"), Link),
+            ("Other", "at", "Location", Point),
+        ],
+        "line" => &[
+            ("Graphics", "style", "Line Style", LineStyle),
+            ("Dimensions", "length", "Length", LengthShown),
+            ("Graphics", "centre_mark", msg!("Center Mark Visible"), Flag),
+            ("Dimensions", "insulation", msg!("Insulation Width"), LengthIf),
+            ("Dimensions", "cloud", msg!("Arc Length"), LengthIf),
+            ("Identity Data", "revision", msg!("Revision"), Text),
+            ("Other", "shape", "Shape", Shown),
+        ],
+        "region" => &[
+            ("Graphics", "line_style", "Line Style", RegionLines),
+            ("Graphics", "pattern_angle", "Pattern Angle (°)", Number),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+        ],
+        "detailgroup" => &[
+            ("Identity Data", "type", "Group", Shown),
+            ("Other", "angle", "Rotation (°)", Number),
+            ("Other", "mirrored", msg!("Mirrored"), Flag),
+            ("Other", "at", "Origin", Point),
+        ],
+        "repeatingdetail" => &[
+            ("Identity Data", "type", "Group", Shown),
+            ("Dimensions", "spacing", "Spacing", Length),
+            ("Dimensions", "count", "Number", Shown),
+            ("Other", "start", "Start", Point),
+            ("Other", "end", "End", Point),
+        ],
         "schedule" => &[("Identity Data", "name", "View Name", Text), ("Other", "of", "Category", Shown)],
         "view3d" => &[
             ("Identity Data", "name", "View Name", Text),
-            ("Camera", "azimuth", "Azimuth (°)", Number),
-            ("Camera", "elevation", "Elevation (°)", Number),
+            (msg!("Camera"), "azimuth", msg!("Azimuth (°)"), Number),
+            ("Camera", "elevation", msg!("Elevation (°)"), Number),
         ],
-        "tag" => {
-            &[("Graphics", "leader", "Leader Line", Flag), ("Other", "host", "Tagged Element", Shown), ("Other", "offset", "Offset", Point)]
-        }
+        "tag" => &[
+            ("Graphics", "leader", msg!("Leader Line"), Flag),
+            ("Other", "host", msg!("Tagged Element"), Link),
+            ("Other", "offset", "Offset", Point),
+        ],
         "sheet" => &[
-            ("Identity Data", "number", "Sheet Number", Text),
-            ("Identity Data", "name", "Sheet Name", Text),
-            ("Other", "size", "Size", Text),
+            ("Identity Data", "number", msg!("Sheet Number"), Text),
+            ("Identity Data", "name", msg!("Sheet Name"), Text),
+            ("Other", "size", msg!("Size"), Text),
         ],
         "viewport" => &[
             ("Identity Data", "title", "View Name", Shown),
-            ("Graphics", "scale", "View Scale (1 : n)", Number),
+            ("Graphics", "scale", msg!("View Scale (1 : n)"), Number),
+            ("Graphics", "follow_scale", msg!("Follow View Scale"), Flag),
             ("Other", "at", "Location", PaperPoint),
         ],
+        // As Revit's: a work plane-based family's level is its Schedule Level, its height over it its Elevation from Level
+        // (read only on a plane, which it follows), then what it is on and how far off it; another's, its Level and its
+        // Elevation from Level (`work_plane_row`).
         "component" => &[
             ("Constraints", "level", "Level", Level),
-            ("Constraints", "offset", "Height Offset From Level", Length),
+            ("Constraints", "level", msg!("Schedule Level"), Level),
+            ("Constraints", "offset", msg!("Elevation from Level"), Length),
+            ("Constraints", "work_plane", "Work Plane", Shown),
+            ("Constraints", "offset_from_host", msg!("Offset from Host"), Length),
             ("Other", "at", "Location", Point),
             ("Other", "angle", "Rotation (°)", Number),
         ],
-        "column" => &[
-            ("Constraints", "level", "Base Level", Level),
+        "column" | "structuralcolumn" => &[
+            ("Constraints", "level", msg!("Base Level"), Level),
             ("Constraints", "base_offset", "Base Offset", Length),
-            ("Constraints", "top_level", "Top Level", TopLevel),
+            ("Constraints", "attach_base", "Base is Attached", Attached),
+            ("Constraints", "top_level", msg!("Top Level"), TopLevel),
+            ("Constraints", "top_offset", "Top Offset", Length),
             ("Constraints", "height", "Unconnected Height", Height),
+            ("Constraints", "attach_top", "Top is Attached", Attached),
+            ("Constraints", "room_bounding", msg!("Room Bounding"), Flag),
             ("Other", "at", "Location", Point),
             ("Other", "angle", "Rotation (°)", Number),
         ],
-        "structuralcolumn" | "footing" => &[
+        "footing" => &[
             ("Constraints", "level", "Base Level", Level),
             ("Constraints", "base_offset", "Base Offset", Length),
             ("Constraints", "top_level", "Top Level", TopLevel),
@@ -223,10 +341,10 @@ fn rows(category: &str) -> &'static [Row] {
             ("Other", "angle", "Rotation (°)", Number),
         ],
         run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[
-            ("Constraints", "level", "Reference Level", Level),
-            ("Constraints", "offset", "Start Level Offset", Length),
-            ("Constraints", "end_offset", "End Level Offset", Limit("Same as start")),
-            ("Constraints", "justify", "Z Justification", Justification),
+            ("Constraints", "level", msg!("Reference Level"), Level),
+            ("Constraints", "offset", msg!("Start Level Offset"), Length),
+            ("Constraints", "end_offset", msg!("End Level Offset"), Limit(msg!("Same as start"))),
+            ("Constraints", "justify", msg!("Z Justification"), Justification),
             ("Dimensions", "length", "Length", LengthShown),
             ("Identity Data", "system", "System", Text),
             ("Other", "start", "Start", Point),
@@ -236,11 +354,11 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "level", "Base Level", Level),
             ("Constraints", "top_level", "Top Level", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
-            ("Dimensions", "width", "Actual Run Width", Length),
-            ("Dimensions", "riser", "Maximum Riser Height", Length),
-            ("Dimensions", "tread", "Actual Tread Depth", Length),
-            ("Dimensions", "risers", "Actual Number of Risers", Shown),
-            ("Dimensions", "riser_height", "Actual Riser Height", LengthShown),
+            ("Dimensions", "width", msg!("Actual Run Width"), Length),
+            ("Dimensions", "riser", msg!("Maximum Riser Height"), Length),
+            ("Dimensions", "tread", msg!("Actual Tread Depth"), Length),
+            ("Dimensions", "risers", msg!("Actual Number of Risers"), Shown),
+            ("Dimensions", "riser_height", msg!("Actual Riser Height"), LengthShown),
             ("Other", "start", "Start", Point),
         ],
         "ramp" => &[
@@ -248,38 +366,60 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "top_level", "Top Level", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
             ("Dimensions", "width", "Width", Length),
-            ("Dimensions", "slope", "Max Slope (%)", Number),
+            ("Dimensions", "slope", msg!("Max Slope (%)"), Number),
             ("Dimensions", "length", "Length", LengthShown),
             ("Other", "start", "Start", Point),
         ],
         "railing" => &[
             ("Constraints", "level", "Level", Level),
             ("Constraints", "base_offset", "Base Offset", Length),
-            ("Constraints", "host", "Host", Shown),
-            ("Constraints", "side", "Side", Shown),
+            ("Constraints", "host", "Host", Link),
+            ("Constraints", "side", msg!("Side"), Shown),
             ("Dimensions", "height", "Height", LengthShown),
         ],
         "roof" => &[
             ("Constraints", "level", "Base Level", Level),
             ("Constraints", "offset", "Base Offset", Length),
-            ("Constraints", "extrusion.from", "Extrusion Start", LengthIf),
-            ("Constraints", "extrusion.to", "Extrusion End", LengthIf),
+            ("Constraints", "extrusion.from", msg!("Extrusion Start"), LengthIf),
+            ("Constraints", "extrusion.to", msg!("Extrusion End"), LengthIf),
             ("Dimensions", "slope", "Slope (°)", Number),
-            ("Dimensions", "ridge", "Max Ridge Height", LengthShown),
+            ("Dimensions", "ridge", msg!("Max Ridge Height"), LengthShown),
             ("Dimensions", "area_m2", "Area", AreaShown),
-            ("Other", "gable", "Gable Ends", Flag),
+            ("Other", "gable", msg!("Gable Ends"), Flag),
         ],
         "section" | "elevation" => &[
             ("Identity Data", "name", "View Name", Text),
-            ("Extents", "crop", "Crop View", Crop),
-            ("Extents", "depth", "Far Clip Offset", Limit("No Clip")),
+            (msg!("Extents"), "crop", "Crop View", Crop),
+            ("Extents", "depth", msg!("Far Clip Offset"), Limit(msg!("No Clip"))),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
+        ],
+        "pointcloud" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Constraints", "offset", "Offset", Length),
+            ("Identity Data", "cloud", msg!("Scan"), Shown),
+            ("Identity Data", "source", "File", Shown),
+            ("Identity Data", "points", "Points", Shown),
+            ("Other", "at", msg!("Origin"), Point),
+            ("Other", "angle", "Angle", Number),
+        ],
+        "cadimport" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Identity Data", "cad", msg!("Drawing"), Shown),
+            ("Identity Data", "source", "File", Shown),
+            ("Identity Data", "linked", msg!("Linked File"), Shown),
+            ("Identity Data", "unit", "Units", Shown),
+            ("Identity Data", "entities", msg!("Entities"), Shown),
+            ("Identity Data", "layers", "Layers", Shown),
+            ("Other", "at", msg!("Position"), Point),
+            ("Other", "angle", "Angle", Number),
+            ("Other", "scale", "Scale", Number),
+            ("Graphics", "colors", "Colors", Choice(&[("preserve", "Preserve"), ("invert", "Invert"), ("black", "Black and White")])),
         ],
         "link" => &[
             ("Identity Data", "name", "Name", Text),
             ("Identity Data", "path", "File", Shown),
-            ("Identity Data", "loaded", "Loaded", Shown),
+            ("Identity Data", "loaded", msg!("Loaded"), Shown),
             ("Other", "at", "Origin", Point),
             ("Other", "angle", "Angle", Number),
         ],
@@ -287,16 +427,21 @@ fn rows(category: &str) -> &'static [Row] {
     }
 }
 
+/// A 3D view's rows when it has a camera: the azimuth and elevation mean nothing to a camera (it looks from its eye at its
+/// target), so a viewport on a sheet shows just the view's name.
+const VIEW3D_CAMERA: &[Row] = &[("Identity Data", "name", "View Name", Text)];
+
 /// A floor plan's parameters, read from and written to its level.
 const PLAN: &[Row] = &[
     ("Identity Data", "name", "View Name", Text),
-    ("Extents", "id", "Associated Level", LevelName),
-    ("Extents", "elevation", "Level Elevation", Length),
+    ("Extents", "id", msg!("Associated Level"), LevelName),
+    ("Extents", "elevation", msg!("Level Elevation"), Length),
     ("Extents", "crop", "Crop View", Crop),
-    ("View Range", "view_range.top", "Top", Limit("Level Above")),
-    ("View Range", "view_range.cut", "Cut Plane", Length),
-    ("View Range", "view_range.bottom", "Bottom", Length),
-    ("View Range", "view_range.depth", "View Depth", Length),
+    ("Extents", "section_box", "Section Box", Flag),
+    ("View Range", "view_range.top", "Top", Limit(msg!("Level Above"))),
+    ("View Range", "view_range.cut", msg!("Cut Plane"), Length),
+    ("View Range", "view_range.bottom", msg!("Bottom"), Length),
+    ("View Range", "view_range.depth", msg!("View Depth"), Length),
 ];
 
 /// A plan view's parameters, read from and written to the plan view itself.
@@ -304,6 +449,7 @@ const PLAN_VIEW: &[Row] = &[
     ("Identity Data", "name", "View Name", Text),
     ("Extents", "level", "Associated Level", LevelName),
     ("Extents", "crop", "Crop View", Crop),
+    ("Extents", "section_box", "Section Box", Flag),
     ("View Range", "view_range.top", "Top", Limit("Level Above")),
     ("View Range", "view_range.cut", "Cut Plane", Length),
     ("View Range", "view_range.bottom", "Bottom", Length),
@@ -314,11 +460,72 @@ const PLAN_VIEW: &[Row] = &[
 const PLAN_DEPENDENT: &[Row] = &[
     ("Identity Data", "name", "View Name", Text),
     ("Extents", "level", "Associated Level", LevelName),
-    ("Extents", "parent", "Parent View", ViewName),
+    ("Extents", "parent", msg!("Parent View"), ViewName),
     ("Extents", "crop", "Crop View", Crop),
 ];
 
 /// Type `name` of `category` as the project's JSON holds it: `types` is the project's `Types` as JSON.
+/// How wide and tall a wall type's sample is in the Type Selector's list.
+const LAYERS: egui::Vec2 = vec2(40.0, 16.0);
+
+/// Whether wall type `name` is a curtain wall's: a pattern of panels and mullions, not layers. Read from what the type
+/// writes, a `curtain` pattern, so it needs nothing but that key.
+fn curtain_type(model: &Model, name: &str) -> bool {
+    model.types.wall.get(name).and_then(|t| serde_json::to_value(t).ok()).is_some_and(|v| is_curtain_json(&v))
+}
+
+/// Whether a wall type as JSON holds a curtain wall's pattern.
+fn is_curtain_json(v: &Value) -> bool {
+    !v.get("curtain").is_none_or(Value::is_null)
+}
+
+/// The Type Selector's list of wall types, `names` kept in their order: curtain walls under a heading of their own so they
+/// don't mix with the rest, and only then a heading on the rest.
+fn type_sections(names: &[String], curtain: impl Fn(&str) -> bool) -> Vec<(Option<&'static str>, Vec<String>)> {
+    let (curtains, walls): (Vec<String>, Vec<String>) = names.iter().cloned().partition(|n| curtain(n));
+    if curtains.is_empty() {
+        return vec![(None, walls)];
+    }
+    vec![(Some(msg!("Walls")), walls), (Some(msg!("Curtain Walls")), curtains)]
+}
+
+/// What share of a wall type's thickness each of its layers takes, in its material's colour, from one face to the other. One
+/// band, its colour unknown, for a type with no layers or thickness.
+pub(crate) fn layer_bands(model: &Model, name: &str) -> Vec<(f32, Option<[u8; 3]>)> {
+    let layers = model.types.wall.get(name).map_or(&[][..], |t| t.layers.as_slice());
+    let total: f64 = layers.iter().map(|l| l.thickness).sum();
+    if layers.is_empty() || total.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return vec![(1.0, None)];
+    }
+    layers.iter().map(|l| ((l.thickness / total) as f32, model.materials.get(&l.material).map(|m| m.color))).collect()
+}
+
+/// Wall type `name` as its section shows it, in `rect`: its layers side by side; a curtain wall's panels between mullions.
+fn wall_type_sample(ui: &Ui, rect: Rect, model: &Model, name: &str) {
+    let p = ui.painter();
+    let line = Stroke::new(1.0, pal().muted);
+    if curtain_type(model, name) {
+        p.rect_filled(rect, 0.0, pal().select_fill);
+        for f in [1.0 / 3.0, 2.0 / 3.0] {
+            let x = rect.left() + rect.width() * f;
+            p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], line);
+        }
+    } else {
+        let mut x = rect.left();
+        for (share, colour) in layer_bands(model, name) {
+            let wide = share * rect.width();
+            let fill = colour.map_or(pal().control, |[r, g, b]| egui::Color32::from_rgb(r, g, b));
+            let band = Rect::from_min_size(egui::pos2(x, rect.top()), vec2(wide, rect.height()));
+            p.rect_filled(band, 0.0, fill);
+            if x > rect.left() {
+                p.line_segment([band.left_top(), band.left_bottom()], line);
+            }
+            x += wide;
+        }
+    }
+    p.rect_stroke(rect, 0.0, line, StrokeKind::Inside);
+}
+
 fn type_json<'a>(types: &'a Value, category: &str, name: &str) -> &'a Value {
     let of = match category {
         "structuralcolumn" => &types["structural_column"],
@@ -328,18 +535,20 @@ fn type_json<'a>(types: &'a Value, category: &str, name: &str) -> &'a Value {
     &of[name]
 }
 
-/// A type's parameters, as its Type Properties list them: its field, its label.
-fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
+/// A type's parameters, as its Type Properties list them: the group it's under, its field, its label.
+fn type_rows(category: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+    const C: &str = msg!("Construction");
+    const D: &str = msg!("Dimensions");
     match category {
-        "wall" => &[("thickness", "Width")],
-        "floor" => &[("thickness", "Default Thickness")],
-        "door" => &[("width", "Width"), ("height", "Height")],
-        "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
-        "column" | "structuralcolumn" | "footing" => &[("width", "Width"), ("depth", "Depth")],
-        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[("width", "Width"), ("depth", "Depth")],
-        "roof" => &[("thickness", "Thickness")],
-        "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
-        "railing" => &[("height", "Height"), ("spacing", "Baluster Spacing")],
+        "wall" => &[(C, "thickness", msg!("Width"))],
+        "floor" => &[(C, "thickness", msg!("Default Thickness"))],
+        "door" => &[(D, "width", msg!("Width")), (D, "height", msg!("Height"))],
+        "window" => &[(D, "width", msg!("Width")), (D, "height", msg!("Height")), (C, "sill", msg!("Default Sill Height"))],
+        "column" | "structuralcolumn" | "footing" => &[(D, "width", msg!("Width")), (D, "depth", msg!("Depth"))],
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[(D, "width", msg!("Width")), (D, "depth", msg!("Depth"))],
+        "roof" => &[(C, "thickness", msg!("Thickness"))],
+        "ceiling" => &[(C, "thickness", msg!("Thickness")), (C, "grid", msg!("Tile Size"))],
+        "railing" => &[(C, "height", msg!("Height")), (C, "spacing", msg!("Baluster Spacing"))],
         _ => &[],
     }
 }
@@ -365,9 +574,10 @@ fn icon(category: &str) -> Icon {
         "footing" => Icon::Footing,
         "stripfooting" => Icon::WallFooting,
         "pipe" => Icon::Pipe,
+        "duct" => Icon::CableTray,
         "conduit" => Icon::Conduit,
         "cabletray" => Icon::CableTray,
-        "wire" => Icon::Wire,
+        "wire" | "circuit" => Icon::Wire,
         "downconductor" => Icon::DownConductor,
         "groundconductor" => Icon::GroundConductor,
         "cable" => Icon::Cabling,
@@ -381,8 +591,13 @@ fn icon(category: &str) -> Icon {
         "ramp" => Icon::Ramp,
         "railing" => Icon::Railing,
         "text" => Icon::Text,
+        "line" => Icon::Line,
+        "region" => Icon::FilledRegion,
         "spot" => Icon::Spot,
+        "spotcoordinate" => Icon::SpotCoordinate,
         "view3d" => Icon::View3D,
+        "pointcloud" => Icon::PointCloud,
+        "cadimport" => Icon::ImportCad,
         _ => Icon::Plan,
     }
 }
@@ -404,6 +619,40 @@ pub(crate) fn number(s: &str) -> Option<f64> {
 }
 
 /// A value of `kind` as the palette shows it, lengths and areas in `units`.
+/// An area parameter's value, m² in the model, in the project's units.
+fn area_shown(v: &Value, units: Units) -> String {
+    v.as_f64().map_or_else(String::new, |x| format!("{:.2}", units.area(x * 1e6).0))
+}
+
+/// An area typed in the project's units, as the m² it is in the model.
+fn area_parsed(s: &str, units: Units) -> Result<Value, String> {
+    let per_m2 = units.area(1e6).0;
+    number(s).map(|x| json!(x / per_m2)).ok_or_else(|| tf("`{}` is not a number", &[s]))
+}
+
+/// A project parameter's value of `kind` as a field shows it: lengths and areas in `units`. Not for yes or no, a checkbox.
+pub(crate) fn parameter_shown(kind: ParameterKind, v: &Value, units: Units) -> String {
+    match kind {
+        ParameterKind::Area => area_shown(v, units),
+        ParameterKind::Length => shown(Length, v, units),
+        ParameterKind::Number | ParameterKind::Integer | ParameterKind::Volume | ParameterKind::Angle => shown(Number, v, units),
+        ParameterKind::Text | ParameterKind::YesNo => shown(Text, v, units),
+    }
+}
+
+/// What was typed for a project parameter of `kind`, as the value commands take; blank, none.
+pub(crate) fn parameter_parsed(kind: ParameterKind, typed: &str, units: Units) -> Result<Value, String> {
+    if typed.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    match kind {
+        ParameterKind::Area => area_parsed(typed, units),
+        ParameterKind::Length => parse(Length, typed, units),
+        ParameterKind::Number | ParameterKind::Integer | ParameterKind::Volume | ParameterKind::Angle => parse(Number, typed, units),
+        ParameterKind::Text | ParameterKind::YesNo => parse(Text, typed, units),
+    }
+}
+
 fn shown(kind: Kind, v: &Value, units: Units) -> String {
     let each = |f: &dyn Fn(f64) -> String| match v {
         Value::Array(a) => a.iter().filter_map(Value::as_f64).map(f).collect::<Vec<_>>().join(", "),
@@ -453,7 +702,7 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
 /// A drop-down of `options`, named by `label`; the one picked, if it changed.
 pub(crate) fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[String]) -> Option<String> {
     let mut picked = None;
-    let c = ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
+    let c = ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).truncate().show_ui(ui, |ui| {
         for o in options {
             if ui.selectable_label(o == current, o).clicked() && o != current {
                 picked = Some(o.clone());
@@ -462,6 +711,36 @@ pub(crate) fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, o
     });
     c.response.labelled_by(label);
     picked
+}
+
+/// [`combo`] of line styles: each row with a sample of the line its style draws (`linestyles::style_row`); `options` that
+/// aren't a style (Invisible) have none.
+fn style_combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[String], model: &Model) -> Option<String> {
+    let mut picked = None;
+    let c = ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).truncate().show_ui(ui, |ui| {
+        for o in options {
+            if crate::linestyles::style_row(ui, model, model.line_styles.get(o), o == current, o) && o != current {
+                picked = Some(o.clone());
+            }
+        }
+    });
+    c.response.labelled_by(label);
+    picked
+}
+
+/// A button across a value cell, as wide as the drop-downs beside it, its text centred: Edit…, a view template's name.
+pub(crate) fn wide_button(ui: &mut Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add_sized([ui.available_width(), ui.spacing().interact_size.y], Button::new(text).truncate())
+}
+
+/// Element `id` as a link, by its category and its id: whether it was clicked, to select it.
+pub(crate) fn link(ui: &mut Ui, model: &Model, id: Id) -> bool {
+    let category = model.elements.get(id).map_or("element", |e| e.category());
+    let text = format!("{} {id}", lang::category(category, false));
+    let r = ui.link(&text);
+    // egui's selectable text gives the link's node a label's role: a link's again, for screen readers.
+    r.widget_info(|| WidgetInfo::labeled(WidgetType::Link, true, &text));
+    r.clicked()
 }
 
 /// A parameter group's header: a bar across the palette that folds the group, as Revit's do.
@@ -478,9 +757,24 @@ pub(crate) fn group_header(ui: &mut Ui, group: &str, open: bool) -> bool {
         if open { [vec2(-4.0, -2.0), vec2(0.0, 2.0), vec2(4.0, -2.0)] } else { [vec2(-2.0, -4.0), vec2(2.0, 0.0), vec2(-2.0, 4.0)] };
     p.add(Shape::line(chevron.iter().map(|d| c + *d).collect(), Stroke::new(1.5, pal().icon)));
     if response.has_focus() {
-        p.rect_stroke(r, 0.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        p.rect_stroke(r, 0.0, crate::style::focus_ring(), StrokeKind::Inside);
     }
     response.clicked()
+}
+
+/// A group's rows under its header: names on the left and values on the right, half the palette each, as Revit's columns, so a
+/// long name wraps rather than pushing its field past the palette's edge.
+pub(crate) fn grid(ui: &mut Ui, id: impl egui::AsIdSalt, add: impl FnOnce(&mut Ui)) {
+    Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+        // Room left for the palette's scroll bar: one that comes would otherwise push the rows past the card.
+        let half = (ui.available_width() - ui.spacing().item_spacing.x - ui.spacing().scroll.bar_width) / 2.0;
+        Grid::new(id).num_columns(2).min_col_width(half).max_col_width(half).show(ui, add);
+    });
+}
+
+/// The palette's Apply. Fields commit on Enter or when they lose the keyboard, which a click here does.
+fn apply(ui: &mut Ui) {
+    let _ = ui.button(t("Apply"));
 }
 
 /// What the palette shows.
@@ -499,8 +793,8 @@ enum Subject {
     Schedule,
 }
 
-/// A type's layer as typed: what it does, what it's made of, how thick.
-type LayerRow = (Function, String, String);
+/// A type's layer as typed: what it does, what it's made of, how thick, and whether it's variable (a floor's or a roof's).
+type LayerRow = (Function, String, String, bool);
 
 /// The categories whose types have layers: a wall's from its exterior in, the others' from the top down.
 const LAYERED: [&str; 4] = ["wall", "floor", "roof", "ceiling"];
@@ -508,12 +802,12 @@ const LAYERED: [&str; 4] = ["wall", "floor", "roof", "ceiling"];
 /// Each pattern as the Materials window names it.
 const PATTERNS: [(Pattern, &str); 10] = [
     (Pattern::None, "None"),
-    (Pattern::Solid, "Solid Fill"),
-    (Pattern::Diagonal, "Diagonal"),
-    (Pattern::Crosshatch, "Crosshatch"),
-    (Pattern::Horizontal, "Horizontal"),
-    (Pattern::Vertical, "Vertical"),
-    (Pattern::Grid, "Square Grid"),
+    (Pattern::Solid, msg!("Solid Fill")),
+    (Pattern::Diagonal, msg!("Diagonal")),
+    (Pattern::Crosshatch, msg!("Crosshatch")),
+    (Pattern::Horizontal, msg!("Horizontal")),
+    (Pattern::Vertical, msg!("Vertical")),
+    (Pattern::Grid, msg!("Square Grid")),
     (Pattern::Brick, "Brick"),
     (Pattern::Concrete, "Concrete"),
     (Pattern::Insulation, "Insulation"),
@@ -524,16 +818,16 @@ pub(crate) fn texture_name(k: bimcraft_core::texture::Kind) -> &'static str {
     use bimcraft_core::texture::Kind::*;
     match k {
         Brick => "Brick",
-        Block => "Block",
-        Boards => "Boards",
+        Block => msg!("Block"),
+        Boards => msg!("Boards"),
         Concrete => "Concrete",
         Plaster => "Plaster",
-        Tile => "Tile",
+        Tile => msg!("Tile"),
         Roof => "Roof Tiles",
         Fabric => "Fabric",
         Metal => "Metal",
         Insulation => "Insulation",
-        Image => "Picture",
+        Image => msg!("Picture"),
     }
 }
 
@@ -547,6 +841,8 @@ pub(crate) struct MaterialsDialog {
     picked: String,
     name: String,
     color: Option<[u8; 3]>,
+    /// Its transparency as set on the slider, percent (applied once the mouse lets go).
+    clear: Option<u8>,
     /// The texture's fields as typed (a tile's width and height, the angle, the offset across and up), for the material and
     /// texture they were made from.
     texture: Option<(String, Texture, [String; 5])>,
@@ -557,21 +853,136 @@ pub(crate) struct MaterialsDialog {
 impl MaterialsDialog {
     pub(crate) fn new(m: &Model) -> MaterialsDialog {
         let picked = m.materials.keys().next().cloned().unwrap_or_default();
-        MaterialsDialog { name: picked.clone(), picked, color: None, texture: None, swatch: None }
+        MaterialsDialog { name: picked.clone(), picked, color: None, clear: None, texture: None, swatch: None }
     }
 }
 
 /// What a layer does, as the layer editor names it.
 const FUNCTIONS: [(Function, &str); 5] = [
-    (Function::Structure, "Structure"),
-    (Function::Substrate, "Substrate"),
-    (Function::Thermal, "Thermal"),
-    (Function::Membrane, "Membrane"),
-    (Function::Finish, "Finish"),
+    (Function::Structure, msg!("Structure")),
+    (Function::Substrate, msg!("Substrate")),
+    (Function::Thermal, msg!("Thermal")),
+    (Function::Membrane, msg!("Membrane")),
+    (Function::Finish, msg!("Finish")),
 ];
 
 fn function_name(f: Function) -> &'static str {
     FUNCTIONS.iter().find(|(g, _)| *g == f).map_or("Structure", |(_, n)| n)
+}
+
+/// A type's parameter as typed: its group, its field, its label, the text.
+type TypeField = (&'static str, &'static str, &'static str, String);
+
+/// A type's value of one of the project's type parameters, as typed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TypeValue {
+    name: String,
+    kind: ParameterKind,
+    group: String,
+    read_only: bool,
+    was: String,
+    typed: String,
+}
+
+/// The palette's groups for what a family's parameter holds, by the names [`BimApp::component_parameters`] lists.
+/// A parameter's value as the palette and Type Properties show it.
+fn value_shown(kind: ParameterKind, v: &Value, units: Units) -> String {
+    match kind {
+        ParameterKind::YesNo if v.as_bool().unwrap_or(false) => t("Yes").to_string(),
+        ParameterKind::YesNo => t("No").to_string(),
+        ParameterKind::Length => shown(Length, v, units),
+        ParameterKind::Area => area_shown(v, units),
+        ParameterKind::Text => shown(Text, v, units),
+        _ => shown(Number, v, units),
+    }
+}
+
+/// The project's type parameters for types of `category`, with what the type `guid` holds of each.
+fn type_values(m: &Model, category: &str, guid: Option<Guid>) -> Vec<TypeValue> {
+    m.parameters
+        .iter()
+        .filter(|(_, p)| p.scope == Scope::Type && p.categories.iter().any(|c| c == category))
+        .map(|(n, p)| {
+            let v = guid.and_then(|g| p.type_values.get(&g)).cloned().unwrap_or(Value::Null);
+            let typed = match p.kind {
+                ParameterKind::YesNo => (if v.as_bool().unwrap_or(false) { "1" } else { "0" }).to_string(),
+                ParameterKind::Area => area_shown(&v, m.units),
+                ParameterKind::Length => shown(Length, &v, m.units),
+                ParameterKind::Text => shown(Text, &v, m.units),
+                _ => shown(Number, &v, m.units),
+            };
+            TypeValue {
+                name: n.clone(),
+                kind: p.kind,
+                group: p.group.as_ref().map(|u| u.label().to_string()).unwrap_or_default(),
+                read_only: p.read_only,
+                was: typed.clone(),
+                typed,
+            }
+        })
+        .collect()
+}
+
+/// The rows of a Type Properties table for `values`, each under its group, or Project Parameters.
+fn type_value_rows(tb: &mut typeprops::Table, values: &mut [TypeValue], units: Units) {
+    let mut groups: Vec<String> = values.iter().map(|v| v.group.clone()).collect();
+    groups.sort();
+    groups.dedup();
+    for g in groups {
+        tb.group(if g.is_empty() { "Project Parameters" } else { g.as_str() });
+        for v in values.iter_mut().filter(|v| v.group == g) {
+            match v.kind {
+                _ if v.read_only && v.kind == ParameterKind::YesNo => tb.shown(&v.name, t(if v.typed == "1" { "Yes" } else { "No" })),
+                _ if v.read_only => tb.shown(&v.name, &v.typed),
+                ParameterKind::YesNo => {
+                    let mut on = v.typed == "1";
+                    tb.check(&v.name, &mut on);
+                    v.typed = (if on { "1" } else { "0" }).to_string();
+                }
+                ParameterKind::Length => tb.text(&v.name, &mut v.typed, units.name()),
+                _ => tb.text(&v.name, &mut v.typed, ""),
+            }
+        }
+    }
+}
+
+/// What `type_parameter` takes for the values changed: emptied, a value is taken away. Or why one isn't what it holds.
+fn type_value_changes(values: &[TypeValue], units: Units) -> Result<serde_json::Map<String, Value>, String> {
+    let mut out = serde_json::Map::new();
+    for v in values.iter().filter(|v| v.typed != v.was && !v.read_only) {
+        let value = match v.kind {
+            _ if v.typed.trim().is_empty() => Value::Null,
+            ParameterKind::YesNo => json!(v.typed == "1"),
+            ParameterKind::Area => area_parsed(&v.typed, units).map_err(|e| format!("{}: {e}", v.name))?,
+            ParameterKind::Length => parse(Length, &v.typed, units).map_err(|e| format!("{}: {e}", v.name))?,
+            ParameterKind::Text => json!(v.typed),
+            _ => parse(Number, &v.typed, units).map_err(|e| format!("{}: {e}", v.name))?,
+        };
+        out.insert(v.name.clone(), value);
+    }
+    Ok(out)
+}
+
+impl BimApp {
+    /// Commands a Type Properties dialog runs together: one undo step. Whether they were done; why not in `error`.
+    fn run_type_commands(&mut self, commands: Vec<(&'static str, Value)>, error: &mut Option<String>) -> bool {
+        if let [(id, p)] = commands.as_slice() {
+            return self.run_for_type(id, p.clone(), error);
+        }
+        // Through the funnel, so a guest's change goes to the host as one undo step there too.
+        match self.exec_batch("Type Properties", &commands) {
+            Ok(_) => {
+                self.status = Status::default();
+                *error = None;
+                true
+            }
+            Err(e) => {
+                self.status = Status { text: e.clone(), error: true };
+                *error = Some(e);
+                false
+            }
+        }
+    }
 }
 
 /// The Type Properties dialog: a type of a category, and its parameters as typed; a layered
@@ -581,16 +992,116 @@ pub(crate) struct TypeDialog {
     name: String,
     /// The elements that were on the type when the dialog opened; OK puts them on the type shown.
     elements: Vec<Id>,
-    fields: Vec<(&'static str, &'static str, String)>,
-    /// The name being typed for a duplicate.
-    duplicate: Option<String>,
+    fields: Vec<TypeField>,
+    /// A new name being typed, for a duplicate or a rename.
+    naming: Naming,
+    /// What stopped OK, Apply, Duplicate or Rename.
+    error: Option<String>,
     /// A layered type's layers, exterior or top first, as typed, and as they were: changed, they
     /// make it.
     layers: Vec<LayerRow>,
     layers_were: Vec<LayerRow>,
     /// A run type's section: whether it is round (then it has a diameter and no depth) and what it is made of ("" for nothing).
     shape: Option<(bool, String)>,
+    /// A room type's own: its rooms' floor and ceiling, and their colour on plans.
+    pub(crate) room: Option<RoomRows>,
+    /// The type's values of the project's type parameters, as typed.
+    project: Vec<TypeValue>,
 }
+
+/// A room type's parameters, as picked and typed: the floor type and the ceiling type its rooms have of their own ("" for
+/// none) and how far from the room's level each is, and the colour its rooms are filled with on plans, while `fill` is on.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RoomRows {
+    pub(crate) floor: String,
+    pub(crate) floor_offset: String,
+    pub(crate) ceiling: String,
+    pub(crate) ceiling_offset: String,
+    pub(crate) fill: bool,
+    pub(crate) colour: [u8; 3],
+}
+
+/// The colours a room type's fill is picked from, beside any other.
+const SWATCHES: [(&str, [u8; 3]); 5] = [
+    (msg!("Sand"), [239, 227, 200]),
+    (msg!("Sage"), [214, 229, 210]),
+    (msg!("Sky"), [211, 227, 244]),
+    (msg!("Rose"), [241, 217, 214]),
+    (msg!("Lilac"), [226, 218, 240]),
+];
+
+impl RoomRows {
+    fn new(m: &Model, name: &str) -> RoomRows {
+        let t = m.types.room.get(name).cloned().unwrap_or_default();
+        RoomRows {
+            floor: t.floor.unwrap_or_default(),
+            floor_offset: m.units.length(t.floor_offset),
+            ceiling: t.ceiling.unwrap_or_default(),
+            ceiling_offset: m.units.length(t.ceiling_offset),
+            fill: t.colour.is_some(),
+            colour: t.colour.unwrap_or(SWATCHES[0].1),
+        }
+    }
+
+    /// Its rows in the table, under `group`: the finishes its rooms have, or how they look on plans.
+    fn rows(&mut self, tb: &mut typeprops::Table, group: &str, m: &Model) {
+        let none = t("None").to_string();
+        if group == ROOM_FINISHES {
+            let parts = [
+                (msg!("Floor"), msg!("Floor Offset"), "floor", &mut self.floor, &mut self.floor_offset),
+                (msg!("Ceiling"), msg!("Ceiling Height"), "ceiling", &mut self.ceiling, &mut self.ceiling_offset),
+            ];
+            for (label, offset, category, of, typed) in parts {
+                let options: Vec<String> =
+                    std::iter::once(none.clone()).chain(m.type_names(category).into_iter().map(String::from)).collect();
+                let mut shown = if of.is_empty() { none.clone() } else { of.clone() };
+                tb.pick(t(label), &mut shown, &options);
+                *of = if shown == none { String::new() } else { shown };
+                // No floor, no offset to give it.
+                if !of.is_empty() {
+                    tb.text(t(offset), typed, m.units.name());
+                }
+            }
+        } else if group == GRAPHICS {
+            tb.check(t("Colour on plans"), &mut self.fill);
+            let (fill, colour) = (&mut self.fill, &mut self.colour);
+            tb.row(t("Colour"), |ui, l| {
+                for (label, c) in SWATCHES {
+                    let (rect, r) = ui.allocate_exact_size(vec2(24.0, 18.0), Sense::click());
+                    let on = *fill && *colour == c;
+                    r.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, t(label)));
+                    let edge = if on { Stroke::new(2.0, pal().accent_ink) } else { Stroke::new(1.0, pal().border) };
+                    ui.painter().rect(rect, 4.0, egui::Color32::from_rgb(c[0], c[1], c[2]), edge, StrokeKind::Inside);
+                    if r.on_hover_text(t(label)).clicked() {
+                        (*fill, *colour) = (true, c);
+                    }
+                }
+                if ui.color_edit_button_srgb(colour).on_hover_text(t("Another colour")).labelled_by(l).changed() {
+                    *fill = true;
+                }
+            });
+        }
+    }
+
+    /// What the `type` command is given for them, or why an offset isn't a length.
+    fn params(&self, p: &mut Value, units: Units) -> Result<(), String> {
+        for (key, of, offset, label, typed) in [
+            ("floor", &self.floor, "floor_offset", msg!("Floor Offset"), &self.floor_offset),
+            ("ceiling", &self.ceiling, "ceiling_offset", msg!("Ceiling Height"), &self.ceiling_offset),
+        ] {
+            p[key] = if of.is_empty() { Value::Null } else { json!(of) };
+            if !of.is_empty() {
+                p[offset] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
+            }
+        }
+        p["colour"] = if self.fill { json!(self.colour) } else { Value::Null };
+        Ok(())
+    }
+}
+
+/// The groups a room type's parameters are under.
+const ROOM_FINISHES: &str = msg!("Floor and Ceiling");
+const GRAPHICS: &str = msg!("Graphics");
 
 impl TypeDialog {
     pub(crate) fn new(m: &Model, category: &'static str, name: String, elements: Vec<Id>) -> TypeDialog {
@@ -599,7 +1110,21 @@ impl TypeDialog {
             let t = m.types.runs.get(category).and_then(|t| t.get(&name));
             (t.is_some_and(|t| t.round), t.map(|t| t.material.clone()).unwrap_or_default())
         });
-        TypeDialog { category, name, elements, fields, duplicate: None, layers_were: layers.clone(), layers, shape }
+        let name_of = name.clone();
+        let project = type_values(m, category, m.library.guid(&LibKind::Type(category.to_string()), &name));
+        TypeDialog {
+            category,
+            name,
+            elements,
+            fields,
+            naming: Naming::None,
+            error: None,
+            layers_were: layers.clone(),
+            layers,
+            shape,
+            room: (category == "room").then(|| RoomRows::new(m, &name_of)),
+            project,
+        }
     }
 
     /// The dialog showing type `name` as the model has it now.
@@ -608,17 +1133,17 @@ impl TypeDialog {
     }
 
     /// A type's sizes, as typed: lengths in the project's units.
-    fn fields(m: &Model, category: &str, name: &str) -> Vec<(&'static str, &'static str, String)> {
+    fn fields(m: &Model, category: &str, name: &str) -> Vec<TypeField> {
         let types = serde_json::to_value(&m.types).unwrap_or_default();
-        type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &type_json(&types, category, name)[k], m.units))).collect()
+        type_rows(category).iter().map(|(g, k, l)| (*g, *k, *l, shown(Length, &type_json(&types, category, name)[k], m.units))).collect()
     }
 
     /// A layered type's layers, as typed: one structure layer as thick as it, without any.
     fn layers(m: &Model, category: &str, name: &str) -> Vec<LayerRow> {
         let Some((.., thickness, layers)) = m.layered_types().find(|(c, n, ..)| *c == category && *n == name) else { return Vec::new() };
-        let typed = |l: &Layer| (l.function, l.material.clone(), m.units.length(l.thickness));
+        let typed = |l: &Layer| (l.function, l.material.clone(), m.units.length(l.thickness), l.variable);
         match layers {
-            [] => vec![(Function::Structure, String::new(), m.units.length(thickness))],
+            [] => vec![(Function::Structure, String::new(), m.units.length(thickness), false)],
             layers => layers.iter().map(typed).collect(),
         }
     }
@@ -629,35 +1154,85 @@ impl TypeDialog {
         let mut p = json!({"category": self.category, "name": name});
         let layered = copy || self.layers != self.layers_were;
         if layered {
-            let layers = self.layers.iter().map(|(function, material, typed)| {
+            let layers = self.layers.iter().map(|(function, material, typed, variable)| {
                 let thickness = units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t("Thickness"), typed]))?;
-                Ok(json!({"function": function, "material": material.trim(), "thickness": thickness}))
+                let mut l = json!({"function": function, "material": material.trim(), "thickness": thickness});
+                if *variable {
+                    l["variable"] = json!(true);
+                }
+                Ok(l)
             });
             p["layers"] = Value::Array(layers.collect::<Result<_, String>>()?);
         }
         let round = self.shape.as_ref().is_some_and(|(round, _)| *round);
-        for (key, label, typed) in self.fields.iter().filter(|(key, ..)| !(layered && *key == "thickness") && !(round && *key == "depth")) {
+        for (_, key, label, typed) in
+            self.fields.iter().filter(|(_, key, ..)| !(layered && *key == "thickness") && !(round && *key == "depth"))
+        {
             p[*key] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
         }
         if let Some((round, material)) = &self.shape {
             p["round"] = json!(round);
             p["material"] = json!(material);
         }
+        if let Some(room) = &self.room {
+            room.params(&mut p, units)?;
+        }
         Ok(p)
     }
 }
 
 impl BimApp {
+    /// What the palette shows and edits: the selection, or, while its filter is on one of the selection's categories, the part of the
+    /// selection of that category. The selection itself stays as it is.
+    pub(crate) fn palette_ids(&self) -> Vec<Id> {
+        let m = &self.session.model;
+        let narrowed = match &self.palette_filter {
+            Some((category, picked_for)) if *picked_for == self.selection => {
+                self.selection.iter().copied().filter(|id| m.elements.get(id).is_some_and(|e| e.category() == *category)).collect()
+            }
+            _ => Vec::new(),
+        };
+        if narrowed.is_empty() { self.selection.clone() } else { narrowed }
+    }
+
+    /// What `element_json` says of each of `ids`, kept for the model it was found in: the palette reads it every frame, and a
+    /// component's room costs its level's room boundaries. What isn't kept yet is found together, among one `Rooms`; of a
+    /// model other than the window's (a copy a frame took before a change), found and not kept.
+    pub(crate) fn elements_json(&self, model: &Model, ids: &[Id]) -> Vec<Arc<Value>> {
+        let rooms = Rooms::new(model);
+        let found = |id: &Id| Arc::new(element_json_with(model, *id, &rooms));
+        let current = &self.session.model;
+        let kept = self.palette_json.try_borrow_mut().ok().filter(|_| std::ptr::eq(model, Arc::as_ptr(current)));
+        let Some(mut kept) = kept else { return ids.iter().map(found).collect() };
+        if !kept.as_ref().is_some_and(|(m, _)| std::ptr::eq(m.as_ptr(), Arc::as_ptr(current))) {
+            *kept = None;
+        }
+        let (_, json) = kept.get_or_insert_with(|| (Arc::downgrade(current), HashMap::new()));
+        ids.iter().map(|id| Arc::clone(json.entry(*id).or_insert_with(|| found(id)))).collect()
+    }
+
+    /// The selection's categories and how many of each.
+    fn selection_categories(&self) -> BTreeMap<&'static str, usize> {
+        let mut counts = BTreeMap::new();
+        for e in self.selection.iter().filter_map(|id| self.session.model.elements.get(id)) {
+            *counts.entry(e.category()).or_insert(0) += 1;
+        }
+        counts
+    }
+
     fn subject(&self) -> Subject {
         let m = &self.session.model;
-        match (self.selection.as_slice(), &self.tool, self.sheet) {
+        if matches!(self.sketch.as_ref().map(|sk| sk.of), Some(crate::sketch::Of::Region { .. })) {
+            return Subject::New("region");
+        }
+        let ids = self.palette_ids();
+        match (ids.as_slice(), &self.tool, self.sheet) {
             (&[id], _, _) => Subject::Element(id),
             ([_, _, ..], _, _) => {
-                let categories: BTreeSet<&'static str> =
-                    self.selection.iter().filter_map(|id| m.elements.get(id)).map(|e| e.category()).collect();
+                let categories: BTreeSet<&'static str> = ids.iter().filter_map(|id| m.elements.get(id)).map(|e| e.category()).collect();
                 match categories.first() {
                     Some(c) if categories.len() == 1 => Subject::Elements(c),
-                    _ => Subject::Mixed(self.selection.len()),
+                    _ => Subject::Mixed(ids.len()),
                 }
             }
             ([], Tool::Wall(_), _) => Subject::New("wall"),
@@ -666,12 +1241,15 @@ impl BimApp {
             ([], Tool::Room, _) => Subject::New("room"),
             ([], Tool::Level, _) => Subject::New("level"),
             ([], Tool::Grid(_), _) => Subject::New("grid"),
-            ([], Tool::Dimension(_) | Tool::Angular(_) | Tool::Radial(_), _) => Subject::New("dimension"),
+            ([], Tool::Dimension(..) | Tool::Angular(_) | Tool::Round(..), _) => Subject::New("dimension"),
             ([], Tool::Text, _) => Subject::New("text"),
-            ([], Tool::Spot, _) => Subject::New("spot"),
+            ([], Tool::DetailLine(_), _) => Subject::New("line"),
+            ([], Tool::Spot | Tool::SpotSlope, _) => Subject::New("spot"),
+            ([], Tool::SpotCoordinate(_), _) => Subject::New("spotcoordinate"),
             ([], Tool::Tag, _) => Subject::New("tag"),
             ([], Tool::Section(_), _) => Subject::New("section"),
             ([], Tool::Elevation, _) => Subject::New("elevation"),
+            ([], Tool::Camera(_), _) => Subject::View3D,
             ([], Tool::Column, _) => Subject::New("column"),
             ([], Tool::Run(category, _) | Tool::Stand(category), _) => Subject::New(category),
             ([], Tool::Component | Tool::Fixture(_), _) => Subject::New("component"),
@@ -690,18 +1268,19 @@ impl BimApp {
             ([], _, Sheet::Plan(level)) => Subject::Plan(level),
             ([], _, Sheet::Ceiling(_)) => Subject::CeilingPlan,
             ([], _, Sheet::View3D) => Subject::View3D,
-            ([], _, Sheet::Schedule(_) | Sheet::Table(_)) => Subject::Schedule,
+            // A family document's Properties are its own (`family_properties`).
+            ([], _, Sheet::Schedule(_) | Sheet::Table(_) | Sheet::Family(..)) => Subject::Schedule,
         }
     }
 
-    /// The type the selected elements share, if they do.
+    /// The type the elements the palette shows share, if they do.
     fn shared_type(&self, m: &Model) -> Option<String> {
         let names: BTreeSet<String> =
-            self.selection.iter().filter_map(|id| element_json(m, *id)["type"].as_str().map(String::from)).collect();
+            self.elements_json(m, &self.palette_ids()).iter().filter_map(|j| j["type"].as_str().map(String::from)).collect();
         if names.len() == 1 { names.into_iter().next() } else { None }
     }
 
-    /// The family and type of the selected components, while they share them; with none selected,
+    /// The family and type of the components the palette shows, while they share them; with none selected,
     /// the Component tool's.
     pub(crate) fn component_type(&self) -> Option<(String, String)> {
         let m = &self.session.model;
@@ -709,7 +1288,7 @@ impl BimApp {
             return self.placing();
         }
         let types: BTreeSet<(String, String)> = self
-            .selection
+            .palette_ids()
             .iter()
             .map(|id| match m.elements.get(id) {
                 Some(Element::Component(c)) => Some((c.family.clone(), c.type_name.clone())),
@@ -722,23 +1301,35 @@ impl BimApp {
     /// The type Edit Type opens: its category, its name, and the selected elements on it.
     pub(crate) fn type_subject(&self) -> Option<(&'static str, String, Vec<Id>)> {
         let m = &self.session.model;
+        if let Some(sk) = &self.sketch {
+            match sk.of {
+                crate::sketch::Of::Region { .. } => return Some(("region", sk.region.0.clone(), Vec::new())),
+                crate::sketch::Of::Edit(id) => {
+                    if let Some(Element::FilledRegion(r)) = m.elements.get(id) {
+                        return Some(("region", r.type_name.clone(), vec![id]));
+                    }
+                }
+                _ => {}
+            }
+        }
         let category = match self.subject() {
             Subject::Element(id) => m.elements.get(id)?.category(),
             Subject::Elements(category) | Subject::New(category) => category,
             Subject::Mixed(_) | Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D | Subject::Schedule => return None,
         };
+        let ids = self.palette_ids();
         if category == "component" {
-            return self.component_type().map(|(_, ty)| (category, ty, self.selection.clone()));
+            return self.component_type().map(|(_, ty)| (category, ty, ids));
         }
         // A door or window of a family: that family's type.
         if let Some((_, ty)) = self.opening_pair(m, self.subject(), category) {
-            return Some((category, ty, self.selection.clone()));
+            return Some((category, ty, ids));
         }
-        let name = match self.selection.is_empty() {
+        let name = match ids.is_empty() {
             false => self.shared_type(m),
             true => self.types.get(category).cloned().or_else(|| m.default_type(category).map(String::from)),
         };
-        Some((category, name?, self.selection.clone()))
+        Some((category, name?, ids))
     }
 
     /// The family and type a door or window is of: the selected ones', while they share them; with none selected, what the tool places.
@@ -750,7 +1341,7 @@ impl BimApp {
         match subject {
             Subject::Element(id) => of(&id),
             Subject::Elements(_) => {
-                let pairs: BTreeSet<Option<(String, String)>> = self.selection.iter().map(of).collect();
+                let pairs: BTreeSet<Option<(String, String)>> = self.palette_ids().iter().map(of).collect();
                 if pairs.len() == 1 { pairs.into_iter().next().flatten() } else { None }
             }
             Subject::New(c) if c == category => {
@@ -780,6 +1371,22 @@ impl BimApp {
 
     pub(crate) fn edit_type(&mut self) {
         if let Some((category, name, elements)) = self.type_subject() {
+            if category == "region" {
+                self.fill_patterns_dialog = Some(crate::fillpatterns::FillPatternsDialog::edit(&self.session.model, &name, elements));
+                return;
+            }
+            if category == "text" {
+                self.text_type_dialog = Some(crate::notes::TextTypeDialog::new(&self.session.model, name, elements));
+                return;
+            }
+            if category == "dimension" {
+                self.dimension_type_dialog = Some(crate::dimtypes::DimensionTypeDialog::new(&self.session.model, name, elements));
+                return;
+            }
+            if category == "spotcoordinate" {
+                self.spot_type_dialog = Some(crate::spots::SpotTypeDialog::new(&self.session.model, name, elements));
+                return;
+            }
             let pair = if category == "component" {
                 self.component_type()
             } else {
@@ -793,16 +1400,42 @@ impl BimApp {
     }
 
     pub(crate) fn properties(&mut self, ui: &mut Ui) {
+        // A new selection starts the filter over.
+        if self.palette_filter.as_ref().is_some_and(|(_, picked_for)| *picked_for != self.selection) {
+            self.palette_filter = None;
+        }
+        // Site's points, picked in a view, are no elements: their own Properties.
+        if let Some(p) = self.selected_point() {
+            self.point_properties(ui, p);
+            return;
+        }
+        // Views picked in the Project Browser, several of them: what they share.
+        if self.selection.is_empty() && self.browser_picked.len() > 1 {
+            self.picked_views_properties(ui);
+            return;
+        }
         let model = Arc::clone(&self.session.model);
         let subject = self.subject();
+        // A camera view picked on a plan: its Properties are its camera's, the same panel the 3D tab shows for it.
+        let camera_view = match subject {
+            Subject::Element(id) => matches!(model.elements.get(id), Some(Element::View3D(v)) if v.camera.is_some()),
+            _ => false,
+        };
+        let active_3d = self.active_3d();
         self.type_selector(ui, &model, subject);
+        self.held_by_others(ui);
         let (filter, ids, rows) = match subject {
             Subject::Element(id) => match model.elements.get(id) {
-                Some(e) => (format!("{} (1)", lang::category(e.category(), true)), vec![id], rows(e.category())),
+                Some(e) => (
+                    format!("{} (1)", lang::category(e.category(), true)),
+                    vec![id],
+                    if camera_view { &[][..] } else { rows(e.category()) },
+                ),
                 None => return,
             },
             Subject::Elements(category) => {
-                (format!("{} ({})", lang::category(category, true), self.selection.len()), self.selection.clone(), rows(category))
+                let ids = self.palette_ids();
+                (format!("{} ({})", lang::category(category, true), ids.len()), ids, rows(category))
             }
             Subject::Mixed(n) => (tf("Multiple Categories ({})", &[&n.to_string()]), Vec::new(), &[][..]),
             Subject::New(category) => (tf("New {}", &[&lang::category(category, true)]), Vec::new(), &[][..]),
@@ -816,51 +1449,349 @@ impl BimApp {
             }
             Subject::CeilingPlan | Subject::View3D | Subject::Schedule => (self.view_title(self.sheet), Vec::new(), &[][..]),
         };
+        let categories = self.selection_categories();
         ui.horizontal(|ui| {
-            ui.label(filter);
+            if categories.len() < 2 {
+                ui.label(&filter);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add_enabled(self.type_subject().is_some(), Button::new(t("Edit Type"))).clicked() {
                     self.edit_type();
                 }
+                // Of several categories, the filter is a drop-down of them, as Revit's is: one picked is what the palette shows
+                // and edits, the selection staying as it is.
+                if categories.len() > 1 {
+                    let all = tf("Multiple Categories ({})", &[&self.selection.len().to_string()]);
+                    let mut pick = None;
+                    ComboBox::from_id_salt("properties-filter").selected_text(&filter).width(ui.available_width()).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.palette_filter.is_none(), &all).clicked() {
+                            pick = Some(None);
+                        }
+                        for (&category, n) in &categories {
+                            let on = self.palette_filter.as_ref().is_some_and(|(c, _)| *c == category);
+                            if ui.selectable_label(on, format!("{} ({n})", lang::category(category, true))).clicked() {
+                                pick = Some(Some(category));
+                            }
+                        }
+                    });
+                    if let Some(category) = pick {
+                        self.palette_filter = category.map(|c| (c, self.selection.clone()));
+                    }
+                }
             });
         });
         ui.add_space(4.0);
+        if let Subject::Element(id) = subject {
+            self.connected_finishes(ui, &model, id);
+        }
+        self.layer_picture(ui, &model);
+        self.opening_picker(ui, &model);
+        self.floor_slope(ui, &model);
+        self.sketch_slope(ui);
         if !ids.is_empty() {
             self.parameters(ui, &model, &ids, rows);
+            if let Subject::Element(id) = subject {
+                self.ties(ui, &model, id);
+            }
             self.component_parameters(ui, &model, &ids);
+            self.panel_parameters(ui, &model, &ids);
+            self.circuit_parameters(ui, &model, &ids);
             self.project_parameters(ui, &model, &ids);
+            self.sheet_title_block(ui, &model, &ids);
             self.element_phasing(ui, &model, &ids);
         }
         if subject == Subject::Schedule {
             self.schedule_parameters(ui);
         }
-        // A 3D view on a sheet: where it looks from, too.
+        // A camera view picked on a plan: its camera's properties, bound to it rather than to the 3D tab's view.
+        if camera_view && let Subject::Element(id) = subject {
+            self.camera_properties(ui, Some(id));
+        }
+        // A 3D view on a sheet: where it looks from, too; a camera view's azimuth and elevation mean nothing, so its name only.
         if let Subject::Element(id) = subject
             && let Some(bimcraft_core::model::Element::Viewport(vp)) = model.elements.get(id)
-            && let Some(bimcraft_core::model::Element::View3D(_)) = model.elements.get(vp.view)
+            && let Some(bimcraft_core::model::Element::View3D(v)) = model.elements.get(vp.view)
         {
-            self.parameters(ui, &model, &[model.elements.id(vp.view).unwrap_or_default()], self::rows("view3d"));
+            let view_rows = if v.camera.is_some() { VIEW3D_CAMERA } else { self::rows("view3d") };
+            self.parameters(ui, &model, &[model.elements.id(vp.view).unwrap_or_default()], view_rows);
         }
         // A view's graphics: the template it follows, and its overrides.
         let view_shown = matches!(subject, Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D)
             || (matches!(subject, Subject::Element(_)) && self.selection.is_empty() && matches!(self.sheet, Sheet::Section(_)));
+        if subject == Subject::View3D {
+            self.camera_properties(ui, active_3d);
+            self.section_box_properties(ui);
+        }
         if view_shown {
             self.graphics_properties(ui);
             self.phasing_properties(ui);
         }
         ui.add_space(8.0);
-        // Fields commit on Enter or when they lose the keyboard, which a click here does.
-        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            let _ = ui.button(t("Apply"));
+        ui.with_layout(Layout::right_to_left(Align::Min), apply);
+    }
+
+    /// Several views picked in the Project Browser: of one kind, its parameters, those they share filled in and a change
+    /// made to all of them; of several, how many of each.
+    fn picked_views_properties(&mut self, ui: &mut Ui) {
+        let model = Arc::clone(&self.session.model);
+        // Each one's kind, as the palette names it, its element and its rows.
+        let mut kinds: BTreeMap<&'static str, (Vec<Id>, Vec<&'static [Row]>)> = BTreeMap::new();
+        let mut other = 0;
+        for pick in &self.browser_picked {
+            let (kind, id, rows): (&'static str, Option<Id>, &'static [Row]) = match *pick {
+                crate::browser::Pick::View(Sheet::Plan(id)) => match model.plan_view(id) {
+                    Some(v) if v.parent.is_some() => (msg!("Floor Plans"), Some(id), PLAN_DEPENDENT),
+                    Some(_) => (msg!("Floor Plans"), Some(id), PLAN_VIEW),
+                    None => (msg!("Floor Plans"), Some(id), PLAN),
+                },
+                crate::browser::Pick::View(Sheet::Ceiling(id)) => (msg!("Ceiling Plans"), Some(id), &[]),
+                crate::browser::Pick::View(Sheet::Section(id)) => match model.elements.get(id).map(|e| e.category()) {
+                    Some("elevation") => (msg!("Elevations"), Some(id), rows("elevation")),
+                    _ => (msg!("Sections"), Some(id), rows("section")),
+                },
+                crate::browser::Pick::View(Sheet::Paper(id)) => (msg!("Sheets"), Some(id), rows("sheet")),
+                crate::browser::Pick::View(Sheet::Table(id)) => (msg!("Schedules"), Some(id), rows("schedule")),
+                crate::browser::Pick::View3D(Some(id)) => (msg!("3D Views"), Some(id), rows("view3d")),
+                _ => (msg!("Schedules"), None, &[]),
+            };
+            match id {
+                Some(id) => {
+                    let entry = kinds.entry(kind).or_default();
+                    entry.0.push(id);
+                    entry.1.push(rows);
+                }
+                None => other += 1,
+            }
+        }
+        let n = self.browser_picked.len();
+        if kinds.len() != 1 || other > 0 {
+            ui.label(tf("Multiple Categories ({})", &[&n.to_string()]));
+            ui.add_space(4.0);
+            for (kind, (ids, _)) in &kinds {
+                ui.label(RichText::new(format!("{} ({})", t(kind), ids.len())).color(pal().muted));
+            }
+            return;
+        }
+        let Some((kind, (ids, all_rows))) = kinds.into_iter().next() else { return };
+        ui.label(format!("{} ({})", t(kind), ids.len()));
+        ui.add_space(4.0);
+        // The rows every one of them has: a level's own plan and a plan view share most, not their level's.
+        let first = all_rows.first().copied().unwrap_or_default();
+        let shared: Vec<Row> = first.iter().copied().filter(|r| all_rows.iter().all(|rs| rs.iter().any(|o| o.1 == r.1))).collect();
+        if !shared.is_empty() {
+            self.parameters(ui, &model, &ids, &shared);
+        }
+        ui.add_space(8.0);
+        ui.with_layout(Layout::right_to_left(Align::Min), apply);
+    }
+
+    /// The layers of the type the palette shows, drawn to their thicknesses in their materials' colours: a wall's from its exterior
+    /// face to its interior one with its location line, where a click sets the line nearest it; a floor's, a roof's or a ceiling's
+    /// from the top down. Without layers, a type is one layer of its thickness.
+    fn layer_picture(&mut self, ui: &mut Ui, model: &Model) {
+        let Some((category, name, ids)) = self.type_subject() else { return };
+        let Some((.., thickness, layers)) = model.layered_types().find(|(c, n, ..)| *c == category && *n == name) else { return };
+        if !LAYERED.contains(&category) || thickness.is_nan() || thickness <= 0.0 {
+            return;
+        }
+        let colour = |l: &Layer| model.materials.get(&l.material).map(|m| egui::Color32::from_rgb(m.color[0], m.color[1], m.color[2]));
+        let bands: Vec<(egui::Color32, f64)> = match layers {
+            [] => vec![(pal().control, thickness)],
+            layers => layers.iter().map(|l| (colour(l).unwrap_or(pal().control), l.thickness)).collect(),
+        };
+        let wall = category == "wall";
+        let sense = if wall && !ids.is_empty() { Sense::click() } else { Sense::hover() };
+        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), if wall { 40.0 } else { 64.0 }), sense);
+        let label = t(if wall { msg!("Wall layers") } else { msg!("Layers, top down") });
+        r.widget_info(|| WidgetInfo::labeled(if wall { WidgetType::Button } else { WidgetType::Label }, true, label));
+        let p = ui.painter();
+        let ink = Stroke::new(1.0, pal().icon);
+        let mut at = 0.0;
+        for (fill, t) in &bands {
+            let (a, b) = ((at / thickness) as f32, ((at + t) / thickness) as f32);
+            let band = match wall {
+                true => Rect::from_x_y_ranges(rect.left() + a * rect.width()..=rect.left() + b * rect.width(), rect.y_range()),
+                false => Rect::from_x_y_ranges(rect.x_range(), rect.top() + a * rect.height()..=rect.top() + b * rect.height()),
+            };
+            p.rect(band, 0.0, *fill, ink, StrokeKind::Inside);
+            at += t;
+        }
+        if !wall {
+            return;
+        }
+        // The line the selected walls share, dashed where it runs; a click puts it at the line nearest.
+        let depth = |loc: Location| bimcraft_core::walls::depth(thickness, layers, loc);
+        let x = |d: f64| rect.left() + (d / thickness) as f32 * rect.width();
+        let json = self.elements_json(model, &ids);
+        let shared: Vec<Location> = json.iter().map(|j| j["location"].as_str().and_then(Location::from_name).unwrap_or_default()).collect();
+        if let Some(&loc) = shared.first().filter(|l| shared.iter().all(|m| m == *l)) {
+            let line = [pos2(x(depth(loc)), rect.top() - 3.0), pos2(x(depth(loc)), rect.bottom() + 3.0)];
+            p.extend(Shape::dashed_line(&line, Stroke::new(2.0, pal().accent_ink), 4.0, 3.0));
+            ui.label(RichText::new(tf("Location line: {}", &[t(loc.label())])).color(pal().muted));
+        }
+        let r = r.on_hover_text(t("Click where the location line should run"));
+        if r.clicked()
+            && let Some(at) = r.interact_pointer_pos()
+        {
+            let d = f64::from((at.x - rect.left()) / rect.width()) * thickness;
+            let near = Location::ALL.into_iter().min_by(|a, b| (depth(*a) - d).abs().total_cmp(&(depth(*b) - d).abs()));
+            if let Some(loc) = near {
+                self.run("modify", json!({"ids": ids, "location": loc.name()}));
+            }
+        }
+    }
+
+    /// Which way the doors the palette shows open, as four plans of a door in its wall: as placed, its hand flipped, its facing
+    /// flipped, both. The one they share is lit; a click sets their `flip_hand` and `flip_facing` to another.
+    fn opening_picker(&mut self, ui: &mut Ui, model: &Model) {
+        let Some(("door", _, ids)) = self.type_subject() else { return };
+        if ids.is_empty() {
+            return;
+        }
+        let flag = |j: &Value, key: &str| j[key].as_bool().unwrap_or(false);
+        let now: Vec<(bool, bool)> =
+            self.elements_json(model, &ids).iter().map(|j| (flag(j, "flip_hand"), flag(j, "flip_facing"))).collect();
+        let shared = now.first().copied().filter(|f| now.iter().all(|g| g == f));
+        ui.label(RichText::new(t("Opens")).strong());
+        let mut pick = None;
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0;
+            for (label, hand, facing) in [
+                (msg!("As placed"), false, false),
+                (msg!("Flipped hand"), true, false),
+                (msg!("Flipped facing"), false, true),
+                (msg!("Flipped both"), true, true),
+            ] {
+                let (rect, r) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+                let on = shared == Some((hand, facing));
+                r.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, t(label)));
+                let p = ui.painter();
+                let (fill, edge) = if on { (pal().select_fill, pal().accent) } else { (pal().surface, pal().border) };
+                p.rect(rect, 4.0, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
+                // The wall across the tile with its opening in the middle; the leaf from its hinge and the arc it sweeps.
+                let ink = Stroke::new(1.5, if on { pal().accent_ink } else { pal().icon });
+                let (c, half) = (rect.center(), (w * 0.2).min(10.0));
+                let wall = Stroke::new(3.0, ink.color);
+                p.line_segment([pos2(rect.left() + 4.0, c.y), pos2(c.x - half, c.y)], wall);
+                p.line_segment([pos2(c.x + half, c.y), pos2(rect.right() - 4.0, c.y)], wall);
+                let (dx, sy) = (if hand { -1.0 } else { 1.0 }, if facing { 1.0 } else { -1.0 });
+                let hinge = pos2(c.x - dx * half, c.y);
+                let radius = 2.0 * half;
+                p.line_segment([hinge, hinge + vec2(0.0, sy * radius)], ink);
+                let arc = (0..=8).map(|k| {
+                    let a = k as f32 / 8.0 * std::f32::consts::FRAC_PI_2;
+                    hinge + vec2(dx * radius * a.cos(), sy * radius * a.sin())
+                });
+                p.add(Shape::line(arc.collect(), Stroke::new(1.0, ink.color)));
+                if r.on_hover_text(t(label)).clicked() {
+                    pick = Some((hand, facing));
+                }
+            }
         });
+        if let Some((hand, facing)) = pick {
+            self.run("modify", json!({"ids": ids, "flip_hand": hand, "flip_facing": facing}));
+        }
+    }
+
+    /// The slope of the floors the palette shows: a short section of the slab at its angle from its slope arrow's tail, the
+    /// angle written on it, and steps that set it through `modify`, as the Slope field does; one that falls keeps falling. A
+    /// floor with no slope arrow is flat until one is drawn, which the Slope Arrow tool does.
+    fn floor_slope(&mut self, ui: &mut Ui, model: &Model) {
+        let ids = self.palette_ids();
+        let floor = |id: &Id| match model.elements.get(id) {
+            Some(Element::Floor(f)) => Some((f.slope, f.arrow.is_some())),
+            _ => None,
+        };
+        let Some(floors) = ids.iter().map(floor).collect::<Option<Vec<_>>>().filter(|f| !f.is_empty()) else { return };
+        ui.label(RichText::new(t("Slope")).strong());
+        if !floors.iter().all(|(_, arrow)| *arrow) {
+            ui.label(
+                RichText::new(t("Flat: it has no slope arrow. Draw one from where its top stays toward where it rises."))
+                    .color(pal().muted),
+            );
+            if self.selected_floor().is_some() && ui.button(t("Draw a slope arrow")).clicked() {
+                self.set_tool(Tool::SlopeArrow(None));
+            }
+            return;
+        }
+        let slope = floors[0].0;
+        let shared = floors.iter().all(|(s, _)| *s == slope);
+        if shared {
+            let said = format!("{}° ({}%)", text(&json!(slope)), text(&json!(slope.to_radians().tan() * 100.0)));
+            let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::hover());
+            r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, tf("Floor slope: {}", &[&said])));
+            // The slab's top from the arrow's tail, rising (or falling) at its angle, as long as the picture holds; its
+            // thickness square to it.
+            let (thick, room) = (8.0, rect.shrink(8.0));
+            let a = slope.to_radians() as f32;
+            let fits = (room.height() - thick) / a.sin().abs().max(1e-6);
+            let tail = if a >= 0.0 { pos2(room.left(), room.bottom() - thick) } else { room.left_top() };
+            let (along, across) = (vec2(a.cos(), -a.sin()), vec2(a.sin(), a.cos()) * thick);
+            let head = tail + along * room.width().min(fits);
+            let p = ui.painter();
+            p.extend(Shape::dashed_line(&[tail, pos2(room.right(), tail.y)], Stroke::new(1.0, pal().muted), 4.0, 3.0));
+            let slab = vec![tail, head, head + across, tail + across];
+            p.add(Shape::convex_polygon(slab, pal().control, Stroke::new(1.0, pal().icon)));
+            p.text(rect.right_top() + vec2(-4.0, 4.0), Align2::RIGHT_TOP, said, FontId::proportional(12.0), pal().text);
+        }
+        let sign = if slope < 0.0 { -1.0 } else { 1.0 };
+        let mut pick = None;
+        ui.horizontal(|ui| {
+            for (label, percent) in [(msg!("Flat"), 0.0), ("1%", 1.0), ("2%", 2.0), ("5%", 5.0)] {
+                let degrees = sign * f64::atan(percent / 100.0).to_degrees();
+                if ui.selectable_label(shared && (slope - degrees).abs() < 1e-9, t(label)).clicked() {
+                    pick = Some(degrees);
+                }
+            }
+        });
+        if let Some(degrees) = pick {
+            self.run("modify", json!({"ids": ids, "slope": degrees}));
+        }
+    }
+
+    /// A roof's sketch (a new roof's footprint or Edit Boundary's) with one line picked: its Slope, the angle in degrees the roof's
+    /// edges along it rise at, blank for the roof's own, which is what a line has until it is given one. It is set on the line, and
+    /// Finish Edit Mode sends it with the lines for the core to give the edges along the line theirs (`slopes`).
+    fn sketch_slope(&mut self, ui: &mut Ui) {
+        let Some(sk) = &self.sketch else { return };
+        let roof = match sk.of {
+            crate::sketch::Of::Roof(_) => true,
+            crate::sketch::Of::Edit(id) => matches!(self.session.model.elements.get(id), Some(Element::Roof(_))),
+            _ => false,
+        };
+        let picked: Vec<usize> = sk.picked.iter().copied().collect();
+        let (true, &[i]) = (roof, picked.as_slice()) else { return };
+        let Some(line) = sk.lines.get(i) else { return };
+        let current = line.slope.filter(|s| *s > 0.0).map_or_else(String::new, |s| text(&json!(s)));
+        let mut typed = None;
+        grid(ui, ("sketch-slope", i), |ui| {
+            let name = ui.label(t("Slope"));
+            typed = self.field(ui, 1 + i as Id, "sketch-slope", current, name.id, t("Roof's slope"));
+            ui.end_row();
+        });
+        let Some(typed) = typed else { return };
+        let max = bimcraft_core::model::MAX_SLOPE;
+        match Some(typed.trim()).filter(|s| !s.is_empty()).map_or(Some(0.0), |s| number(s).filter(|x| (0.0..=max).contains(x))) {
+            Some(slope) => {
+                if let Some(l) = self.sketch.as_mut().and_then(|sk| sk.lines.get_mut(i)) {
+                    l.slope = Some(slope);
+                }
+            }
+            None => {
+                self.status = Status {
+                    text: tf("Slope: a number of degrees from 0 to {}, or blank for the roof's", &[&max.to_string()]),
+                    error: true,
+                };
+            }
+        }
     }
 
     /// The Type Selector: the category and the type of what the palette shows, a drop-down of
     /// the category's types.
     fn type_selector(&mut self, ui: &mut Ui, model: &Model, subject: Subject) {
-        let (category, current) = match subject {
+        let (category, mut current) = match subject {
             Subject::Element(id) => match model.elements.get(id) {
-                Some(e) => (e.category(), element_json(model, id)["type"].as_str().map(String::from)),
+                Some(e) => (e.category(), self.elements_json(model, &[id]).first().and_then(|j| j["type"].as_str().map(String::from))),
                 None => return,
             },
             Subject::Elements(category) => (category, self.shared_type(model)),
@@ -873,6 +1804,12 @@ impl BimApp {
             Subject::View3D => ("3d view", None),
             Subject::Schedule => ("schedule", None),
         };
+        // A region being sketched has the type its sketch will make; one selected has its own.
+        if matches!(subject, Subject::New("region"))
+            && let Some(sk) = &self.sketch
+        {
+            current = Some(sk.region.0.clone());
+        }
         // A component's: its family over its type; every family's types to pick from. A door's or a window's: the project's own
         // types, then those of its families, each as `Family: Type`.
         let hosted = match category {
@@ -903,7 +1840,9 @@ impl BimApp {
         } else {
             model.type_names(category).into_iter().map(String::from).chain(pairs.iter().map(label)).collect()
         };
-        let enabled = !names.is_empty();
+        // A floor or a ceiling that follows a room is of the type the room's type names.
+        let followed = matches!(subject, Subject::Element(_) | Subject::Elements(_)) && self.follows_a_room(&self.palette_ids());
+        let enabled = !names.is_empty() && !followed;
         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), if enabled { Sense::click() } else { Sense::hover() });
         r.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, t("Type Selector")));
         let p = ui.painter();
@@ -939,21 +1878,50 @@ impl BimApp {
             p.add(Shape::convex_polygon(vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)], pal().icon, Stroke::NONE));
         }
         if r.has_focus() {
-            p.rect_stroke(rect, 3.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+            p.rect_stroke(rect, 3.0, crate::style::focus_ring(), StrokeKind::Inside);
         }
         let mut picked = None;
-        Popup::menu(&r).width(rect.width()).show(|ui| {
-            for n in &names {
-                if ui.selectable_label(current.as_ref() == Some(n), n).clicked() {
-                    picked = Some(n.clone());
+        // A component's list holds every family's types, more than a window has room for (issue 64): it scrolls, as tall as
+        // the room on the selector's roomier side.
+        let window = ui.ctx().content_rect();
+        let room = (window.bottom() - rect.bottom()).max(rect.top() - window.top()) - 16.0;
+        // As wide as the selector, frame and all: what the list's width sets is the inside of its frame, and a long name is cut
+        // short rather than widen it.
+        let margin = ui.style().spacing.menu_margin.sum().x;
+        let inside = rect.width() - margin;
+        Popup::menu(&r).width(inside).show(|ui| {
+            ui.set_max_width(inside);
+            let walls = category == "wall";
+            let sections = if walls { type_sections(&names, |n| curtain_type(model, n)) } else { vec![(None, names.clone())] };
+            egui::ScrollArea::vertical().max_height(room.max(100.0)).auto_shrink([false, true]).show(ui, |ui| {
+                for (heading, names) in &sections {
+                    if let Some(h) = heading {
+                        ui.label(RichText::new(t(h)).small().strong().color(pal().muted));
+                    }
+                    for n in names {
+                        ui.horizontal(|ui| {
+                            let mut clicked = false;
+                            if walls {
+                                let (swatch, sample) = ui.allocate_exact_size(LAYERS, Sense::click());
+                                wall_type_sample(ui, swatch, model, n);
+                                clicked |= sample.clicked();
+                            }
+                            let row = egui::Button::selectable(current.as_ref() == Some(n), (n.as_str(), egui::Atom::grow())).truncate();
+                            let wide = ui.available_width();
+                            clicked |= ui.add_sized(vec2(wide, 22.0), row).on_hover_text(n.as_str()).clicked();
+                            if clicked {
+                                picked = Some(n.clone());
+                            }
+                        });
+                    }
                 }
-            }
+            });
         });
         let pair = picked.as_ref().and_then(|n| pairs.iter().find(|p| label(p) == *n)).cloned();
         match (picked, subject) {
             (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) && pair.is_some() => {
                 if let Some((f, t)) = pair {
-                    self.run("modify", json!({"ids": self.selection, "family": f, "type": t}));
+                    self.run("modify", json!({"ids": self.palette_ids(), "family": f, "type": t}));
                 }
             }
             (Some(_), Subject::New("component")) => self.component = pair,
@@ -965,11 +1933,17 @@ impl BimApp {
             }
             (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) => {
                 // One of the project's own types takes a door or window off the family it was of.
-                let mut p = json!({"ids": self.selection, "type": n});
+                let mut p = json!({"ids": self.palette_ids(), "type": n});
                 if hosted.is_some() {
                     p["family"] = Value::Null;
                 }
                 self.run("modify", p);
+            }
+            (Some(n), Subject::New("region")) => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.region.0 = n.clone();
+                }
+                self.types.insert("region", n);
             }
             (Some(n), Subject::New(category)) => {
                 self.opening_families.remove(category);
@@ -984,12 +1958,12 @@ impl BimApp {
     /// An edit changes all of them, in one step.
     fn parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id], rows: &[Row]) {
         let Some(&id) = ids.first() else { return };
-        let all: Vec<Value> = ids.iter().map(|id| element_json(model, *id)).collect();
-        let first = element_json(model, id);
+        let all = self.elements_json(model, ids);
+        let Some(first) = all.first().map(Arc::clone) else { return };
         let v: serde_json::Map<String, Value> = rows
             .iter()
             .map(|r| (r.1, r.3))
-            .chain([("top_level", Shown), ("enclosed", Shown)])
+            .chain([("top_level", Shown), ("enclosed", Shown), ("host", Shown)])
             .map(|(k, kind)| {
                 let one = field_of(&first, k, kind);
                 let shared = all.iter().all(|e| field_of(e, k, kind) == one);
@@ -1001,6 +1975,11 @@ impl BimApp {
         // What an element points at is in its JSON as a GUID, or as an id for the one beside it.
         let id_of = |v: &Value| v.as_u64().or_else(|| v.as_str().and_then(Guid::parse).and_then(|g| model.elements.id(g)));
         let level_name = |v: &Value| id_of(v).and_then(|l| model.level(l)).map_or_else(String::new, |l| l.name.clone());
+        // Components all of work plane-based families show where they are on their work planes.
+        let based = ids.iter().all(|id| match model.elements.get(*id) {
+            Some(Element::Component(c)) => model.families.get(&c.family).is_some_and(|f| f.work_plane_based),
+            _ => false,
+        });
         let mut groups: Vec<&'static str> = Vec::new();
         for (g, ..) in rows {
             if !groups.contains(g) {
@@ -1008,10 +1987,16 @@ impl BimApp {
             }
         }
         let mut change: Option<(&str, Result<Value, String>)> = None;
+        // A second field the change sets with it: a room's Limit Offset, kept where its top is as its Upper Limit changes.
+        let mut also: Option<(&str, Value)> = None;
         let mut crop = None;
+        // An element a link was clicked for: the selection.
+        let mut select = None;
         let units = model.units;
         // A note on a sheet sits in paper mm.
         let paper = matches!(model.elements.get(id), Some(Element::Text(n)) if model.sheet(n.view).is_some());
+        // A floor or a ceiling that follows a room: its level and offset are the room's, shown and not typed.
+        let followed = self.follows_a_room(ids);
         for group in groups {
             let open = !self.collapsed.contains(group);
             if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
@@ -1020,117 +2005,187 @@ impl BimApp {
             if !open {
                 continue;
             }
-            Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
-                // Half the palette each, as Revit's columns: a long label wraps rather than pushing
-                // its field past the palette's edge.
-                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-                Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
-                    for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
-                        let val = &v[key];
-                        // A length one element hasn't got (a straight wall's radius): no row.
-                        if ids.len() == 1 && matches!(kind, LengthShown | LengthIf) && val.is_null() {
-                            continue;
+            grid(ui, ("properties", id, group), |ui| {
+                for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
+                    if !work_plane_row(label, based) {
+                        continue;
+                    }
+                    let val = &v[key];
+                    // A length one element hasn't got (a straight wall's radius): no row.
+                    if ids.len() == 1 && matches!(kind, LengthShown | LengthIf) && val.is_null() {
+                        continue;
+                    }
+                    if ids.len() == 1 && !relevant(&first, key) {
+                        continue;
+                    }
+                    let kind = match kind {
+                        Height if !v["top_level"].is_null() => LengthShown,
+                        Length if key == "offset" && !v["host"].is_null() => LengthShown,
+                        Point if paper => PaperPoint,
+                        Length if followed && key == "offset" => LengthShown,
+                        kind => kind,
+                    };
+                    let label = t(label);
+                    let name = ui.label(label);
+                    match kind {
+                        // A component's Work Plane, `Level : Level 1`: what it is on in the interface's words, its name as it is.
+                        Shown if key == "work_plane" => {
+                            let said = text(val);
+                            let said = said.split_once(" : ").map_or(said.clone(), |(what, name)| format!("{} : {name}", t(what)));
+                            ui.label(RichText::new(said).color(pal().muted));
                         }
-                        let kind = match kind {
-                            Height if !v["top_level"].is_null() => LengthShown,
-                            Point if paper => PaperPoint,
-                            kind => kind,
-                        };
-                        let label = t(label);
-                        let name = ui.label(label);
-                        match kind {
-                            Shown => {
-                                ui.label(RichText::new(text(val)).color(pal().muted));
+                        Shown => {
+                            let said = text(val);
+                            ui.label(RichText::new(t(&said)).color(pal().muted));
+                        }
+                        // An angle's degrees; else lengths.
+                        Values if v["kind"] == "angular" => {
+                            ui.label(RichText::new(format!("{}°", text(val))).color(pal().muted));
+                        }
+                        LengthShown | AreaShown | MetresShown | Values => {
+                            ui.label(RichText::new(shown(kind, val, units)).color(pal().muted));
+                        }
+                        LevelName => {
+                            ui.label(RichText::new(level_name(val)).color(pal().muted));
+                        }
+                        ViewName => {
+                            let name = id_of(val).and_then(|v| model.view_name(v)).unwrap_or_default();
+                            ui.label(RichText::new(name).color(pal().muted));
+                        }
+                        Crop => {
+                            let mut on = !val.is_null();
+                            let r = ui.checkbox(&mut on, "");
+                            r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
+                            if r.labelled_by(name.id).changed() {
+                                crop = Some(on);
                             }
-                            // An angle's degrees; else lengths.
-                            Values if v["kind"] == "angular" => {
-                                ui.label(RichText::new(format!("{}°", text(val))).color(pal().muted));
+                        }
+                        Flag => {
+                            let mut on = val.as_bool().unwrap_or(false);
+                            let r = ui.checkbox(&mut on, "");
+                            // A checkbox without text names itself "" for screen readers: give it its row's name.
+                            r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
+                            if r.labelled_by(name.id).changed() {
+                                change = Some((key, Ok(json!(on))));
                             }
-                            LengthShown | AreaShown | MetresShown | Values => {
-                                ui.label(RichText::new(shown(kind, val, units)).color(pal().muted));
+                        }
+                        Level if followed && key == "level" => {
+                            ui.label(RichText::new(level_name(val)).color(pal().muted));
+                        }
+                        Level => {
+                            if let Some(l) = combo(ui, (id, key), name.id, &level_name(val), &levels) {
+                                change = Some((key, Ok(json!(l))));
                             }
-                            LevelName => {
-                                ui.label(RichText::new(level_name(val)).color(pal().muted));
-                            }
-                            ViewName => {
-                                let name = id_of(val).and_then(|v| model.view_name(v)).unwrap_or_default();
-                                ui.label(RichText::new(name).color(pal().muted));
-                            }
-                            Crop => {
-                                let mut on = !val.is_null();
-                                let r = ui.checkbox(&mut on, "");
-                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
-                                if r.labelled_by(name.id).changed() {
-                                    crop = Some(on);
+                        }
+                        UpperLimit => {
+                            let none = t("Not Bounded");
+                            let options: Vec<String> = std::iter::once(none.to_string()).chain(levels.iter().cloned()).collect();
+                            let now = if val.is_null() { none.to_string() } else { level_name(val) };
+                            if let Some(l) = combo(ui, (id, key), name.id, &now, &options) {
+                                let upper = levels.iter().position(|n| *n == l).and_then(|i| model.levels().get(i).map(|(lid, _)| *lid));
+                                // One room: its top stays where it is, its Limit Offset now measured from the new limit.
+                                if let ([_], Some(Element::Room(r))) = (ids, model.elements.get(id)) {
+                                    let (_, top) = model.room_span(r);
+                                    let from = upper.map_or_else(|| model.elevation(r.level), |u| model.elevation(u));
+                                    also = Some(("limit_offset", json!(top - from)));
                                 }
+                                change = Some((key, Ok(if l == none { Value::Null } else { json!(l) })));
                             }
-                            Flag => {
-                                let mut on = val.as_bool().unwrap_or(false);
-                                let r = ui.checkbox(&mut on, "");
-                                // A checkbox without text names itself "" for screen readers: give it its row's name.
-                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
-                                if r.labelled_by(name.id).changed() {
-                                    change = Some((key, Ok(json!(on))));
-                                }
+                        }
+                        TopLevel => {
+                            let none = t("Unconnected");
+                            let options: Vec<String> = std::iter::once(none.to_string()).chain(levels.iter().cloned()).collect();
+                            let current = if val.is_null() { none.to_string() } else { level_name(val) };
+                            if let Some(l) = combo(ui, (id, key), name.id, &current, &options) {
+                                change = Some((key, Ok(if l == none { Value::Null } else { json!(l) })));
                             }
-                            Level => {
-                                if let Some(l) = combo(ui, (id, key), name.id, &level_name(val), &levels) {
-                                    change = Some((key, Ok(json!(l))));
-                                }
+                        }
+                        // Shown by its label; a centre line by default, which the wall's JSON leaves out.
+                        LocationLine => {
+                            let now = val.as_str().and_then(Location::from_name).unwrap_or_default();
+                            let options: Vec<String> = Location::ALL.iter().map(|l| t(l.label()).to_string()).collect();
+                            if let Some(l) = combo(ui, (id, key), name.id, t(now.label()), &options)
+                                && let Some(loc) = Location::ALL.iter().find(|loc| t(loc.label()) == l)
+                            {
+                                change = Some((key, Ok(json!(loc.name()))));
                             }
-                            TopLevel => {
-                                let none = t("Unconnected");
-                                let options: Vec<String> = std::iter::once(none.to_string()).chain(levels.iter().cloned()).collect();
-                                let current = if val.is_null() { none.to_string() } else { level_name(val) };
-                                if let Some(l) = combo(ui, (id, key), name.id, &current, &options) {
-                                    change = Some((key, Ok(if l == none { Value::Null } else { json!(l) })));
-                                }
+                        }
+                        LineStyle => {
+                            let options: Vec<String> = model.line_styles.keys().cloned().collect();
+                            if let Some(s) = style_combo(ui, (id, key), name.id, val.as_str().unwrap_or_default(), &options, model) {
+                                change = Some((key, Ok(json!(s))));
                             }
-                            // Shown by its label; a centre line by default, which the wall's JSON leaves out.
-                            LocationLine => {
-                                let now = val.as_str().and_then(Location::from_name).unwrap_or_default();
-                                let options: Vec<String> = Location::ALL.iter().map(|l| t(l.label()).to_string()).collect();
-                                if let Some(l) = combo(ui, (id, key), name.id, t(now.label()), &options)
-                                    && let Some(loc) = Location::ALL.iter().find(|loc| t(loc.label()) == l)
-                                {
-                                    change = Some((key, Ok(json!(loc.name()))));
-                                }
+                        }
+                        // Invisible lines first, then the styles; picked, none is null.
+                        RegionLines => {
+                            let invisible = t("<Invisible lines>").to_string();
+                            let options: Vec<String> =
+                                std::iter::once(invisible.clone()).chain(model.line_styles.keys().cloned()).collect();
+                            let now = val.as_str().map_or(invisible.clone(), str::to_string);
+                            if let Some(s) = style_combo(ui, (id, key), name.id, &now, &options, model) {
+                                change = Some((key, Ok(if s == invisible { Value::Null } else { json!(s) })));
                             }
-                            Justification => {
-                                let names = [("top", "Top"), ("centre", "Centre"), ("bottom", "Bottom")];
-                                let now = names.iter().find(|(k, _)| val.as_str() == Some(k)).map_or("Centre", |(_, n)| n);
-                                let options: Vec<String> = names.iter().map(|(_, n)| t(n).to_string()).collect();
-                                if let Some(j) = combo(ui, (id, key), name.id, t(now), &options)
-                                    && let Some((k, _)) = names.iter().find(|(_, n)| t(n) == j)
-                                {
-                                    change = Some((key, Ok(json!(k))));
-                                }
+                        }
+                        Justification => {
+                            let names = [("top", "Top"), ("centre", "Centre"), ("bottom", "Bottom")];
+                            let now = names.iter().find(|(k, _)| val.as_str() == Some(k)).map_or("Centre", |(_, n)| n);
+                            let options: Vec<String> = names.iter().map(|(_, n)| t(n).to_string()).collect();
+                            if let Some(j) = combo(ui, (id, key), name.id, t(now), &options)
+                                && let Some((k, _)) = names.iter().find(|(_, n)| t(n) == j)
+                            {
+                                change = Some((key, Ok(json!(k))));
                             }
-                            // Revit's greyed checkbox: Attach Top/Base and Detach Top/Base change it.
-                            Attached => {
+                        }
+                        Choice(names) => {
+                            let now = names.iter().find(|(k, _)| val.as_str() == Some(k)).or(names.first()).map_or("", |(_, n)| n);
+                            let options: Vec<String> = names.iter().map(|(_, n)| t(n).to_string()).collect();
+                            if let Some(j) = combo(ui, (id, key), name.id, t(now), &options)
+                                && let Some((k, _)) = names.iter().find(|(_, n)| t(n) == j)
+                            {
+                                change = Some((key, Ok(json!(k))));
+                            }
+                        }
+                        // Revit's greyed checkbox: Attach Top/Base and Detach Top/Base change it. Beside it, what it's attached to.
+                        Attached => {
+                            ui.horizontal(|ui| {
                                 let mut on = !val.is_null();
                                 let r = ui.add_enabled(false, Checkbox::new(&mut on, ""));
                                 r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, false, on, label));
                                 r.labelled_by(name.id);
-                            }
-                            Text | Number | Length | LengthIf | Point | PaperPoint | Outline | Height | Limit(_) => {
-                                // Blank across a selection may be values that differ, not nothing.
-                                let hint = match kind {
-                                    Limit(hint) if ids.len() == 1 => t(hint),
-                                    _ => "",
-                                };
-                                if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
-                                    change = Some((key, parse(kind, &typed, units)));
+                                if let Some(other) = id_of(val)
+                                    && link(ui, model, other)
+                                {
+                                    select = Some(other);
                                 }
+                            });
+                        }
+                        Link => {
+                            if let Some(other) = id_of(val)
+                                && link(ui, model, other)
+                            {
+                                select = Some(other);
                             }
                         }
-                        ui.end_row();
+                        Text | Number | Length | LengthIf | Point | PaperPoint | Outline | Height | Limit(_) => {
+                            // Blank across a selection may be values that differ, not nothing.
+                            let hint = match kind {
+                                Limit(hint) if ids.len() == 1 => t(hint),
+                                _ => "",
+                            };
+                            if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
+                                change = Some((key, parse(kind, &typed, units)));
+                            }
+                        }
                     }
-                });
+                    ui.end_row();
+                }
             });
         }
         if ids.len() == 1 && v["enclosed"] == json!(false) {
             ui.label(RichText::new(t("Not enclosed: the walls around it don't close.")).color(pal().error));
+        }
+        if let Some(other) = select {
+            self.selection = vec![other];
         }
         // A view's crop: on to all it shows, or off.
         if let (Some(on), &[view]) = (crop, ids) {
@@ -1139,11 +2194,57 @@ impl BimApp {
         match change {
             Some((key, Ok(val))) => {
                 let mut p = nested(key, val);
+                if let Some((k, v)) = also {
+                    p[k] = v;
+                }
                 p["ids"] = json!(ids);
                 self.run("modify", p);
             }
             Some((key, Err(e))) => self.status = Status { text: format!("{key}: {e}"), error: true },
             None => {}
+        }
+    }
+
+    /// What else the one element the palette shows is tied to, each a link that selects it: a wall's doors and windows, the
+    /// walls attached to a roof or a floor, the locked or equal dimensions that hold it. Its host and what it's attached to
+    /// are links in its own rows (`Link`, `Attached`).
+    fn ties(&mut self, ui: &mut Ui, model: &Model, id: Id) {
+        let Some(e) = model.elements.get(id) else { return };
+        let referring = model.referring(id);
+        let of = |categories: &[&str]| -> Vec<Id> {
+            let keep = |r: &&Id| model.elements.get(**r).is_some_and(|x| categories.contains(&x.category()));
+            referring.iter().filter(keep).copied().collect()
+        };
+        let openings = if matches!(e, Element::Wall(_)) { of(&["door", "window"]) } else { Vec::new() };
+        let walls = if matches!(e, Element::Roof(_) | Element::Floor(_)) { of(&["wall"]) } else { Vec::new() };
+        let rows = [(msg!("Openings"), openings), (msg!("Attached Walls"), walls), (msg!("Held by Dimensions"), model.held_by(id))];
+        if rows.iter().all(|(_, links)| links.is_empty()) {
+            return;
+        }
+        let group = msg!("Tied To");
+        let open = !self.collapsed.contains(group);
+        if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
+            self.collapsed.insert(group);
+        }
+        if !open {
+            return;
+        }
+        let mut select = None;
+        grid(ui, ("ties", id), |ui| {
+            for (label, links) in rows.iter().filter(|(_, links)| !links.is_empty()) {
+                ui.label(t(label));
+                ui.vertical(|ui| {
+                    for &other in links {
+                        if link(ui, model, other) {
+                            select = Some(other);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        if let Some(other) = select {
+            self.selection = vec![other];
         }
     }
 
@@ -1181,22 +2282,24 @@ impl BimApp {
         else {
             return;
         };
-        let values: Vec<Value> = ids.iter().map(|i| element_json(model, *i)["values"].clone()).collect();
+        let values: Vec<Value> = self.elements_json(model, ids).iter().map(|j| j["values"].clone()).collect();
         let shared = |k: &str| {
             let v = values.first().map_or(&Value::Null, |v| &v[k]);
             if values.iter().all(|x| &x[k] == v) { v.clone() } else { Value::Null }
         };
         let (units, materials): (Units, Vec<String>) = (model.units, model.materials.keys().cloned().collect());
         let mut change: Option<(String, Result<Value, String>)> = None;
-        for (group, kinds) in [
-            ("Dimensions", &[Holds::Length, Holds::Number, Holds::Angle][..]),
-            ("Materials and Finishes", &[Holds::Material][..]),
-            ("Other", &[Holds::YesNo][..]),
-        ] {
-            let params: Vec<_> = f.parameters.iter().filter(|p| p.instance && kinds.contains(&p.kind)).collect();
+        // Revit's groups, then the family's own headings.
+        for g in Under::listed(f.parameters.iter().filter(|p| p.instance).map(|p| p.group())) {
+            let params: Vec<_> = f.parameters.iter().filter(|p| p.instance && p.group() == g).collect();
             if params.is_empty() {
                 continue;
             }
+            // A heading of Revit's folds under its own name; one of the family's under a key kept for it.
+            let group: &'static str = match &g {
+                Under::Group(x) => x.label(),
+                Under::Own(s) => self.collapse_key(s),
+            };
             let open = !self.collapsed.contains(group);
             if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
                 self.collapsed.insert(group);
@@ -1205,14 +2308,24 @@ impl BimApp {
                 continue;
             }
             Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
-                Grid::new(("component", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
+                Grid::new(("component", id, group)).num_columns(2).min_col_width(124.0).show(ui, |ui| {
                     for p in params {
                         let val = shared(&p.name);
                         let name = ui.label(&p.name);
                         let kind = if p.kind == Holds::Length { Length } else { Number };
                         match p.kind {
-                            _ if p.formula.is_some() => {
+                            // What a formula works out, or a reporting parameter reads: shown, not typed.
+                            _ if p.formula.is_some() || p.reporting => {
                                 ui.label(RichText::new(shown(kind, &val, units)).color(pal().muted));
+                            }
+                            Holds::FamilyType => {
+                                ui.label(RichText::new(val.as_str().unwrap_or_default()).color(pal().muted));
+                            }
+                            Holds::Text | Holds::Url => {
+                                if let Some(typed) = self.field(ui, id, &p.name, val.as_str().unwrap_or_default().to_string(), name.id, "")
+                                {
+                                    change = Some((p.name.clone(), Ok(json!(typed))));
+                                }
                             }
                             Holds::YesNo => {
                                 let mut on = val.as_f64().is_some_and(|x| x != 0.0);
@@ -1227,7 +2340,7 @@ impl BimApp {
                                     change = Some((p.name.clone(), Ok(json!(m))));
                                 }
                             }
-                            Holds::Length | Holds::Number | Holds::Angle => {
+                            Holds::Length | Holds::Number | Holds::Angle | Holds::Integer | Holds::Area | Holds::Volume => {
                                 if let Some(typed) = self.field(ui, id, &p.name, shown(kind, &val, units), name.id, "") {
                                     change = Some((p.name.clone(), parse(kind, &typed, units)));
                                 }
@@ -1247,28 +2360,14 @@ impl BimApp {
         }
     }
 
-    /// The selected elements' values of the project's parameters for their category, in a group of
-    /// their own: a field for each, a checkbox for yes or no. An edit sets them all; emptied, a
-    /// field takes their values away.
-    fn project_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
-        let cats: BTreeSet<&str> = ids.iter().filter_map(|id| model.elements.get(id)).map(Element::category).collect();
-        let (Some(&id), Some(&cat)) = (ids.first(), cats.first()) else { return };
-        let params: Vec<(&String, ParameterKind)> = model
-            .parameters
-            .iter()
-            .filter(|(_, p)| cats.len() == 1 && p.categories.iter().any(|c| c == cat))
-            .map(|(n, p)| (n, p.kind))
-            .collect();
-        if params.is_empty() {
-            return;
-        }
-        // Blank across a selection may be values that differ, not none.
-        let value = |name: &str| -> Value {
-            let of = |i: &Id| model.elements.get(i).and_then(Element::params).and_then(|p| p.get(name)).cloned().unwrap_or(Value::Null);
-            let first = of(&id);
-            if ids.iter().all(|i| of(i) == first) { first } else { Value::Null }
-        };
-        let group = "Project Parameters";
+    /// A distribution board's electrical data, in a group of its own: its distribution system, its mains and the single-pole
+    /// breakers it takes, the board that supplies it and the ones it feeds. An edit goes through `panel`; a field emptied takes
+    /// its value away.
+    fn panel_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let [id] = ids else { return };
+        let Some((id, board)) = bimcraft_core::electrical::board(model, *id) else { return };
+        let data = board.panel.clone().unwrap_or_default();
+        let group = "Electrical";
         let open = !self.collapsed.contains(group);
         if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
             self.collapsed.insert(group);
@@ -1276,15 +2375,228 @@ impl BimApp {
         if !open {
             return;
         }
-        let units = model.units;
-        let mut change: Option<(String, Result<Value, String>)> = None;
+        const NONE: &str = "—";
+        let systems: Vec<String> = std::iter::once(NONE.to_string()).chain(model.distribution_systems.keys().cloned()).collect();
+        // The other boards, each by what names it: its id and its type.
+        let boards: Vec<(Id, String)> = model
+            .elements
+            .iter()
+            .filter_map(|(i, _)| bimcraft_core::electrical::board(model, *i))
+            .filter(|(i, _)| *i != id)
+            .map(|(i, c)| (i, format!("{i} {}", c.type_name)))
+            .collect();
+        let upstream = data.supply_from.and_then(|g| model.elements.id(g));
+        let supplier = upstream.and_then(|u| boards.iter().find(|(i, _)| *i == u)).map_or_else(|| NONE.to_string(), |(_, n)| n.clone());
+        let supplies: Vec<String> = std::iter::once(NONE.to_string()).chain(boards.iter().map(|(_, n)| n.clone())).collect();
+        let feeds: Vec<String> = model.panel_feeds(id).iter().map(Id::to_string).collect();
+        let mut change: Option<(&str, Value)> = None;
         Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
             let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            Grid::new(("project-parameters", id)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
-                for (name, kind) in &params {
+            Grid::new(("panel-parameters", id)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
+                let label = ui.label(t("Distribution System"));
+                let now = data.distribution.clone().unwrap_or_else(|| NONE.to_string());
+                if let Some(picked) = combo(ui, (id, "distribution"), label.id, &now, &systems) {
+                    change = Some(("distribution", json!(if picked == NONE { String::new() } else { picked })));
+                }
+                ui.end_row();
+                let label = ui.label(t("Mains"));
+                let now = data.mains.map_or_else(String::new, |a| format!("{a}"));
+                if let Some(typed) = self.field(ui, id, "mains", now, label.id, "A") {
+                    match typed.trim().replace(',', ".").parse::<f64>() {
+                        _ if typed.trim().is_empty() => change = Some(("mains", json!(""))),
+                        Ok(a) => change = Some(("mains", json!(a))),
+                        Err(_) => {
+                            self.status = Status { text: tf("{}: `{}` is not a number of amperes", &[t("Mains"), &typed]), error: true }
+                        }
+                    }
+                }
+                ui.end_row();
+                let label = ui.label(t("Max #1 Pole Breakers"));
+                let now = data.slots.map_or_else(String::new, |n| n.to_string());
+                if let Some(typed) = self.field(ui, id, "slots", now, label.id, "") {
+                    match typed.trim().parse::<u32>() {
+                        _ if typed.trim().is_empty() => change = Some(("slots", json!(""))),
+                        Ok(n) => change = Some(("slots", json!(n))),
+                        Err(_) => {
+                            self.status =
+                                Status { text: tf("{}: `{}` is not a whole number", &[t("Max #1 Pole Breakers"), &typed]), error: true }
+                        }
+                    }
+                }
+                ui.end_row();
+                let label = ui.label(t("Supply From"));
+                if let Some(picked) = combo(ui, (id, "supply_from"), label.id, &supplier, &supplies) {
+                    let id_of = boards.iter().find(|(_, n)| *n == picked).map(|(i, _)| json!(i));
+                    change = Some(("supply_from", id_of.unwrap_or_else(|| json!(""))));
+                }
+                ui.end_row();
+                if !feeds.is_empty() {
+                    ui.label(t("Supplies"));
+                    ui.label(feeds.join(", "));
+                    ui.end_row();
+                }
+            });
+        });
+        if let Some((key, value)) = change {
+            self.run("panel", json!({"id": id, key: value}));
+        }
+    }
+
+    /// A selected circuit's parameters, edited through `circuit`: its number, breaker, poles, voltage and demand factor, with what
+    /// it loads (worked out from its devices) shown.
+    fn circuit_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let [id] = ids else { return };
+        let Some(Element::Circuit(c)) = model.elements.get(id) else { return };
+        let group = "Electrical";
+        let open = !self.collapsed.contains(group);
+        if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
+            self.collapsed.insert(group);
+        }
+        if !open {
+            return;
+        }
+        const NONE: &str = "—";
+        let id = *id;
+        let panel = model.elements.id(c.panel);
+        let board = panel.map_or_else(String::new, |b| b.to_string());
+        let there: Vec<String> = panel
+            .and_then(|b| bimcraft_core::electrical::board(model, b))
+            .and_then(|(_, b)| b.panel.as_ref()?.distribution.as_ref().and_then(|n| model.distribution_systems.get(n)))
+            .map(|s| s.voltage_names().cloned().collect())
+            .unwrap_or_default();
+        let voltages: Vec<String> = std::iter::once(NONE.to_string()).chain(there).collect();
+        let totals = bimcraft_core::electrical::circuit_totals(model, c);
+        let load = totals.as_ref().map_or_else(String::new, |x| format!("{} VA", text(&json!(x.installed_va))));
+        let current = totals.as_ref().map_or_else(String::new, |x| format!("{} A", text(&json!(x.current_a))));
+        let devices: Vec<String> = c.devices.iter().filter_map(|g| model.elements.id(*g)).map(|d| d.to_string()).collect();
+        let mut change: Option<(&str, Value)> = None;
+        Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            Grid::new(("circuit-parameters", id)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
+                let label = ui.label(t("Circuit Number"));
+                if let Some(typed) = self.field(ui, id, "number", c.number.to_string(), label.id, "") {
+                    match typed.trim().parse::<u32>() {
+                        Ok(n) => change = Some(("number", json!(n))),
+                        Err(_) => {
+                            self.status = Status { text: tf("{}: `{}` is not a whole number", &[t("Circuit Number"), &typed]), error: true }
+                        }
+                    }
+                }
+                ui.end_row();
+                let label = ui.label(t("Name"));
+                if let Some(typed) = self.field(ui, id, "name", c.name.clone(), label.id, "") {
+                    change = Some(("name", json!(typed.trim())));
+                }
+                ui.end_row();
+                let label = ui.label(t("Rating"));
+                if let Some(typed) = self.field(ui, id, "rating", text(&json!(c.rating_a)), label.id, "A") {
+                    match number(&typed.replace(',', ".")) {
+                        Some(a) => change = Some(("rating", json!(a))),
+                        None => {
+                            self.status = Status { text: tf("{}: `{}` is not a number of amperes", &[t("Rating"), &typed]), error: true }
+                        }
+                    }
+                }
+                ui.end_row();
+                let label = ui.label(t("Number of Poles"));
+                if let Some(typed) = self.field(ui, id, "poles", c.poles.to_string(), label.id, "") {
+                    match typed.trim().parse::<u8>() {
+                        Ok(n) => change = Some(("poles", json!(n))),
+                        Err(_) => {
+                            self.status =
+                                Status { text: tf("{}: `{}` is not a whole number", &[t("Number of Poles"), &typed]), error: true }
+                        }
+                    }
+                }
+                ui.end_row();
+                let label = ui.label(t("Voltage"));
+                let now = c.voltage.clone().unwrap_or_else(|| NONE.to_string());
+                if let Some(picked) = combo(ui, (id, "voltage"), label.id, &now, &voltages) {
+                    change = Some(("voltage", json!(if picked == NONE { String::new() } else { picked })));
+                }
+                ui.end_row();
+                let label = ui.label(t("Classification"));
+                if let Some(typed) = self.field(ui, id, "classification", c.classification.clone(), label.id, "") {
+                    change = Some(("classification", json!(typed.trim())));
+                }
+                ui.end_row();
+                let label = ui.label(t("Demand Factor"));
+                if let Some(typed) = self.field(ui, id, "demand_factor", text(&json!(c.demand_factor)), label.id, "") {
+                    match number(&typed.replace(',', ".")) {
+                        Some(f) => change = Some(("demand_factor", json!(f))),
+                        None => self.status = Status { text: tf("{}: `{}` is not a number", &[t("Demand Factor"), &typed]), error: true },
+                    }
+                }
+                ui.end_row();
+                for (name, value) in [
+                    (t("Panel"), board),
+                    (t("Load"), load),
+                    (t("Current"), current),
+                    (t("Devices"), if devices.is_empty() { t("None").to_string() } else { devices.join(", ") }),
+                ] {
+                    ui.label(name);
+                    ui.label(value);
+                    ui.end_row();
+                }
+            });
+        });
+        if let Some((key, value)) = change {
+            self.run("circuit", json!({"id": id, key: value}));
+        }
+    }
+
+    /// The selected elements' values of the project's parameters for their category, in a group of
+    /// their own: a field for each, a checkbox for yes or no. An edit sets them all; emptied, a
+    /// field takes their values away.
+    fn project_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let cats: BTreeSet<&str> = ids.iter().filter_map(|id| model.elements.get(id)).map(Element::category).collect();
+        let (Some(&id), Some(&cat)) = (ids.first(), cats.first()) else { return };
+        // Blank across a selection may be values that differ, not none.
+        let value = |name: &str| -> Value {
+            let of = |i: &Id| model.elements.get(i).and_then(Element::params).and_then(|p| p.get(name)).cloned().unwrap_or(Value::Null);
+            let first = of(&id);
+            if ids.iter().all(|i| of(i) == first) { first } else { Value::Null }
+        };
+        // Each group, its own name or Project Parameters. A type parameter's value is in Type Properties, and one a family has
+        // tied to it is the family's, above.
+        let familys = |n: &str| {
+            ids.iter().any(|i| {
+                let family = model.elements.get(i).and_then(Element::family).and_then(|(f, _)| model.families.get(f));
+                family.is_some_and(|f| f.parameters.iter().any(|q| q.name == n))
+            })
+        };
+        let mut groups: BTreeMap<&str, Vec<(&String, &ProjectParameter)>> = BTreeMap::new();
+        for (n, p) in &model.parameters {
+            if cats.len() == 1 && p.categories.iter().any(|c| c == cat) && p.scope == Scope::Instance && !familys(n) {
+                groups.entry(p.group.as_ref().map_or("Project Parameters", |u| u.label())).or_default().push((n, p));
+            }
+        }
+        let units = model.units;
+        for (group, params) in groups {
+            let key: &'static str = if group == "Project Parameters" { "Project Parameters" } else { self.collapse_key(group) };
+            let open = !self.collapsed.contains(key);
+            if group_header(ui, t(group), open) && !self.collapsed.remove(key) {
+                self.collapsed.insert(key);
+            }
+            if !open {
+                continue;
+            }
+            let mut change: Option<(String, Result<Value, String>)> = None;
+            grid(ui, ("project-parameters", id, group), |ui| {
+                for &(name, p) in &params {
                     let val = value(name);
-                    let label = ui.label(name.as_str());
-                    let field = match kind {
+                    let label = if p.description.is_empty() {
+                        ui.label(name.as_str())
+                    } else {
+                        ui.label(name.as_str()).on_hover_text(&p.description)
+                    };
+                    if p.read_only {
+                        // Shown, and changed only by a command.
+                        ui.add_enabled(false, egui::Label::new(value_shown(p.kind, &val, units)));
+                        ui.end_row();
+                        continue;
+                    }
+                    let field = match p.kind {
                         ParameterKind::YesNo => {
                             let mut on = val.as_bool().unwrap_or(false);
                             let r = ui.checkbox(&mut on, "");
@@ -1295,8 +2607,16 @@ impl BimApp {
                             ui.end_row();
                             continue;
                         }
+                        ParameterKind::Area => {
+                            if let Some(typed) = self.field(ui, id, &format!("params.{name}"), area_shown(&val, units), label.id, "") {
+                                let v = if typed.trim().is_empty() { Ok(Value::Null) } else { area_parsed(&typed, units) };
+                                change = Some((name.to_string(), v));
+                            }
+                            ui.end_row();
+                            continue;
+                        }
                         ParameterKind::Length => Length,
-                        ParameterKind::Number => Number,
+                        ParameterKind::Number | ParameterKind::Integer | ParameterKind::Volume | ParameterKind::Angle => Number,
                         ParameterKind::Text => Text,
                     };
                     if let Some(typed) = self.field(ui, id, &format!("params.{name}"), shown(field, &val, units), label.id, "") {
@@ -1306,14 +2626,87 @@ impl BimApp {
                     ui.end_row();
                 }
             });
-        });
-        match change {
-            Some((name, Ok(v))) => {
-                self.run("modify", json!({"ids": ids, "params": {name: v}}));
+            match change {
+                Some((name, Ok(v))) => {
+                    self.run("modify", json!({"ids": ids, "params": {name: v}}));
+                }
+                Some((name, Err(e))) => self.status = Status { text: format!("{name}: {e}"), error: true },
+                None => {}
             }
-            Some((name, Err(e))) => self.status = Status { text: format!("{name}: {e}"), error: true },
-            None => {}
         }
+    }
+
+    /// A sheet's title block, as Revit's palette has a sheet's: which one it's drawn with (the built-in one, none at all, or
+    /// one of the project's), and its values of that one's sheet fields; Edit Title Blocks… and the project's values a click
+    /// away.
+    fn sheet_title_block(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let &[id] = ids else { return };
+        let Some(sheet) = model.sheet(id) else { return };
+        let group = "Title Block";
+        let open = !self.collapsed.contains(group);
+        if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
+            self.collapsed.insert(group);
+        }
+        if !open {
+            return;
+        }
+        let (built_in, none) = (t("Built-in"), t("None"));
+        let mut chosen = sheet.title_block.clone();
+        let mut change: Option<Value> = None;
+        let tb = model.title_blocks.get(&sheet.title_block);
+        let values = bimcraft_core::sheet::title_values(model, id);
+        grid(ui, ("sheet-title-block", id), |ui| {
+            let label = ui.label(t("Title Block"));
+            let shown = match chosen.as_str() {
+                "" => built_in.to_string(),
+                bimcraft_core::titleblock::NONE => none.to_string(),
+                _ => chosen.clone(),
+            };
+            let r =
+                ComboBox::from_id_salt(("sheet-title-block-pick", id)).selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut chosen, String::new(), built_in);
+                    // No border, title box or folding marks, for one drawn on the sheet itself.
+                    ui.selectable_value(&mut chosen, bimcraft_core::titleblock::NONE.to_string(), none);
+                    for n in model.title_blocks.keys() {
+                        ui.selectable_value(&mut chosen, n.clone(), n);
+                    }
+                });
+            r.response.labelled_by(label.id);
+            ui.end_row();
+            for f in tb.iter().flat_map(|tb| tb.fields.iter()).filter(|f| f.scope == bimcraft_core::titleblock::Scope::Sheet) {
+                let key = f.key.to_ascii_uppercase();
+                let label = ui.label(f.shown());
+                let current = sheet.fields.get(&key).cloned().unwrap_or_default();
+                let hint = values.get(&key).filter(|_| current.is_empty()).cloned().unwrap_or_default();
+                if let Some(typed) = self.field(ui, id, &format!("title.{key}"), current, label.id, &hint) {
+                    let v = if typed.trim().is_empty() { Value::Null } else { json!(typed) };
+                    change = Some(json!({"id": id, "fields": {key: v}}));
+                }
+                ui.end_row();
+            }
+        });
+        if chosen != sheet.title_block {
+            change = Some(json!({"id": id, "title_block": chosen}));
+        }
+        if let Some(p) = change {
+            self.run("modify", p);
+        }
+        ui.horizontal(|ui| {
+            let name = tb.is_some().then(|| sheet.title_block.clone());
+            if ui.button(t("Edit Title Blocks…")).clicked() {
+                self.open_title_blocks(name.as_deref());
+            }
+        });
+    }
+
+    /// The name a group of a project's or a family's own keeps its folding under.
+    fn collapse_key(&mut self, group: &str) -> &'static str {
+        if let Some(k) = self.collapse_keys.iter().find(|k| **k == group) {
+            return k;
+        }
+        let k: &'static str = Box::leak(group.to_string().into_boxed_str());
+        self.collapse_keys.push(k);
+        k
     }
 
     /// A schedule view's own parameters, as Revit's palette has them: its name and category, and
@@ -1330,42 +2723,36 @@ impl BimApp {
             if !unfolded {
                 continue;
             }
-            Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
-                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-                Grid::new(("schedule-properties", group)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(
-                    ui,
-                    |ui| {
-                        if group == "Identity Data" {
-                            let label = ui.label(t("View Name"));
-                            match made {
-                                Some(id) => {
-                                    if let Some(typed) = self.field(ui, id, "name", sc.name.clone(), label.id, "") {
-                                        rename = Some((id, typed));
-                                    }
-                                }
-                                // Every project's, as it is: named as the project's once it's changed.
-                                None => {
-                                    ui.label(RichText::new(&sc.name).color(pal().muted));
-                                }
+            grid(ui, ("schedule-properties", group), |ui| {
+                if group == "Identity Data" {
+                    let label = ui.label(t("View Name"));
+                    match made {
+                        Some(id) => {
+                            if let Some(typed) = self.field(ui, id, "name", sc.name.clone(), label.id, "") {
+                                rename = Some((id, typed));
                             }
-                            ui.end_row();
-                            return;
                         }
-                        ui.label(t("Category"));
-                        ui.label(RichText::new(lang::category(&sc.of, true)).color(pal().muted));
-                        ui.end_row();
-                        for (tab, label) in SCHEDULE_TABS.iter().enumerate() {
-                            ui.label(t(label));
-                            let r = ui.button(t("Edit…"));
-                            // Named for what it edits, for screen readers.
-                            r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Edit {}", &[t(label)])));
-                            if r.clicked() {
-                                open = Some(tab);
-                            }
-                            ui.end_row();
+                        // Every project's, as it is: named as the project's once it's changed.
+                        None => {
+                            ui.label(RichText::new(&sc.name).color(pal().muted));
                         }
-                    },
-                );
+                    }
+                    ui.end_row();
+                    return;
+                }
+                ui.label(t("Category"));
+                ui.label(RichText::new(lang::category(&sc.of, true)).color(pal().muted));
+                ui.end_row();
+                for (tab, label) in SCHEDULE_TABS.iter().enumerate() {
+                    ui.label(t(label));
+                    let r = wide_button(ui, t("Edit…"));
+                    // Named for what it edits, for screen readers.
+                    r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Edit {}", &[t(label)])));
+                    if r.clicked() {
+                        open = Some(tab);
+                    }
+                    ui.end_row();
+                }
             });
         }
         // Named otherwise, one every project has is just the project's: its tab follows it.
@@ -1390,91 +2777,99 @@ impl BimApp {
         let Some(mut d) = self.type_dialog.take() else { return };
         let model = Arc::clone(&self.session.model);
         let names: Vec<String> = model.type_names(d.category).into_iter().map(String::from).collect();
-        let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
-        let r = Modal::new(UiId::new("type-properties")).show(ctx, |ui| {
-            // Wider for a type's layers.
-            ui.set_width(if LAYERED.contains(&d.category) { 560.0 } else { 400.0 });
-            ui.label(RichText::new(t("Type Properties")).heading());
-            ui.add_space(6.0);
-            Grid::new("type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label(t("Family:"));
-                ui.label(lang::category(d.category, false));
-                ui.end_row();
-                let l = ui.label(t("Type:"));
-                ui.horizontal(|ui| {
-                    let c = ComboBox::from_id_salt("type-name").selected_text(&d.name).width(200.0).show_ui(ui, |ui| {
-                        for n in &names {
-                            if ui.selectable_label(*n == d.name, n).clicked() {
-                                switch = Some(n.clone());
-                            }
-                        }
-                    });
-                    c.response.labelled_by(l.id);
-                    if d.duplicate.is_none() && ui.button(t("Duplicate…")).clicked() {
-                        d.duplicate = Some(format!("{} 2", d.name));
-                    }
-                });
-                ui.end_row();
-                if let Some(new) = &mut d.duplicate {
-                    let l = ui.label(t("New type"));
-                    ui.horizontal(|ui| {
-                        ui.add(TextEdit::singleline(new).desired_width(200.0)).labelled_by(l.id);
-                        create = ui.button(t("Create")).clicked();
-                    });
-                    ui.end_row();
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(RichText::new(t("Type Parameters")).strong());
-            Grid::new("type-parameters").num_columns(2).striped(true).min_col_width(150.0).show(ui, |ui| {
-                ui.label(RichText::new(t("Parameter")).color(pal().muted));
-                ui.label(RichText::new(t("Value")).color(pal().muted));
-                ui.end_row();
-                let round = d.shape.as_ref().is_some_and(|(round, _)| *round);
-                for (key, label, typed) in &mut d.fields {
-                    // A round section has a diameter and no depth.
-                    if round && *key == "depth" {
-                        continue;
-                    }
-                    let l = ui.label(t(if round && *key == "width" { "Diameter" } else { label }));
-                    ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
-                    ui.end_row();
-                }
-                if let Some((round, material)) = &mut d.shape {
-                    ui.label("");
-                    ui.checkbox(round, t("Round"));
-                    ui.end_row();
-                    let l = ui.label(t("Material"));
-                    let names: Vec<String> = model.materials.keys().cloned().collect();
-                    if let Some(n) = combo(ui, (0, "type-material"), l.id, material, &names) {
-                        *material = n;
-                    }
-                    ui.end_row();
-                }
-            });
-            if LAYERED.contains(&d.category) {
-                ui.add_space(6.0);
+        let (mut ok, mut cancel, mut apply, mut asked) = (false, false, false, None);
+        let r = Modal::new(UiId::new("type-properties"), t("Type Properties")).width(crate::typeprops::WIDTH).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                let family = tf("System Family: {}", &[&lang::category(d.category, true)]);
+                asked = typeprops::head(ui, "type", &family, &names, &d.name, &mut d.naming, true);
+                let below = typeprops::foot_height(ui, d.error.is_some());
                 let materials: Vec<String> = model.materials.keys().cloned().collect();
-                let (out, inward) = if d.category == "wall" { ("Out", "In") } else { ("Up", "Down") };
-                layer_editor(ui, &mut d.layers, model.units, &materials, (out, inward));
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                apply = ui.button(t("Apply")).clicked();
-                cancel = ui.button(t("Cancel")).clicked();
-                ok = ui.button(t("OK")).clicked();
+                let layered = LAYERED.contains(&d.category);
+                let round = d.shape.as_ref().is_some_and(|(round, _)| *round);
+                // The groups in the order their first row comes; a run's roundness is a dimension, its material its own group.
+                let mut groups: Vec<&str> = Vec::new();
+                let extra = [
+                    (layered, "Construction"),
+                    (d.shape.is_some(), "Dimensions"),
+                    (d.shape.is_some(), msg!("Materials and Finishes")),
+                    (d.room.is_some(), ROOM_FINISHES),
+                    (d.room.is_some(), GRAPHICS),
+                ];
+                for g in d.fields.iter().map(|f| f.0).chain(extra.iter().filter(|(on, _)| *on).map(|(_, g)| *g)) {
+                    if !groups.contains(&g) {
+                        groups.push(g);
+                    }
+                }
+                typeprops::table(ui, "type", below, |tb| {
+                    for g in groups {
+                        tb.group(g);
+                        for (_, key, label, typed) in d.fields.iter_mut().filter(|f| f.0 == g) {
+                            // A round section has a diameter and no depth.
+                            if round && *key == "depth" {
+                                continue;
+                            }
+                            tb.text(t(if round && *key == "width" { "Diameter" } else { label }), typed, model.units.name());
+                        }
+                        match (g, &mut d.shape) {
+                            ("Dimensions", Some((round, _))) => tb.check(t("Round"), round),
+                            ("Materials and Finishes", Some((_, material))) => tb.pick(t("Material"), material, &materials),
+                            _ => {}
+                        }
+                        if let Some(room) = &mut d.room {
+                            room.rows(tb, g, &model);
+                        }
+                        if g == "Construction" && layered {
+                            let (out, inward) = if d.category == "wall" { (msg!("Out"), msg!("In")) } else { ("Up", "Down") };
+                            let variable = matches!(d.category, "floor" | "roof");
+                            tb.full(|ui| layer_editor(ui, &mut d.layers, model.units, &materials, (out, inward), variable));
+                        }
+                    }
+                    type_value_rows(tb, &mut d.project, model.units);
+                });
+                typeprops::error(ui, d.error.as_deref());
+            });
+            crate::popup::footer(ui, |ui| {
+                (ok, cancel, apply) = typeprops::foot(ui);
             });
         });
+        let switch = match &asked {
+            Some(Head::Switch(n)) => Some(n.clone()),
+            _ => None,
+        };
+        let create = matches!(asked, Some(Head::Duplicate(_)));
+        if let Some(Head::Rename(to)) = &asked {
+            let p = json!({"category": d.category, "type": d.name, "name": to});
+            if self.run_for_type("rename_type", p, &mut d.error) {
+                if self.types.get(d.category) == Some(&d.name) {
+                    self.types.insert(d.category, to.clone());
+                }
+                d.show(&Arc::clone(&self.session.model), to.clone());
+            }
+        }
         if let Some(n) = switch {
             d.show(&model, n);
         }
-        if create && let Some(new) = d.duplicate.clone() {
+        if create && let Some(Head::Duplicate(new)) = asked.clone() {
             let layered = !model.type_layers(d.category, &d.name).is_empty();
-            let made = match d.params(new.trim(), model.units, layered) {
+            let made = match d.params(&new, model.units, layered) {
                 Ok(mut p) => {
                     // A duplicate is round, and made of a material, as the type it copies is.
                     let types = serde_json::to_value(&model.types).unwrap_or_default();
                     let from = type_json(&types, d.category, &d.name);
+                    // A structural duplicate carries its section, including a catalogue designation
+                    // only while the dimensions still match. The command validates resized plates.
+                    if let Some(profile) = from["profile"].as_object() {
+                        let same_size = ["width", "depth"].iter().all(|key| p[*key] == from[*key]);
+                        if same_size && let Some(name) = profile.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+                            p["profile"] = json!(name);
+                        } else {
+                            for key in ["shape", "web", "flange", "thickness", "radius", "turned"] {
+                                if let Some(value) = profile.get(key) {
+                                    p[key] = value.clone();
+                                }
+                            }
+                        }
+                    }
                     if d.shape.is_none() {
                         for key in ["round", "material"] {
                             if !from[key].is_null() {
@@ -1482,22 +2877,30 @@ impl BimApp {
                             }
                         }
                     }
-                    self.run("type", p).is_some()
+                    // A duplicate has the values the type it copies has.
+                    let copy = json!({"category": d.category, "type": d.name, "copy_to": new});
+                    let more = (!d.project.is_empty()).then_some(("type_parameter", copy));
+                    self.run_type_commands(std::iter::once(("type", p)).chain(more).collect(), &mut d.error)
                 }
                 Err(e) => {
-                    self.status = Status { text: e, error: true };
+                    d.error = Some(e);
                     false
                 }
             };
             if made {
-                d.show(&self.session.model, new.trim().to_string());
+                d.show(&self.session.model, new);
             }
         }
         if apply || ok {
-            let applied = match d.params(&d.name, model.units, false) {
-                Ok(p) => self.run("type", p).is_some(),
+            let values = type_value_changes(&d.project, model.units);
+            let applied = match d.params(&d.name, model.units, false).and_then(|p| Ok((p, values?))) {
+                Ok((p, values)) => {
+                    let set = json!({"category": d.category, "type": d.name, "values": values});
+                    let more = (!values.is_empty()).then_some(("type_parameter", set));
+                    self.run_type_commands(std::iter::once(("type", p)).chain(more).collect(), &mut d.error)
+                }
                 Err(e) => {
-                    self.status = Status { text: e, error: true };
+                    d.error = Some(e);
                     false
                 }
             };
@@ -1511,7 +2914,7 @@ impl BimApp {
             let m = &self.session.model;
             if d.elements.is_empty() {
                 self.types.insert(d.category, d.name.clone());
-            } else if d.elements.iter().any(|id| element_json(m, *id)["type"].as_str() != Some(d.name.as_str())) {
+            } else if self.elements_json(m, &d.elements).iter().any(|j| j["type"].as_str() != Some(d.name.as_str())) {
                 self.run("modify", json!({"ids": d.elements, "type": d.name}));
             }
         }
@@ -1534,148 +2937,166 @@ impl BimApp {
         // The material that asked for a picture for its texture.
         let mut picture: Option<String> = None;
         let released = ctx.input(|i| !i.pointer.any_down());
-        let r = Modal::new(UiId::new("materials")).show(ctx, |ui| {
-            ui.set_width(440.0);
-            ui.label(RichText::new(t("Materials")).heading());
-            ui.add_space(6.0);
-            Grid::new("material-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                let l = ui.label(t("Material:"));
-                ui.horizontal(|ui| {
-                    let c = ComboBox::from_id_salt("material-name").selected_text(&d.picked).width(200.0).show_ui(ui, |ui| {
-                        for name in model.materials.keys() {
-                            if ui.selectable_label(*name == d.picked, name).clicked() {
-                                picked = Some(name.clone());
+        let r = Modal::new(UiId::new("materials"), t("Materials")).width(440.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.add_space(6.0);
+                Grid::new("material-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                    let l = ui.label(t("Material:"));
+                    ui.horizontal(|ui| {
+                        let c = ComboBox::from_id_salt("material-name").selected_text(&d.picked).width(200.0).show_ui(ui, |ui| {
+                            for name in model.materials.keys() {
+                                if ui.selectable_label(*name == d.picked, name).clicked() {
+                                    picked = Some(name.clone());
+                                }
                             }
+                        });
+                        c.response.labelled_by(l.id);
+                        if ui.button(t("New")).clicked() {
+                            let fresh =
+                                (1..).map(|n| format!("{} {n}", t("Material"))).find(|n| !model.materials.contains_key(n)).unwrap_or_default();
+                            run = Some(json!({"name": fresh}));
+                            picked = Some(fresh);
+                        }
+                        if ui.add_enabled(model.materials.contains_key(&d.picked), Button::new(t("Delete"))).clicked() {
+                            run = Some(json!({"name": d.picked, "delete": true}));
+                            picked = model.materials.keys().find(|n| **n != d.picked).cloned();
                         }
                     });
-                    c.response.labelled_by(l.id);
-                    if ui.button(t("New")).clicked() {
-                        let fresh =
-                            (1..).map(|n| format!("{} {n}", t("Material"))).find(|n| !model.materials.contains_key(n)).unwrap_or_default();
-                        run = Some(json!({"name": fresh}));
-                        picked = Some(fresh);
-                    }
-                    if ui.add_enabled(model.materials.contains_key(&d.picked), Button::new(t("Delete"))).clicked() {
-                        run = Some(json!({"name": d.picked, "delete": true}));
-                        picked = model.materials.keys().find(|n| **n != d.picked).cloned();
-                    }
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
-            if let Some(m) = model.materials.get(&d.picked) {
-                ui.add_space(6.0);
-                Grid::new("material").num_columns(2).striped(true).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
-                    let l = ui.label(t("Name"));
-                    let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(200.0)).labelled_by(l.id);
-                    if r.lost_focus() && !d.name.trim().is_empty() && d.name.trim() != d.picked {
-                        run = Some(json!({"name": d.picked, "rename": d.name.trim()}));
-                        picked = Some(d.name.trim().to_string());
-                    }
-                    ui.end_row();
-                    let l = ui.label(t("Color"));
-                    let colour = d.color.get_or_insert(m.color);
-                    ui.color_edit_button_srgb(colour).labelled_by(l.id);
-                    if released && *colour != m.color {
-                        run = Some(json!({"name": d.picked, "color": *colour}));
-                    }
-                    ui.end_row();
-                    for (key, label, now) in [("cut", "Cut Pattern", m.cut), ("surface", "Surface Pattern", m.surface)] {
-                        let l = ui.label(t(label));
-                        let c = ComboBox::from_id_salt(("material-pattern", key)).selected_text(t(pattern_name(now))).width(160.0).show_ui(
-                            ui,
-                            |ui| {
+                if let Some(m) = model.materials.get(&d.picked) {
+                    ui.add_space(6.0);
+                    Grid::new("material").num_columns(2).striped(true).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                        let l = ui.label(t("Name"));
+                        let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(200.0)).labelled_by(l.id);
+                        if r.lost_focus() && !d.name.trim().is_empty() && d.name.trim() != d.picked {
+                            run = Some(json!({"name": d.picked, "rename": d.name.trim()}));
+                            picked = Some(d.name.trim().to_string());
+                        }
+                        ui.end_row();
+                        let l = ui.label(t("Color"));
+                        let colour = d.color.get_or_insert(m.color);
+                        ui.color_edit_button_srgb(colour).labelled_by(l.id);
+                        if released && *colour != m.color {
+                            run = Some(json!({"name": d.picked, "color": *colour}));
+                        }
+                        ui.end_row();
+                        // How see-through the 3D view draws what is made of it, percent.
+                        let l = ui.label(t("Transparency"));
+                        let clear = d.clear.get_or_insert(m.transparency);
+                        ui.add(Slider::new(clear, 0..=100).suffix("%")).labelled_by(l.id);
+                        if released && *clear != m.transparency {
+                            run = Some(json!({"name": d.picked, "transparency": *clear}));
+                        }
+                        ui.end_row();
+                        // The patterns drawn in code, then the project's fill patterns.
+                        let cut = [
+                            ("cut", msg!("Cut Pattern"), m.cut, &m.cut_pattern),
+                            ("surface", msg!("Surface Pattern"), m.surface, &m.surface_pattern),
+                        ];
+                        for (key, label, now, fill) in cut {
+                            let l = ui.label(t(label));
+                            let shown = fill.clone().unwrap_or_else(|| t(pattern_name(now)).to_string());
+                            let c = ComboBox::from_id_salt(("material-pattern", key)).selected_text(shown).width(160.0).show_ui(ui, |ui| {
                                 for (p, name) in PATTERNS {
-                                    if ui.selectable_label(p == now, t(name)).clicked() {
+                                    if ui.selectable_label(fill.is_none() && p == now, t(name)).clicked() {
                                         run = Some(json!({"name": d.picked, key: p}));
                                     }
                                 }
-                            },
-                        );
-                        c.response.labelled_by(l.id);
-                        ui.end_row();
-                    }
-                    // Its texture: a pattern drawn in code or a picture, over its colour in the 3D view; a tile of it this
-                    // big, turned and moved.
-                    let l = ui.label(t("Texture"));
-                    let now = m.texture.as_ref().map(|x| x.kind);
-                    let shown = now.map_or(t("None"), |k| t(texture_name(k)));
-                    let c = ComboBox::from_id_salt("material-texture").selected_text(shown).width(160.0).show_ui(ui, |ui| {
-                        if ui.selectable_label(now.is_none(), t("None")).clicked() {
-                            run = Some(json!({"name": d.picked, "texture": null}));
-                        }
-                        for k in TextureKind::ALL.into_iter().filter(|k| *k != TextureKind::Image) {
-                            if ui.selectable_label(now == Some(k), t(texture_name(k))).clicked() {
-                                run = Some(json!({"name": d.picked, "texture": {"kind": k}}));
-                            }
-                        }
-                        if ui.selectable_label(now == Some(TextureKind::Image), t("Picture…")).clicked() {
-                            picture = Some(d.picked.clone());
-                        }
-                    });
-                    c.response.labelled_by(l.id);
-                    ui.end_row();
-                    if let Some(x) = &m.texture {
-                        let units = model.units;
-                        if !d.texture.as_ref().is_some_and(|(n, old, _)| *n == d.picked && old == x) {
-                            let typed = [
-                                units.length(x.size[0]),
-                                units.length(x.size[1]),
-                                format!("{}", x.angle),
-                                units.length(x.offset[0]),
-                                units.length(x.offset[1]),
-                            ];
-                            d.texture = Some((d.picked.clone(), x.clone(), typed));
-                        }
-                        if let Some((_, _, typed)) = &mut d.texture {
-                            let rows = [
-                                ("Tile Width", 0),
-                                ("Tile Height", 1),
-                                ("Texture Angle", 2),
-                                ("Texture Offset Across", 3),
-                                ("Texture Offset Up", 4),
-                            ];
-                            for (label, k) in rows {
-                                let l = ui.label(t(label));
-                                let hint = if k == 2 { "°" } else { units.name() };
-                                let r = ui.add(TextEdit::singleline(&mut typed[k]).desired_width(120.0).hint_text(hint)).labelled_by(l.id);
-                                if r.lost_focus() {
-                                    let length = |i: usize| units.parse(&typed[i]);
-                                    match (length(0), length(1), number(&typed[2]), length(3), length(4)) {
-                                        (Some(w), Some(h), Some(a), Some(ox), Some(oy)) => {
-                                            if [w, h, a, ox, oy] != [x.size[0], x.size[1], x.angle, x.offset[0], x.offset[1]] {
-                                                run = Some(
-                                                    json!({"name": d.picked, "texture": {"size": [w, h], "angle": a, "offset": [ox, oy]}}),
-                                                );
-                                            }
-                                        }
-                                        _ => typed_wrong = Some(tf("`{}` is not a size, an angle or an offset", &[&typed[k]])),
+                                ui.separator();
+                                for n in model.fill_patterns.keys() {
+                                    if ui.selectable_label(fill.as_ref() == Some(n), n).clicked() {
+                                        run = Some(json!({"name": d.picked, key: n}));
                                     }
                                 }
-                                ui.end_row();
+                            });
+                            c.response.labelled_by(l.id);
+                            ui.end_row();
+                        }
+                        // Its texture: a pattern drawn in code or a picture, over its colour in the 3D view; a tile of it this
+                        // big, turned and moved.
+                        let l = ui.label(t("Texture"));
+                        let now = m.texture.as_ref().map(|x| x.kind);
+                        let shown = now.map_or(t("None"), |k| t(texture_name(k)));
+                        let c = ComboBox::from_id_salt("material-texture").selected_text(shown).width(160.0).show_ui(ui, |ui| {
+                            if ui.selectable_label(now.is_none(), t("None")).clicked() {
+                                run = Some(json!({"name": d.picked, "texture": null}));
+                            }
+                            for k in TextureKind::ALL.into_iter().filter(|k| *k != TextureKind::Image) {
+                                if ui.selectable_label(now == Some(k), t(texture_name(k))).clicked() {
+                                    run = Some(json!({"name": d.picked, "texture": {"kind": k}}));
+                                }
+                            }
+                            if ui.selectable_label(now == Some(TextureKind::Image), t("Picture…")).clicked() {
+                                picture = Some(d.picked.clone());
+                            }
+                        });
+                        c.response.labelled_by(l.id);
+                        ui.end_row();
+                        if let Some(x) = &m.texture {
+                            let units = model.units;
+                            if !d.texture.as_ref().is_some_and(|(n, old, _)| *n == d.picked && old == x) {
+                                let typed = [
+                                    units.length(x.size[0]),
+                                    units.length(x.size[1]),
+                                    format!("{}", x.angle),
+                                    units.length(x.offset[0]),
+                                    units.length(x.offset[1]),
+                                ];
+                                d.texture = Some((d.picked.clone(), x.clone(), typed));
+                            }
+                            if let Some((_, _, typed)) = &mut d.texture {
+                                let rows = [
+                                    (msg!("Tile Width"), 0),
+                                    (msg!("Tile Height"), 1),
+                                    (msg!("Texture Angle"), 2),
+                                    (msg!("Texture Offset Across"), 3),
+                                    (msg!("Texture Offset Up"), 4),
+                                ];
+                                for (label, k) in rows {
+                                    let l = ui.label(t(label));
+                                    let hint = if k == 2 { "°" } else { units.name() };
+                                    let r = ui.add(TextEdit::singleline(&mut typed[k]).desired_width(120.0).hint_text(hint)).labelled_by(l.id);
+                                    if r.lost_focus() {
+                                        let length = |i: usize| units.parse(&typed[i]);
+                                        match (length(0), length(1), number(&typed[2]), length(3), length(4)) {
+                                            (Some(w), Some(h), Some(a), Some(ox), Some(oy)) => {
+                                                if [w, h, a, ox, oy] != [x.size[0], x.size[1], x.angle, x.offset[0], x.offset[1]] {
+                                                    run = Some(
+                                                        json!({"name": d.picked, "texture": {"size": [w, h], "angle": a, "offset": [ox, oy]}}),
+                                                    );
+                                                }
+                                            }
+                                            _ => typed_wrong = Some(tf("`{}` is not a size, an angle or an offset", &[&typed[k]])),
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
                             }
                         }
-                    }
-                });
-                // A tile of its texture, or its colour; and the Favorites it can be kept in.
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let key = format!("{:?}", (m.color, &m.texture));
-                    if d.swatch.as_ref().map(|(k, _)| k) != Some(&key) {
-                        d.swatch = crate::favorites::swatch(ui.ctx(), "material-swatch", m, &model.images, 64).map(|h| (key, h));
-                    }
-                    crate::favorites::paint_swatch(ui, 64.0, m.color, d.swatch.as_ref().map(|(_, h)| h));
-                    ui.vertical(|ui| {
-                        if ui.button(t("Save to Favorites")).clicked() {
-                            favorite = Some(true);
-                        }
-                        if ui.button(t("Favorites…")).clicked() {
-                            favorite = Some(false);
-                        }
                     });
-                });
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+                    // A tile of its texture, or its colour; and the Favorites it can be kept in.
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let key = format!("{:?}", (m.color, &m.texture));
+                        if d.swatch.as_ref().map(|(k, _)| k) != Some(&key) {
+                            d.swatch = crate::favorites::swatch(ui.ctx(), "material-swatch", m, &model.images, 64).map(|h| (key, h));
+                        }
+                        crate::favorites::paint_swatch(ui, 64.0, m.color, d.swatch.as_ref().map(|(_, h)| h));
+                        ui.vertical(|ui| {
+                            if ui.button(t("Save to Favorites")).clicked() {
+                                favorite = Some(true);
+                            }
+                            if ui.button(t("Favorites…")).clicked() {
+                                favorite = Some(false);
+                            }
+                        });
+                    });
+                }
+            });
+            crate::popup::footer(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            });
         });
         if let Some(text) = typed_wrong {
             self.status = Status { text, error: true };
@@ -1700,11 +3121,14 @@ impl BimApp {
             });
         }
         if let Some(n) = picked {
-            (d.name, d.picked, d.color) = (n.clone(), n, None);
+            (d.name, d.picked, d.color, d.clear) = (n.clone(), n, None, None);
         } else if !self.session.model.materials.contains_key(&d.picked) {
             d = MaterialsDialog::new(&self.session.model);
         } else if d.color.is_some_and(|c| self.session.model.materials.get(&d.picked).is_some_and(|m| m.color == c)) {
             d.color = None;
+        }
+        if d.clear.is_some_and(|c| self.session.model.materials.get(&d.picked).is_some_and(|m| m.transparency == c)) {
+            d.clear = None;
         }
         if !(close || r.should_close()) {
             self.materials_dialog = Some(d);
@@ -1713,18 +3137,23 @@ impl BimApp {
 }
 
 /// A type's layers, exterior or top first: what each does, what it's made of (from the library),
-/// how thick; a new one on the outside, or on top, and each moved, or taken away.
-fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials: &[String], (out, inward): (&str, &str)) {
+/// how thick; with `variable` (a floor's or a roof's), which one takes up a shaped top's falls; a new one on the outside, or on
+/// top, and each moved, or taken away.
+fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials: &[String], (out, inward): (&str, &str), variable: bool) {
     ui.label(RichText::new(t("Layers")).strong());
     let mut action: Option<(usize, i8)> = None;
-    Grid::new("type-layers").num_columns(4).striped(true).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
+    let mut varied: Option<usize> = None;
+    Grid::new("type-layers").num_columns(if variable { 5 } else { 4 }).striped(true).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
         let function = ui.label(RichText::new(t("Function")).color(pal().muted));
         let material = ui.label(RichText::new(t("Material")).color(pal().muted));
         let thickness = ui.label(RichText::new(t("Thickness")).color(pal().muted));
+        if variable {
+            ui.label(RichText::new(t("Variable")).color(pal().muted));
+        }
         ui.label("");
         ui.end_row();
         let last = layers.len().saturating_sub(1);
-        for (k, (f, mat, typed)) in layers.iter_mut().enumerate() {
+        for (k, (f, mat, typed, var)) in layers.iter_mut().enumerate() {
             let c = ComboBox::from_id_salt(("layer-function", k)).selected_text(t(function_name(*f))).width(110.0).show_ui(ui, |ui| {
                 for (g, n) in FUNCTIONS {
                     if ui.selectable_label(*f == g, t(n)).clicked() {
@@ -1747,6 +3176,12 @@ fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials
             });
             c.response.labelled_by(material.id);
             ui.add_sized([70.0, 20.0], TextEdit::singleline(typed).hint_text(units.name())).labelled_by(thickness.id);
+            if variable
+                && ui.checkbox(var, t("Variable")).on_hover_text(t("Takes up a shaped top's falls: one layer at most")).changed()
+                && *var
+            {
+                varied = Some(k);
+            }
             ui.horizontal(|ui| {
                 if ui.add_enabled(k > 0, Button::new(t(out)).small()).clicked() {
                     action = Some((k, -1));
@@ -1769,9 +3204,15 @@ fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials
         Some((k, _)) if k + 1 < layers.len() => layers.swap(k, k + 1),
         _ => {}
     }
+    // One variable layer at most: the one just ticked.
+    if let Some(k) = varied {
+        for (j, row) in layers.iter_mut().enumerate() {
+            row.3 = j == k;
+        }
+    }
     // A finish 10 mm thick, on the exterior side.
     if ui.button(t("Insert Layer")).clicked() {
-        layers.insert(0, (Function::Finish, String::new(), units.length(10.0)));
+        layers.insert(0, (Function::Finish, String::new(), units.length(10.0), false));
     }
 }
 
@@ -1784,9 +3225,13 @@ pub(crate) struct FamilyDialog {
     /// The components that were on the type when the dialog opened; OK puts them on the type shown.
     elements: Vec<Id>,
     /// Each type parameter: its name, what it holds, as typed, and whether a formula works it out.
-    fields: Vec<(String, Holds, String, bool)>,
-    /// The name being typed for a duplicate.
-    duplicate: Option<String>,
+    fields: Vec<(String, Holds, String, bool, Under)>,
+    /// A new name being typed, for a duplicate or a rename.
+    naming: Naming,
+    /// What stopped OK, Apply, Duplicate or Rename.
+    error: Option<String>,
+    /// The type's values of the project's type parameters, as typed.
+    project: Vec<TypeValue>,
 }
 
 impl FamilyDialog {
@@ -1803,10 +3248,19 @@ impl FamilyDialog {
                     Some(Val::Text(t)) => t.clone(),
                     None => String::new(),
                 };
-                f.parameters.iter().filter(|p| !p.instance).map(|p| (p.name.clone(), p.kind, typed(p), p.formula.is_some())).collect()
+                f.parameters
+                    .iter()
+                    .filter(|p| !p.instance)
+                    .map(|p| (p.name.clone(), p.kind, typed(p), p.formula.is_some() || p.reporting, p.group()))
+                    .collect()
             })
             .unwrap_or_default();
-        FamilyDialog { family, name, elements, fields, duplicate: None }
+        // A family's parameter tied to a project's is the family's; the rest of the project's type parameters are as for any type.
+        let category = m.families.get(&family).map_or("component", |f| bimcraft_core::parameters::family_category(f.category));
+        let guid = m.library.guid(&LibKind::FamilyType, &format!("{family}: {name}"));
+        let own = |n: &str| m.families.get(&family).is_some_and(|f| f.parameters.iter().any(|q| q.name == n));
+        let project = type_values(m, category, guid).into_iter().filter(|v| !own(&v.name)).collect();
+        FamilyDialog { family, name, elements, fields, naming: Naming::None, error: None, project }
     }
 
     /// The dialog showing type `name` as the model has it now.
@@ -1818,12 +3272,14 @@ impl FamilyDialog {
     /// aren't what they hold.
     fn params(&self, name: &str, units: Units) -> Result<Value, String> {
         let mut set = serde_json::Map::new();
-        for (key, kind, typed, _) in self.fields.iter().filter(|f| !f.3) {
+        for (key, kind, typed, ..) in self.fields.iter().filter(|f| !f.3 && f.1 != Holds::FamilyType) {
             let v = match kind {
                 Holds::Length => json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[key, typed]))?),
-                Holds::Number | Holds::Angle => json!(number(typed).ok_or_else(|| tf("{}: `{}` is not a number", &[key, typed]))?),
+                Holds::Number | Holds::Angle | Holds::Integer | Holds::Area | Holds::Volume => {
+                    json!(number(typed).ok_or_else(|| tf("{}: `{}` is not a number", &[key, typed]))?)
+                }
                 Holds::YesNo => json!(typed == "1"),
-                Holds::Material => json!(typed),
+                Holds::Material | Holds::Text | Holds::Url | Holds::FamilyType => json!(typed),
             };
             set.insert(key.clone(), v);
         }
@@ -1838,98 +3294,82 @@ impl BimApp {
         let model = Arc::clone(&self.session.model);
         let names: Vec<String> = model.families.get(&d.family).map(|f| f.types.keys().cloned().collect()).unwrap_or_default();
         let materials: Vec<String> = model.materials.keys().cloned().collect();
-        let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
-        let r = Modal::new(UiId::new("family-type-properties")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.label(RichText::new(t("Type Properties")).heading());
-            ui.add_space(6.0);
-            Grid::new("family-type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label(t("Family:"));
-                ui.label(&d.family);
-                ui.end_row();
-                let l = ui.label(t("Type:"));
-                ui.horizontal(|ui| {
-                    let c = ComboBox::from_id_salt("family-type-name").selected_text(&d.name).width(200.0).show_ui(ui, |ui| {
-                        for n in &names {
-                            if ui.selectable_label(*n == d.name, n).clicked() {
-                                switch = Some(n.clone());
+        let (mut ok, mut cancel, mut apply, mut asked) = (false, false, false, None);
+        let r = Modal::new(UiId::new("family-type-properties"), t("Type Properties")).width(crate::typeprops::WIDTH).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                asked = typeprops::head(ui, "family-type", &d.family, &names, &d.name, &mut d.naming, true);
+                let below = typeprops::foot_height(ui, d.error.is_some());
+                // Each parameter under its group: its own, else the one its kind goes under.
+                let groups = Under::listed(d.fields.iter().map(|f| f.4.clone()));
+                typeprops::table(ui, "family-type", below, |tb| {
+                    for g in groups {
+                        tb.group(g.label());
+                        for (key, kind, typed, computed, _) in d.fields.iter_mut().filter(|f| f.4 == g) {
+                            match kind {
+                                // What a formula works out, shown as Revit greys it.
+                                _ if *computed => tb.shown(key, typed),
+                                Holds::YesNo => {
+                                    let mut on = typed == "1";
+                                    tb.check(key, &mut on);
+                                    *typed = (if on { "1" } else { "0" }).to_string();
+                                }
+                                Holds::Material => tb.pick(key, typed, &materials),
+                                Holds::Length => tb.text(key, typed, model.units.name()),
+                                Holds::Angle => tb.text(key, typed, "°"),
+                                Holds::Area => tb.text(key, typed, "mm²"),
+                                Holds::Volume => tb.text(key, typed, "mm³"),
+                                Holds::FamilyType => tb.shown(key, typed),
+                                Holds::Number | Holds::Integer | Holds::Text | Holds::Url => tb.text(key, typed, ""),
                             }
                         }
-                    });
-                    c.response.labelled_by(l.id);
-                    if d.duplicate.is_none() && ui.button(t("Duplicate…")).clicked() {
-                        d.duplicate = Some(format!("{} 2", d.name));
                     }
+                    type_value_rows(tb, &mut d.project, model.units);
                 });
-                ui.end_row();
-                if let Some(new) = &mut d.duplicate {
-                    let l = ui.label(t("New type"));
-                    ui.horizontal(|ui| {
-                        ui.add(TextEdit::singleline(new).desired_width(200.0)).labelled_by(l.id);
-                        create = ui.button(t("Create")).clicked();
-                    });
-                    ui.end_row();
-                }
+                typeprops::error(ui, d.error.as_deref());
             });
-            ui.add_space(6.0);
-            ui.label(RichText::new(t("Type Parameters")).strong());
-            Grid::new("family-type-parameters").num_columns(2).striped(true).min_col_width(150.0).show(ui, |ui| {
-                ui.label(RichText::new(t("Parameter")).color(pal().muted));
-                ui.label(RichText::new(t("Value")).color(pal().muted));
-                ui.end_row();
-                for (key, kind, typed, computed) in &mut d.fields {
-                    let l = ui.label(key.as_str());
-                    match kind {
-                        _ if *computed => {
-                            ui.label(RichText::new(typed.as_str()).color(pal().muted));
-                        }
-                        Holds::YesNo => {
-                            let mut on = typed == "1";
-                            let r = ui.checkbox(&mut on, "");
-                            r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, key.as_str()));
-                            if r.labelled_by(l.id).changed() {
-                                *typed = (if on { "1" } else { "0" }).to_string();
-                            }
-                        }
-                        Holds::Material => {
-                            if let Some(m) = combo(ui, (0, key.as_str()), l.id, typed, &materials) {
-                                *typed = m;
-                            }
-                        }
-                        _ => {
-                            ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
-                        }
-                    }
-                    ui.end_row();
-                }
-            });
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                apply = ui.button(t("Apply")).clicked();
-                cancel = ui.button(t("Cancel")).clicked();
-                ok = ui.button(t("OK")).clicked();
+            crate::popup::footer(ui, |ui| {
+                (ok, cancel, apply) = typeprops::foot(ui);
             });
         });
-        if let Some(n) = switch {
-            d.show(&model, n);
-        }
-        if create && let Some(new) = d.duplicate.clone() {
-            let made = match d.params(new.trim(), model.units) {
-                Ok(p) => self.run("family", p).is_some(),
-                Err(e) => {
-                    self.status = Status { text: e, error: true };
-                    false
+        match asked {
+            Some(Head::Switch(n)) => d.show(&model, n),
+            Some(Head::Duplicate(new)) => {
+                let made = match d.params(&new, model.units) {
+                    Ok(p) => {
+                        let copy = json!({"family": d.family, "type": d.name, "copy_to": new});
+                        let more = (!d.project.is_empty()).then_some(("type_parameter", copy));
+                        self.run_type_commands(std::iter::once(("family", p)).chain(more).collect(), &mut d.error)
+                    }
+                    Err(e) => {
+                        d.error = Some(e);
+                        false
+                    }
+                };
+                if made {
+                    d.show(&self.session.model, new);
                 }
-            };
-            if made {
-                d.show(&self.session.model, new.trim().to_string());
             }
+            Some(Head::Rename(to))
+                if self.run_for_type("rename_type", json!({"family": d.family, "type": d.name, "name": to}), &mut d.error) =>
+            {
+                if self.component.as_ref() == Some(&(d.family.clone(), d.name.clone())) {
+                    self.component = Some((d.family.clone(), to.clone()));
+                }
+                d.show(&Arc::clone(&self.session.model), to);
+            }
+            Some(Head::Rename(_)) => {}
+            None => {}
         }
         if apply || ok {
-            let applied = match d.params(&d.name, model.units) {
-                Ok(p) => self.run("family", p).is_some(),
+            let values = type_value_changes(&d.project, model.units);
+            let applied = match d.params(&d.name, model.units).and_then(|p| Ok((p, values?))) {
+                Ok((p, values)) => {
+                    let set = json!({"family": d.family, "type": d.name, "values": values});
+                    let more = (!values.is_empty()).then_some(("type_parameter", set));
+                    self.run_type_commands(std::iter::once(("family", p)).chain(more).collect(), &mut d.error)
+                }
                 Err(e) => {
-                    self.status = Status { text: e, error: true };
+                    d.error = Some(e);
                     false
                 }
             };
@@ -1943,7 +3383,7 @@ impl BimApp {
             let m = &self.session.model;
             if d.elements.is_empty() {
                 self.component = Some((d.family.clone(), d.name.clone()));
-            } else if d.elements.iter().any(|id| element_json(m, *id)["type"].as_str() != Some(d.name.as_str())) {
+            } else if self.elements_json(m, &d.elements).iter().any(|j| j["type"].as_str() != Some(d.name.as_str())) {
                 self.run("modify", json!({"ids": d.elements, "type": d.name}));
             }
         }
@@ -1964,39 +3404,59 @@ impl BimApp {
             return;
         }
         let mut close = false;
-        let r = Modal::new(UiId::new("snaps")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.label(RichText::new(t("Snaps")).heading());
-            ui.add_space(6.0);
-            ui.label(RichText::new(t("Object Snaps")).strong());
-            let s = &mut self.snaps;
-            let kinds: [(&mut bool, Snap, &str); 6] = [
-                (&mut s.endpoint, Snap::Endpoint, "The ends of walls, grids and what else is drawn, and the points picked so far"),
-                (&mut s.midpoint, Snap::Midpoint, "The middle of a wall, along its arc"),
-                (&mut s.intersection, Snap::Intersection, "Where two walls or grids cross"),
-                (&mut s.centre, Snap::Centre, "The centre of a curved wall, a column or a component"),
-                (&mut s.perpendicular, Snap::Perpendicular, "The foot of the perpendicular from the last point to a wall or grid"),
-                (&mut s.nearest, Snap::Nearest, "A wall's centre line, so a wall drawn on it meets it"),
-            ];
-            for (on, kind, tip) in kinds {
-                ui.checkbox(on, t(kind.name())).on_hover_text(t(tip));
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let label = ui.label(t("Angle steps"));
-                let now = if s.angle >= 1.0 { format!("{}°", s.angle) } else { t("Off").to_string() };
-                let c = ComboBox::from_id_salt("snap-angle").selected_text(now).width(110.0).show_ui(ui, |ui| {
-                    for step in ANGLE_STEPS {
-                        let name = if step >= 1.0 { format!("{step}°") } else { t("Off").to_string() };
-                        ui.selectable_value(&mut s.angle, step, name);
-                    }
+        let r = Modal::new(UiId::new("snaps"), t("Snaps")).width(380.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new(t("Object Snaps")).strong());
+                let s = &mut self.snaps;
+                let kinds: [(&mut bool, Snap, &str); 10] = [
+                    (&mut s.endpoint, Snap::Endpoint, msg!("The ends of walls, grids and what else is drawn, and the points picked so far")),
+                    (&mut s.midpoint, Snap::Midpoint, msg!("The middle of a wall, along its arc")),
+                    (&mut s.intersection, Snap::Intersection, msg!("Where two walls or grids cross")),
+                    (&mut s.centre, Snap::Centre, msg!("The centre of a curved wall, a column or a component")),
+                    (&mut s.perpendicular, Snap::Perpendicular, msg!("The foot of the perpendicular from the last point to a wall or grid")),
+                    (&mut s.quadrant, Snap::Quadrant, msg!("A circle's, an ellipse's or an arc's points along its axes: east, north, west and south")),
+                    (&mut s.tangent, Snap::Tangent, msg!("Where a line from the last point touches a circle or an arc")),
+                    (&mut s.nearest, Snap::Nearest, msg!("A wall's centre line, so a wall drawn on it meets it")),
+                    (&mut s.annotation, Snap::Anchor, msg!("Where a note, dimension, tag, spot elevation, section or elevation mark, detail group or repeating detail is placed")),
+                    (&mut s.cloud, Snap::Point, msg!("A scan's points where the plan's cut plane cuts it, to trace what was measured")),
+                ];
+                for (on, kind, tip) in kinds {
+                    ui.checkbox(on, t(kind.name())).on_hover_text(t(tip));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let label = ui.label(t("Angle steps"));
+                    let now = if s.angle >= 1.0 { format!("{}°", s.angle) } else { t("Off").to_string() };
+                    let c = ComboBox::from_id_salt("snap-angle").selected_text(now).width(110.0).show_ui(ui, |ui| {
+                        for step in ANGLE_STEPS {
+                            let name = if step >= 1.0 { format!("{step}°") } else { t("Off").to_string() };
+                            ui.selectable_value(&mut s.angle, step, name);
+                        }
+                    });
+                    c.response.labelled_by(label.id).on_hover_text(t(
+                        "A direction from the last point sticks to multiples of this angle, from east and from the line before; a dashed guide shows it",
+                    ));
                 });
-                c.response.labelled_by(label.id).on_hover_text(t(
-                    "A direction from the last point sticks to multiples of this angle, from east and from the line before; a dashed guide shows it",
-                ));
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.checkbox(&mut s.alignment_guides, t("Alignment Guides")).on_hover_text(t(
+                "Show temporary alignment guides (smart snapping) when drawing",
+            ));
+            if s.alignment_guides {
+                ui.horizontal(|ui| {
+                    ui.label(t("Snap tolerance"));
+                    ui.add(egui::Slider::new(&mut s.alignment_tolerance, 2.0..=32.0).suffix(" px"));
+                });
+                }
+                ui.separator();
+                ui.checkbox(&mut self.grid_snapping, t("Grid snapping"))
+                    .on_hover_text(t("Applies to all views; snaps to the active view's enabled main grid or subgrid, even when hidden"));
             });
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            crate::popup::footer(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            });
         });
         if close || r.should_close() {
             self.show_snaps = false;
@@ -2024,7 +3484,7 @@ impl BimApp {
             for (i, f) in filters.iter_mut().enumerate() {
                 let kind = kind_of(&f.field);
                 // Each row's caption names its field, its comparison and its value.
-                let caption = ui.label(t(if i == 0 { "Filter by:" } else { "And:" }));
+                let caption = ui.label(t(if i == 0 { msg!("Filter by:") } else { msg!("And:") }));
                 let c = ComboBox::from_id_salt(("filter-field", i)).selected_text(t(&f.field)).width(170.0).show_ui(ui, |ui| {
                     for n in names {
                         if ui.selectable_label(*n == f.field, t(n)).clicked() && *n != f.field {
@@ -2034,7 +3494,7 @@ impl BimApp {
                     }
                 });
                 c.response.labelled_by(caption.id);
-                let now = OPS.iter().find(|(op, _)| *op == f.op).map_or("equals", |(_, n)| n);
+                let now = OPS.iter().find(|(op, _)| *op == f.op).map_or(msg!("equals"), |(_, n)| n);
                 let c = ComboBox::from_id_salt(("filter-op", i)).selected_text(t(now)).width(190.0).show_ui(ui, |ui| {
                     for (op, label) in ops(kind) {
                         if ui.selectable_label(op == f.op, t(label)).clicked() && op != f.op {
@@ -2110,24 +3570,6 @@ impl BimApp {
     }
 }
 
-/// What a project parameter holds, as Project Parameters names it.
-const KINDS: [(ParameterKind, &str); 4] =
-    [(ParameterKind::Text, "Text"), (ParameterKind::Number, "Number"), (ParameterKind::Length, "Length"), (ParameterKind::YesNo, "Yes/No")];
-
-/// Manage > Project Parameters: the project's parameters, the one picked to edit, and its name as
-/// typed (a rename once typed in).
-pub(crate) struct ParametersDialog {
-    picked: String,
-    name: String,
-}
-
-impl ParametersDialog {
-    pub(crate) fn new(m: &Model) -> ParametersDialog {
-        let picked = m.parameters.keys().next().cloned().unwrap_or_default();
-        ParametersDialog { name: picked.clone(), picked }
-    }
-}
-
 /// View > Schedules > Schedule/Quantities: the category picked, and the name typed.
 #[derive(Default)]
 pub(crate) struct NewSchedule {
@@ -2136,7 +3578,7 @@ pub(crate) struct NewSchedule {
 }
 
 /// Schedule Properties' tabs.
-const SCHEDULE_TABS: [&str; 3] = ["Fields", "Filter", "Sorting/Grouping"];
+const SCHEDULE_TABS: [&str; 3] = [msg!("Fields"), "Filter", msg!("Sorting/Grouping")];
 
 /// Schedule Properties, for the schedule on screen: the tab showing, the field picked in each list
 /// of the Fields tab, and a calculated field being made (its name, kind and formula).
@@ -2159,19 +3601,19 @@ const RESULTS: [(schedule::Kind, &str); 4] = [
 /// A filter's comparisons, as Schedule Properties says them.
 const OPS: [(Op, &str); 14] = [
     (Op::Equals, "equals"),
-    (Op::NotEquals, "does not equal"),
-    (Op::Greater, "is greater than"),
-    (Op::GreaterOrEqual, "is greater than or equal to"),
-    (Op::Less, "is less than"),
-    (Op::LessOrEqual, "is less than or equal to"),
-    (Op::Contains, "contains"),
-    (Op::NotContains, "does not contain"),
-    (Op::BeginsWith, "begins with"),
-    (Op::NotBeginsWith, "does not begin with"),
-    (Op::EndsWith, "ends with"),
-    (Op::NotEndsWith, "does not end with"),
-    (Op::HasValue, "has a value"),
-    (Op::HasNoValue, "has no value"),
+    (Op::NotEquals, msg!("does not equal")),
+    (Op::Greater, msg!("is greater than")),
+    (Op::GreaterOrEqual, msg!("is greater than or equal to")),
+    (Op::Less, msg!("is less than")),
+    (Op::LessOrEqual, msg!("is less than or equal to")),
+    (Op::Contains, msg!("contains")),
+    (Op::NotContains, msg!("does not contain")),
+    (Op::BeginsWith, msg!("begins with")),
+    (Op::NotBeginsWith, msg!("does not begin with")),
+    (Op::EndsWith, msg!("ends with")),
+    (Op::NotEndsWith, msg!("does not end with")),
+    (Op::HasValue, msg!("has a value")),
+    (Op::HasNoValue, msg!("has no value")),
 ];
 
 /// The comparisons a field holding `kind` takes: text all of them, numbers by size, yes or no
@@ -2208,139 +3650,42 @@ fn blank(kind: schedule::Kind) -> Value {
 }
 
 impl BimApp {
-    /// Manage > Project Parameters: each project parameter, what it holds and the categories it's
-    /// for, as Revit's dialog has them. Each change is a `parameter` command, undone like any other.
-    pub(crate) fn parameters_window(&mut self, ctx: &Context) {
-        let Some(mut d) = self.parameters_dialog.take() else { return };
-        let model = Arc::clone(&self.session.model);
-        let (mut close, mut run, mut picked): (bool, Option<Value>, Option<String>) = (false, None, None);
-        let r = Modal::new(UiId::new("project-parameters")).show(ctx, |ui| {
-            ui.set_width(460.0);
-            ui.label(RichText::new(t("Project Parameters")).heading());
-            ui.add_space(6.0);
-            Grid::new("parameter-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                let l = ui.label(t("Parameter:"));
-                ui.horizontal(|ui| {
-                    let c = ComboBox::from_id_salt("parameter-name").selected_text(&d.picked).width(200.0).show_ui(ui, |ui| {
-                        for name in model.parameters.keys() {
-                            if ui.selectable_label(*name == d.picked, name).clicked() {
-                                picked = Some(name.clone());
-                            }
-                        }
-                    });
-                    c.response.labelled_by(l.id);
-                    if ui.button(t("New")).clicked() {
-                        let fresh = (1..)
-                            .map(|n| format!("{} {n}", t("Parameter")))
-                            .find(|n| !model.parameters.contains_key(n))
-                            .unwrap_or_default();
-                        run = Some(json!({"name": fresh, "categories": ["wall"]}));
-                        picked = Some(fresh);
-                    }
-                    if ui.add_enabled(model.parameters.contains_key(&d.picked), Button::new(t("Delete"))).clicked() {
-                        run = Some(json!({"name": d.picked, "delete": true}));
-                        picked = model.parameters.keys().find(|n| **n != d.picked).cloned().or_else(|| Some(String::new()));
-                    }
-                });
-                ui.end_row();
-            });
-            match model.parameters.get(&d.picked) {
-                Some(p) => {
-                    ui.add_space(6.0);
-                    Grid::new("parameter").num_columns(2).striped(true).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
-                        let l = ui.label(t("Name"));
-                        let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(200.0)).labelled_by(l.id);
-                        if r.lost_focus() && !d.name.trim().is_empty() && d.name.trim() != d.picked {
-                            run = Some(json!({"name": d.picked, "rename": d.name.trim()}));
-                            picked = Some(d.name.trim().to_string());
-                        }
-                        ui.end_row();
-                        let l = ui.label(t("Type of Parameter"));
-                        let now = KINDS.iter().find(|(k, _)| *k == p.kind).map_or("Text", |(_, n)| n);
-                        let c = ComboBox::from_id_salt("parameter-kind").selected_text(t(now)).width(160.0).show_ui(ui, |ui| {
-                            for (k, label) in KINDS {
-                                if ui.selectable_label(k == p.kind, t(label)).clicked() && k != p.kind {
-                                    run = Some(json!({"name": d.picked, "kind": k}));
-                                }
-                            }
-                        });
-                        c.response.labelled_by(l.id);
-                        ui.end_row();
-                    });
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(t("Categories")).strong());
-                    Grid::new("parameter-categories").num_columns(3).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-                        for (i, cat) in PARAMETER_CATEGORIES.iter().enumerate() {
-                            let mut on = p.categories.iter().any(|c| c == cat);
-                            if ui.checkbox(&mut on, lang::category(cat, true)).changed() {
-                                let mut list: Vec<&str> = p.categories.iter().map(String::as_str).filter(|c| c != cat).collect();
-                                if on {
-                                    list.push(cat);
-                                }
-                                run = Some(json!({"name": d.picked, "categories": list}));
-                            }
-                            if i % 3 == 2 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-                }
-                None => {
-                    ui.label(RichText::new(t("No project parameters yet: New makes one.")).color(pal().muted));
-                }
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
-        });
-        if let Some(p) = run
-            && self.run("parameter", p).is_none()
-        {
-            picked = None;
-        }
-        if let Some(n) = picked {
-            (d.name, d.picked) = (n.clone(), n);
-        } else if !self.session.model.parameters.contains_key(&d.picked) {
-            d = ParametersDialog::new(&self.session.model);
-        }
-        if !(close || r.should_close()) {
-            self.parameters_dialog = Some(d);
-        }
-    }
-
     /// View > Schedules > Schedule/Quantities: a category and a name, and OK makes the schedule,
     /// opens it, and opens its properties on Fields.
     pub(crate) fn new_schedule_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.new_schedule.take() else { return };
         let (mut ok, mut cancel) = (false, false);
         let model = Arc::clone(&self.session.model);
-        let r = Modal::new(UiId::new("new-schedule")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            ui.label(RichText::new(t("New Schedule")).heading());
-            ui.add_space(6.0);
-            ui.label(t("Category:"));
-            ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                for cat in schedule::categories() {
-                    if ui.selectable_label(d.category == Some(cat), lang::category(cat, true)).clicked() {
-                        d.category = Some(cat);
-                        // Named after it, as one of its kind there isn't yet.
-                        let base = tf("{} Schedule", &[&lang::category(cat, false)]);
-                        d.name = std::iter::once(base.clone())
-                            .chain((2..).map(|n| format!("{base} {n}")))
-                            .find(|n| {
-                                schedule::builtin(Some(n), None).is_none()
-                                    && !model.elements.keys().any(|id| model.view_name(*id) == Some(n.as_str()))
-                            })
-                            .unwrap_or(base);
+        let r = Modal::new(UiId::new("new-schedule"), t("New Schedule")).width(340.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.add_space(6.0);
+                ui.label(t("Category:"));
+                ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    // Multi-Category first, as Revit's list has it.
+                    for cat in std::iter::once(schedule::MULTI).chain(schedule::categories()) {
+                        if ui.selectable_label(d.category == Some(cat), lang::category(cat, true)).clicked() {
+                            d.category = Some(cat);
+                            // Named after it, as one of its kind there isn't yet.
+                            let base = tf("{} Schedule", &[&lang::category(cat, false)]);
+                            d.name = std::iter::once(base.clone())
+                                .chain((2..).map(|n| format!("{base} {n}")))
+                                .find(|n| {
+                                    schedule::builtin(Some(n), None).is_none()
+                                        && !model.elements.keys().any(|id| model.view_name(*id) == Some(n.as_str()))
+                                })
+                                .unwrap_or(base);
+                        }
                     }
-                }
+                });
+                ui.add_space(6.0);
+                let l = ui.label(t("Name:"));
+                ui.add(TextEdit::singleline(&mut d.name).desired_width(300.0)).labelled_by(l.id);
             });
-            ui.add_space(6.0);
-            let l = ui.label(t("Name:"));
-            ui.add(TextEdit::singleline(&mut d.name).desired_width(300.0)).labelled_by(l.id);
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                cancel = ui.button(t("Cancel")).clicked();
-                ok = ui.add_enabled(d.category.is_some() && !d.name.trim().is_empty(), Button::new(t("OK"))).clicked();
+            crate::popup::footer(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    cancel = ui.button(t("Cancel")).clicked();
+                    ok = ui.add_enabled(d.category.is_some() && !d.name.trim().is_empty(), Button::new(t("OK"))).clicked();
+                });
             });
         });
         if ok && let Some(cat) = d.category {
@@ -2387,230 +3732,232 @@ impl BimApp {
         let key = made.unwrap_or(0);
         let mut change: Option<Value> = None;
         let mut close = false;
-        let r = Modal::new(UiId::new("schedule-properties")).show(ctx, |ui| {
-            ui.set_width(620.0);
-            ui.label(RichText::new(tf("Schedule Properties: {}", &[&sc.name])).heading());
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                for (i, label) in SCHEDULE_TABS.iter().enumerate() {
-                    if ui.selectable_label(d.tab == i, t(label)).clicked() {
-                        d.tab = i;
+        let r = Modal::new(UiId::new("schedule-properties"), tf("Schedule Properties: {}", &[&sc.name])).width(620.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    for (i, label) in SCHEDULE_TABS.iter().enumerate() {
+                        if ui.selectable_label(d.tab == i, t(label)).clicked() {
+                            d.tab = i;
+                        }
+                    }
+                });
+                ui.separator();
+                match d.tab {
+                    0 => {
+                        let shown: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                        // Revit's three columns: the fields there are, what moves them, the fields shown.
+                        ui.horizontal_top(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(220.0);
+                                ui.label(RichText::new(t("Available fields:")).strong());
+                                ui.push_id("available", |ui| {
+                                    ScrollArea::vertical().max_height(220.0).min_scrolled_height(220.0).show(ui, |ui| {
+                                        ui.set_width(210.0);
+                                        for (name, _) in available.iter().filter(|(n, _)| !shown.contains(n)) {
+                                            if ui.selectable_label(d.available.as_ref() == Some(name), t(name)).clicked() {
+                                                d.available = Some(name.clone());
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_width(140.0);
+                                ui.add_space(28.0);
+                                let can_add = d.available.as_ref().is_some_and(|n| !shown.contains(n));
+                                if ui.add_enabled(can_add, Button::new(t("Add")).min_size(vec2(130.0, 0.0))).clicked()
+                                    && let Some(name) = d.available.take()
+                                {
+                                    fields.push(Field { name, ..Field::default() });
+                                    d.scheduled = Some(fields.len() - 1);
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                let picked = d.scheduled.filter(|i| *i < fields.len());
+                                if ui
+                                    .add_enabled(picked.is_some() && fields.len() > 1, Button::new(t("Remove")).min_size(vec2(130.0, 0.0)))
+                                    .clicked()
+                                    && let Some(i) = picked
+                                {
+                                    fields.remove(i);
+                                    d.scheduled = None;
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                ui.add_space(12.0);
+                                if ui.add(Button::new(t("Calculated Value…")).min_size(vec2(130.0, 0.0))).clicked() {
+                                    d.calculated = Some((String::new(), schedule::Kind::Number, String::new()));
+                                }
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_width(220.0);
+                                ui.label(RichText::new(t("Scheduled fields (in order):")).strong());
+                                ui.push_id("scheduled", |ui| {
+                                    ScrollArea::vertical().max_height(190.0).min_scrolled_height(190.0).show(ui, |ui| {
+                                        ui.set_width(210.0);
+                                        for (i, f) in fields.iter().enumerate() {
+                                            if ui.selectable_label(d.scheduled == Some(i), t(&f.name)).clicked() {
+                                                d.scheduled = Some(i);
+                                            }
+                                        }
+                                    });
+                                });
+                                ui.horizontal(|ui| {
+                                    let picked = d.scheduled.filter(|i| *i < fields.len());
+                                    if ui.add_enabled(picked.is_some_and(|i| i > 0), Button::new(t("Move Up"))).clicked()
+                                        && let Some(i) = picked
+                                    {
+                                        fields.swap(i, i - 1);
+                                        d.scheduled = Some(i - 1);
+                                        change = Some(json!({"fields": fields}));
+                                    }
+                                    if ui.add_enabled(picked.is_some_and(|i| i + 1 < fields.len()), Button::new(t("Move Down"))).clicked()
+                                        && let Some(i) = picked
+                                    {
+                                        fields.swap(i, i + 1);
+                                        d.scheduled = Some(i + 1);
+                                        change = Some(json!({"fields": fields}));
+                                    }
+                                });
+                            });
+                        });
+                        // The field picked: its heading, its totals; a calculated one's formula and kind.
+                        if let Some(i) = d.scheduled.filter(|i| *i < fields.len()) {
+                            ui.add_space(6.0);
+                            let kind = kind_of(&fields, &fields[i].name);
+                            Grid::new("schedule-field").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                                let l = ui.label(t("Heading"));
+                                let now = fields[i].heading.clone().unwrap_or_else(|| t(&fields[i].name).to_string());
+                                if let Some(typed) = self.field(ui, key, &format!("heading.{i}"), now, l.id, "") {
+                                    let typed = typed.trim();
+                                    fields[i].heading = (!typed.is_empty() && typed != fields[i].name).then(|| typed.to_string());
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                ui.end_row();
+                                if matches!(kind, schedule::Kind::Number | schedule::Kind::Length | schedule::Kind::Area) {
+                                    let l = ui.label(t("Calculate totals"));
+                                    let mut on = fields[i].total;
+                                    let r = ui.checkbox(&mut on, "");
+                                    r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, t("Calculate totals")));
+                                    if r.labelled_by(l.id).changed() {
+                                        fields[i].total = on;
+                                        change = Some(json!({"fields": fields}));
+                                    }
+                                    ui.end_row();
+                                }
+                                if let Some(formula) = fields[i].formula.clone() {
+                                    let l = ui.label(t("Formula"));
+                                    if let Some(typed) = self.field(ui, key, &format!("formula.{i}"), formula, l.id, "") {
+                                        fields[i].formula = Some(typed.trim().to_string());
+                                        change = Some(json!({"fields": fields}));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                        }
+                        // A calculated value being made: its name, what it comes to, its formula.
+                        let (mut add, mut drop) = (false, false);
+                        if let Some((name, kind, formula)) = &mut d.calculated {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(t("Calculated Value")).strong());
+                            Grid::new("calculated").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                                let l = ui.label(t("Name"));
+                                ui.add(TextEdit::singleline(name).desired_width(240.0)).labelled_by(l.id);
+                                ui.end_row();
+                                let l = ui.label(t("Type"));
+                                let now = RESULTS.iter().find(|(k, _)| k == kind).map_or("Number", |(_, n)| n);
+                                let c = ComboBox::from_id_salt("calculated-kind").selected_text(t(now)).width(160.0).show_ui(ui, |ui| {
+                                    for (k, label) in RESULTS {
+                                        ui.selectable_value(kind, k, t(label));
+                                    }
+                                });
+                                c.response.labelled_by(l.id);
+                                ui.end_row();
+                                let l = ui.label(t("Formula"));
+                                ui.add(TextEdit::singleline(formula).desired_width(240.0).hint_text("Area * 120")).labelled_by(l.id);
+                                ui.end_row();
+                            });
+                            ui.horizontal(|ui| {
+                                add = ui.add_enabled(!name.trim().is_empty() && !formula.trim().is_empty(), Button::new(t("OK"))).clicked();
+                                drop = ui.button(t("Cancel")).clicked();
+                            });
+                        }
+                        if drop {
+                            d.calculated = None;
+                        }
+                        if add && let Some((name, kind, formula)) = d.calculated.clone() {
+                            let mut with = fields.clone();
+                            with.push(Field {
+                                name: name.trim().to_string(),
+                                formula: Some(formula.trim().to_string()),
+                                kind: Some(kind),
+                                ..Field::default()
+                            });
+                            change = Some(json!({"fields": with}));
+                        }
+                    }
+                    1 => {
+                        let mut filters: Vec<Filter> = sc.filters.clone();
+                        if self.filter_rows(ui, key, &mut filters, &names, &|n| kind_of(&fields, n), units) {
+                            change = Some(json!({"filters": filters}));
+                        }
+                    }
+                    _ => {
+                        let mut sort: Vec<Sort> = sc.sort.clone();
+                        let mut edited = false;
+                        Grid::new("schedule-sort").num_columns(4).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+                            let mut gone = None;
+                            for (i, s) in sort.iter_mut().enumerate() {
+                                let caption = ui.label(t(if i == 0 { msg!("Sort by:") } else { msg!("Then by:") }));
+                                let c =
+                                    ComboBox::from_id_salt(("sort-field", i)).selected_text(t(&s.field)).width(170.0).show_ui(ui, |ui| {
+                                        for n in &names {
+                                            if ui.selectable_label(*n == s.field, t(n)).clicked() && *n != s.field {
+                                                s.field = n.clone();
+                                                edited = true;
+                                            }
+                                        }
+                                    });
+                                c.response.labelled_by(caption.id);
+                                let now = if s.descending { msg!("Descending") } else { msg!("Ascending") };
+                                let c = ComboBox::from_id_salt(("sort-way", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
+                                    for (down, label) in [(false, "Ascending"), (true, "Descending")] {
+                                        if ui.selectable_label(s.descending == down, t(label)).clicked() && s.descending != down {
+                                            s.descending = down;
+                                            edited = true;
+                                        }
+                                    }
+                                });
+                                c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Order")));
+                                if ui.button(t("Remove")).clicked() {
+                                    gone = Some(i);
+                                }
+                                ui.end_row();
+                            }
+                            if let Some(i) = gone {
+                                sort.remove(i);
+                                edited = true;
+                            }
+                        });
+                        if ui.button(t("Add Sort")).clicked()
+                            && let Some(first) = fields.first()
+                        {
+                            sort.push(Sort { field: first.name.clone(), descending: false });
+                            edited = true;
+                        }
+                        if edited {
+                            change = Some(json!({"sort": sort}));
+                        }
+                        ui.add_space(6.0);
+                        let mut every = !sc.grouped;
+                        if ui.checkbox(&mut every, t("Itemize every instance")).changed() {
+                            change = Some(json!({"grouped": !every}));
+                        }
                     }
                 }
             });
-            ui.separator();
-            match d.tab {
-                0 => {
-                    let shown: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                    // Revit's three columns: the fields there are, what moves them, the fields shown.
-                    ui.horizontal_top(|ui| {
-                        ui.vertical(|ui| {
-                            ui.set_width(220.0);
-                            ui.label(RichText::new(t("Available fields:")).strong());
-                            ui.push_id("available", |ui| {
-                                ScrollArea::vertical().max_height(220.0).min_scrolled_height(220.0).show(ui, |ui| {
-                                    ui.set_width(210.0);
-                                    for (name, _) in available.iter().filter(|(n, _)| !shown.contains(n)) {
-                                        if ui.selectable_label(d.available.as_ref() == Some(name), t(name)).clicked() {
-                                            d.available = Some(name.clone());
-                                        }
-                                    }
-                                });
-                            });
-                        });
-                        ui.vertical(|ui| {
-                            ui.set_width(140.0);
-                            ui.add_space(28.0);
-                            let can_add = d.available.as_ref().is_some_and(|n| !shown.contains(n));
-                            if ui.add_enabled(can_add, Button::new(t("Add")).min_size(vec2(130.0, 0.0))).clicked()
-                                && let Some(name) = d.available.take()
-                            {
-                                fields.push(Field { name, ..Field::default() });
-                                d.scheduled = Some(fields.len() - 1);
-                                change = Some(json!({"fields": fields}));
-                            }
-                            let picked = d.scheduled.filter(|i| *i < fields.len());
-                            if ui
-                                .add_enabled(picked.is_some() && fields.len() > 1, Button::new(t("Remove")).min_size(vec2(130.0, 0.0)))
-                                .clicked()
-                                && let Some(i) = picked
-                            {
-                                fields.remove(i);
-                                d.scheduled = None;
-                                change = Some(json!({"fields": fields}));
-                            }
-                            ui.add_space(12.0);
-                            if ui.add(Button::new(t("Calculated Value…")).min_size(vec2(130.0, 0.0))).clicked() {
-                                d.calculated = Some((String::new(), schedule::Kind::Number, String::new()));
-                            }
-                        });
-                        ui.vertical(|ui| {
-                            ui.set_width(220.0);
-                            ui.label(RichText::new(t("Scheduled fields (in order):")).strong());
-                            ui.push_id("scheduled", |ui| {
-                                ScrollArea::vertical().max_height(190.0).min_scrolled_height(190.0).show(ui, |ui| {
-                                    ui.set_width(210.0);
-                                    for (i, f) in fields.iter().enumerate() {
-                                        if ui.selectable_label(d.scheduled == Some(i), t(&f.name)).clicked() {
-                                            d.scheduled = Some(i);
-                                        }
-                                    }
-                                });
-                            });
-                            ui.horizontal(|ui| {
-                                let picked = d.scheduled.filter(|i| *i < fields.len());
-                                if ui.add_enabled(picked.is_some_and(|i| i > 0), Button::new(t("Move Up"))).clicked()
-                                    && let Some(i) = picked
-                                {
-                                    fields.swap(i, i - 1);
-                                    d.scheduled = Some(i - 1);
-                                    change = Some(json!({"fields": fields}));
-                                }
-                                if ui.add_enabled(picked.is_some_and(|i| i + 1 < fields.len()), Button::new(t("Move Down"))).clicked()
-                                    && let Some(i) = picked
-                                {
-                                    fields.swap(i, i + 1);
-                                    d.scheduled = Some(i + 1);
-                                    change = Some(json!({"fields": fields}));
-                                }
-                            });
-                        });
-                    });
-                    // The field picked: its heading, its totals; a calculated one's formula and kind.
-                    if let Some(i) = d.scheduled.filter(|i| *i < fields.len()) {
-                        ui.add_space(6.0);
-                        let kind = kind_of(&fields, &fields[i].name);
-                        Grid::new("schedule-field").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
-                            let l = ui.label(t("Heading"));
-                            let now = fields[i].heading.clone().unwrap_or_else(|| t(&fields[i].name).to_string());
-                            if let Some(typed) = self.field(ui, key, &format!("heading.{i}"), now, l.id, "") {
-                                let typed = typed.trim();
-                                fields[i].heading = (!typed.is_empty() && typed != fields[i].name).then(|| typed.to_string());
-                                change = Some(json!({"fields": fields}));
-                            }
-                            ui.end_row();
-                            if matches!(kind, schedule::Kind::Number | schedule::Kind::Length | schedule::Kind::Area) {
-                                let l = ui.label(t("Calculate totals"));
-                                let mut on = fields[i].total;
-                                let r = ui.checkbox(&mut on, "");
-                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, t("Calculate totals")));
-                                if r.labelled_by(l.id).changed() {
-                                    fields[i].total = on;
-                                    change = Some(json!({"fields": fields}));
-                                }
-                                ui.end_row();
-                            }
-                            if let Some(formula) = fields[i].formula.clone() {
-                                let l = ui.label(t("Formula"));
-                                if let Some(typed) = self.field(ui, key, &format!("formula.{i}"), formula, l.id, "") {
-                                    fields[i].formula = Some(typed.trim().to_string());
-                                    change = Some(json!({"fields": fields}));
-                                }
-                                ui.end_row();
-                            }
-                        });
-                    }
-                    // A calculated value being made: its name, what it comes to, its formula.
-                    let (mut add, mut drop) = (false, false);
-                    if let Some((name, kind, formula)) = &mut d.calculated {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(t("Calculated Value")).strong());
-                        Grid::new("calculated").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
-                            let l = ui.label(t("Name"));
-                            ui.add(TextEdit::singleline(name).desired_width(240.0)).labelled_by(l.id);
-                            ui.end_row();
-                            let l = ui.label(t("Type"));
-                            let now = RESULTS.iter().find(|(k, _)| k == kind).map_or("Number", |(_, n)| n);
-                            let c = ComboBox::from_id_salt("calculated-kind").selected_text(t(now)).width(160.0).show_ui(ui, |ui| {
-                                for (k, label) in RESULTS {
-                                    ui.selectable_value(kind, k, t(label));
-                                }
-                            });
-                            c.response.labelled_by(l.id);
-                            ui.end_row();
-                            let l = ui.label(t("Formula"));
-                            ui.add(TextEdit::singleline(formula).desired_width(240.0).hint_text("Area * 120")).labelled_by(l.id);
-                            ui.end_row();
-                        });
-                        ui.horizontal(|ui| {
-                            add = ui.add_enabled(!name.trim().is_empty() && !formula.trim().is_empty(), Button::new(t("OK"))).clicked();
-                            drop = ui.button(t("Cancel")).clicked();
-                        });
-                    }
-                    if drop {
-                        d.calculated = None;
-                    }
-                    if add && let Some((name, kind, formula)) = d.calculated.clone() {
-                        let mut with = fields.clone();
-                        with.push(Field {
-                            name: name.trim().to_string(),
-                            formula: Some(formula.trim().to_string()),
-                            kind: Some(kind),
-                            ..Field::default()
-                        });
-                        change = Some(json!({"fields": with}));
-                    }
-                }
-                1 => {
-                    let mut filters: Vec<Filter> = sc.filters.clone();
-                    if self.filter_rows(ui, key, &mut filters, &names, &|n| kind_of(&fields, n), units) {
-                        change = Some(json!({"filters": filters}));
-                    }
-                }
-                _ => {
-                    let mut sort: Vec<Sort> = sc.sort.clone();
-                    let mut edited = false;
-                    Grid::new("schedule-sort").num_columns(4).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-                        let mut gone = None;
-                        for (i, s) in sort.iter_mut().enumerate() {
-                            let caption = ui.label(t(if i == 0 { "Sort by:" } else { "Then by:" }));
-                            let c = ComboBox::from_id_salt(("sort-field", i)).selected_text(t(&s.field)).width(170.0).show_ui(ui, |ui| {
-                                for n in &names {
-                                    if ui.selectable_label(*n == s.field, t(n)).clicked() && *n != s.field {
-                                        s.field = n.clone();
-                                        edited = true;
-                                    }
-                                }
-                            });
-                            c.response.labelled_by(caption.id);
-                            let now = if s.descending { "Descending" } else { "Ascending" };
-                            let c = ComboBox::from_id_salt(("sort-way", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
-                                for (down, label) in [(false, "Ascending"), (true, "Descending")] {
-                                    if ui.selectable_label(s.descending == down, t(label)).clicked() && s.descending != down {
-                                        s.descending = down;
-                                        edited = true;
-                                    }
-                                }
-                            });
-                            c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Order")));
-                            if ui.button(t("Remove")).clicked() {
-                                gone = Some(i);
-                            }
-                            ui.end_row();
-                        }
-                        if let Some(i) = gone {
-                            sort.remove(i);
-                            edited = true;
-                        }
-                    });
-                    if ui.button(t("Add Sort")).clicked()
-                        && let Some(first) = fields.first()
-                    {
-                        sort.push(Sort { field: first.name.clone(), descending: false });
-                        edited = true;
-                    }
-                    if edited {
-                        change = Some(json!({"sort": sort}));
-                    }
-                    ui.add_space(6.0);
-                    let mut every = !sc.grouped;
-                    if ui.checkbox(&mut every, t("Itemize every instance")).changed() {
-                        change = Some(json!({"grouped": !every}));
-                    }
-                }
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            crate::popup::footer(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+            });
         });
         if let Some(mut p) = change {
             p["name"] = json!(sc.name);
@@ -2623,41 +3970,35 @@ impl BimApp {
             self.schedule_dialog = Some(d);
         }
     }
+}
 
-    /// Keyboard Shortcuts (KS): each shortcut by what it does, as Revit's dialog lists them.
-    pub(crate) fn shortcuts_window(&mut self, ctx: &Context) {
-        if !self.show_shortcuts {
-            return;
-        }
-        let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (letters, name) in crate::shortcuts() {
-            by_name.entry(t(name)).or_default().push(letters);
-        }
-        let rows: Vec<(&str, Vec<&str>)> = by_name.into_iter().collect();
-        let mut close = false;
-        let r = Modal::new(UiId::new("shortcuts")).show(ctx, |ui| {
-            ui.label(RichText::new(t("Keyboard Shortcuts")).heading());
-            ui.add_space(6.0);
-            ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
-                // In two columns, each running down, as a reference card.
-                ui.horizontal_top(|ui| {
-                    for (k, part) in rows.chunks(rows.len().div_ceil(2).max(1)).enumerate() {
-                        Grid::new(("shortcuts", k)).num_columns(2).striped(true).spacing(vec2(24.0, 4.0)).show(ui, |ui| {
-                            for (name, letters) in part {
-                                ui.label(*name);
-                                ui.monospace(letters.join(", "));
-                                ui.end_row();
-                            }
-                        });
-                        ui.add_space(24.0);
-                    }
-                });
-            });
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
-        });
-        if close || r.should_close() {
-            self.show_shortcuts = false;
-        }
+#[cfg(test)]
+mod type_list {
+    use super::*;
+
+    #[test]
+    fn curtain_walls_go_in_a_section_of_their_own_and_the_rest_keep_their_order() {
+        let names: Vec<String> = ["Generic", "Glazed", "Exterior", "Storefront"].map(String::from).to_vec();
+        let sections = type_sections(&names, |n| matches!(n, "Glazed" | "Storefront"));
+        assert_eq!(
+            sections,
+            vec![
+                (Some("Walls"), vec!["Generic".to_string(), "Exterior".to_string()]),
+                (Some("Curtain Walls"), vec!["Glazed".to_string(), "Storefront".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_curtain_wall_the_list_has_no_headings() {
+        let names: Vec<String> = ["Generic", "Exterior"].map(String::from).to_vec();
+        assert_eq!(type_sections(&names, |_| false), vec![(None, names.clone())]);
+    }
+
+    #[test]
+    fn a_wall_type_is_a_curtain_wall_s_when_it_writes_a_pattern() {
+        assert!(!is_curtain_json(&json!({"thickness": 200.0})));
+        assert!(!is_curtain_json(&json!({"thickness": 200.0, "curtain": null})));
+        assert!(is_curtain_json(&json!({"thickness": 200.0, "curtain": {"horizontal": {}}})));
     }
 }

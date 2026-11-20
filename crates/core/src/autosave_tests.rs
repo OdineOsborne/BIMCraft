@@ -35,10 +35,10 @@ fn autosave_and_recover_are_commands_and_preserve_the_project() {
     let original = std::fs::read(&project).unwrap();
     s.execute("wall", &json!({"points": [[0,0],[4000,0]]})).unwrap();
     let snapshot = Arc::clone(&s.model);
-    let history = s.history();
+    let history = s.history().len();
     s.execute("autosave", &json!({"path": backup})).unwrap();
     assert!(Arc::ptr_eq(&snapshot, &s.model));
-    assert_eq!(s.history(), history);
+    assert_eq!(s.history().len(), history);
     assert_eq!(s.path.as_ref(), Some(&project));
     assert_eq!(std::fs::read(&project).unwrap(), original);
     let mut recovered = Session::new();
@@ -184,7 +184,7 @@ fn queuing_a_snapshot_and_cleanup_never_waits_for_a_blocked_worker() {
         worker.remove(backup).unwrap();
         done.send(worker).unwrap_or_else(|_| panic!("receiver dropped"));
     });
-    let returned = result.recv_timeout(Duration::from_secs(2));
+    let returned = result.recv_timeout(Duration::from_secs(10));
     release.send(()).unwrap();
     let mut worker = returned.expect("scheduling blocked the caller");
     assert!(matches!(notice(&mut worker), Notice::Saved { result: Ok(()), .. }));

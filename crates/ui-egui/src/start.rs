@@ -1,6 +1,8 @@
-//! The start page, which the window opens on when it is given no project: New and Open, the recent files as tiles with a picture of
+//! The start page, which the window opens on when it is given no project: New, Open and the sample house, the recent files as tiles with a picture of
 //! each (its 3D view, drawn on a thread of its own), and along the bottom the source code's page and whether an update is out. The
 //! quick access bar's Home brings it back over a project, which it leaves as it was.
+
+use bimcraft_i18n::msg;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,7 +71,7 @@ impl Home {
 
 /// The picture of a project file's 3D view, RGBA; none for a file that isn't a project, can't be read, or holds nothing to see.
 pub fn picture(path: &Path) -> Option<ColorImage> {
-    let is_project = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bimcraft"));
+    let is_project = bimcraft_core::files::is_project(path);
     let meta = std::fs::metadata(path).ok()?;
     if !is_project || !meta.is_file() || meta.len() > MAX_THUMB_FILE {
         return None;
@@ -127,6 +129,12 @@ fn ago(when: SystemTime) -> String {
 enum Click {
     New,
     Open,
+    /// The start page's New Family: a family of the category picked, in its document.
+    NewFamily(bimcraft_core::family::Category),
+    /// The start page's Open Family…: a family file, in its document.
+    OpenFamily,
+    /// The sample house, as an unsaved project.
+    Sample,
     Recent(PathBuf),
     Forget(PathBuf),
     Back,
@@ -256,6 +264,12 @@ impl BimApp {
         match click {
             Click::New => self.guard(Pending::New, &ctx),
             Click::Open => self.guard(Pending::Open, &ctx),
+            Click::NewFamily(c) => {
+                self.new_family(c);
+                self.family_from_start_page();
+            }
+            Click::OpenFamily => self.open_family(&ctx),
+            Click::Sample => self.guard(Pending::Sample, &ctx),
             Click::Recent(path) => self.guard(Pending::OpenPath(path), &ctx),
             Click::Forget(path) => {
                 self.recent.remove(&path);
@@ -292,30 +306,55 @@ impl BimApp {
         });
     }
 
-    /// New, Open, and back to the project open behind the page.
+    /// Models (New, Open, the sample and back to the project open behind the page) and Families (New and Open), as Revit's Home.
     fn start_actions(&self, ui: &mut Ui, click: &mut Option<Click>) {
-        heading(ui, "Start");
+        heading(ui, msg!("Models"));
         let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
-        if action(ui, Icon::NewFile, "New Project", "An empty project to model in.", &format!("{cmd}N")).clicked() {
+        if action(ui, Icon::NewFile, msg!("New Project"), msg!("An empty project to model in."), &format!("{cmd}N")).clicked() {
             *click = Some(Click::New);
         }
         ui.add_space(10.0);
-        let what = if self.revit.is_some() { "A BIMCraft project, an IFC or a Revit file." } else { "A BIMCraft project or an IFC file." };
-        if action(ui, Icon::Open, "Open…", what, &format!("{cmd}O")).clicked() {
+        let what = if self.revit.is_some() {
+            msg!("A BIMCraft project, an IFC or a Revit file.")
+        } else {
+            msg!("A BIMCraft project or an IFC file.")
+        };
+        if action(ui, Icon::Open, msg!("Open…"), what, &format!("{cmd}O")).clicked() {
             *click = Some(Click::Open);
+        }
+        ui.add_space(10.0);
+        if action(ui, Icon::Plan, msg!("Sample Project"), msg!("A small house to look around in."), "").clicked() {
+            *click = Some(Click::Sample);
         }
         if self.home.over {
             ui.add_space(10.0);
             let back = tf("Back to {}", &[&self.session.model.name]);
-            if action(ui, Icon::Back, &back, "The project stays as you left it.", &format!("{cmd}D")).clicked() {
+            if action(ui, Icon::Back, &back, msg!("The project stays as you left it."), &format!("{cmd}D")).clicked() {
                 *click = Some(Click::Back);
             }
+        }
+        ui.add_space(26.0);
+        heading(ui, msg!("Families"));
+        // A family of a category, as the category picked says what it is and what it starts with.
+        let r = action(ui, Icon::FamilyEditor, msg!("New Family"), msg!("Of a category you pick."), "");
+        egui::Popup::menu(&r).width(r.rect.width()).show(|ui| {
+            ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for c in crate::editor::CATEGORIES {
+                    if ui.button(crate::editor::category_label(c)).clicked() {
+                        *click = Some(Click::NewFamily(c));
+                    }
+                }
+            });
+        });
+        ui.add_space(10.0);
+        if action(ui, Icon::LoadFamily, msg!("Open Family…"), msg!("A family file, to edit."), "").clicked() {
+            *click = Some(Click::OpenFamily);
         }
     }
 
     /// The recent files, as tiles.
     fn start_recent(&self, ui: &mut Ui, click: &mut Option<Click>) {
-        heading(ui, "Recent");
+        heading(ui, msg!("Recent"));
         let files: Vec<(String, PathBuf)> = self.recent.labels().into_iter().zip(self.recent.paths().iter().cloned()).collect();
         if files.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 150.0), Sense::hover());
@@ -385,7 +424,7 @@ impl BimApp {
                 p.rect_filled(pic, pic_round, tint);
                 let icon = Rect::from_center_size(pic.center() - vec2(0.0, 6.0), vec2(40.0, 40.0));
                 let ext = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
-                let glyph = if ext == "BIMCRAFT" { Icon::Plan } else { Icon::Open };
+                let glyph = if bimcraft_core::files::is_project(path) { Icon::Plan } else { Icon::Open };
                 icons::paint(p, glyph, icon, pal().muted);
                 let note = if missing {
                     t("Not found").to_string()
@@ -641,6 +680,12 @@ mod tests {
         std::fs::write(&junk, "{ not json").unwrap();
         assert!(picture(&junk).is_none());
         assert!(picture(&dir.join("gone.bimcraft")).is_none());
+        // A project of any of its names has one: the new ones, a template, and the old one.
+        for name in ["walls.bimc", "walls.bimt", "walls.BIMC"] {
+            let named = dir.join(name);
+            std::fs::copy(&project, &named).unwrap();
+            assert!(picture(&named).is_some(), "{name}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

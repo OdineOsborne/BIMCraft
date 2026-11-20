@@ -1,13 +1,15 @@
 //! Manage > Object Styles, as Revit's dialog: the pen each model category draws its lines in, in projection and where a view
 //! cuts it, edited as a draft and applied as one `object_styles` command (OK and Apply), or dropped (Cancel).
 
+use crate::popup::Modal;
+
 use std::collections::BTreeMap;
 
 use bimcraft_core::graphics::MODEL;
 use bimcraft_core::model::Model;
 use bimcraft_core::pen::{MAX_PEN, Pen};
 use bimcraft_core::styles::{ObjectStyle, default_of};
-use egui::{Align, ComboBox, Context, Grid, Id as UiId, Layout, Modal, RichText, ScrollArea, Ui, WidgetInfo, WidgetType};
+use egui::{Align, ComboBox, Context, Grid, Id as UiId, Layout, RichText, ScrollArea, Ui, WidgetInfo, WidgetType};
 use serde_json::{Value, json};
 
 use crate::BimApp;
@@ -22,7 +24,17 @@ pub(crate) struct ObjectStylesDialog {
 impl ObjectStylesDialog {
     /// Open on the project's object styles.
     pub(crate) fn new(m: &Model) -> ObjectStylesDialog {
-        ObjectStylesDialog { draft: MODEL.iter().map(|c| (*c, m.object_style(c))).collect() }
+        // Every model category, and the subcategories that have rows of their own (Doors > Opening).
+        let keys = MODEL.iter().copied().chain(bimcraft_core::styles::model_subs());
+        ObjectStylesDialog { draft: keys.map(|c| (c, m.object_style(c))).collect() }
+    }
+}
+
+/// What a row is called: its category's name, a subcategory's under its category's (Doors > Opening), so it sorts beside it.
+fn row_name(key: &str) -> String {
+    match bimcraft_core::graphics::sub(key) {
+        Some(s) => format!("{} > {}", category(s.parent, true), t(s.name)),
+        None => category(key, true),
     }
 }
 
@@ -41,41 +53,43 @@ impl BimApp {
     pub(crate) fn object_styles_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.object_styles_dialog.take() else { return };
         let (mut ok, mut apply, mut cancel) = (false, false, false);
-        let r = Modal::new(UiId::new("object-styles")).show(ctx, |ui| {
-            ui.set_width(520.0);
-            ui.label(RichText::new(t("Object Styles")).heading());
-            ui.add_space(6.0);
-            ui.label(t(
-                "The pen each category draws its lines in, seen and cut, in every plan and section. A view's Visibility/Graphics overrides them.",
-            ));
-            ui.add_space(4.0);
-            ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
-                Grid::new("object-styles").striped(true).num_columns(3).show(ui, |ui| {
-                    ui.label(RichText::new(t("Category")).strong());
-                    ui.label(RichText::new(t("Projection")).strong());
-                    ui.label(RichText::new(t("Cut")).strong());
-                    ui.end_row();
-                    let mut rows: Vec<(String, &mut ObjectStyle)> = d.draft.iter_mut().map(|(c, s)| (category(c, true), s)).collect();
-                    rows.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (name, style) in rows {
-                        ui.label(&name);
-                        pen_field(ui, &mut style.projection, format!("{name}: {}", t("Projection")));
-                        pen_field(ui, &mut style.cut, format!("{name}: {}", t("Cut")));
+        let r = Modal::new(UiId::new("object-styles"), t("Object Styles")).width(520.0).show(ctx, |ui| {
+            crate::popup::body(ui, |ui| {
+                ui.add_space(6.0);
+                ui.label(t(
+                    "The pen each category draws its lines in, seen and cut, in every plan and section. A view's Visibility/Graphics overrides them.",
+                ));
+                ui.add_space(4.0);
+                ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                    Grid::new("object-styles").striped(true).num_columns(3).show(ui, |ui| {
+                        ui.label(RichText::new(t("Category")).strong());
+                        ui.label(RichText::new(t("Projection")).strong());
+                        ui.label(RichText::new(t("Cut")).strong());
                         ui.end_row();
-                    }
+                        let mut rows: Vec<(String, &mut ObjectStyle)> = d.draft.iter_mut().map(|(c, s)| (row_name(c), s)).collect();
+                        rows.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (name, style) in rows {
+                            ui.label(&name);
+                            pen_field(ui, &mut style.projection, format!("{name}: {}", t("Projection")));
+                            pen_field(ui, &mut style.cut, format!("{name}: {}", t("Cut")));
+                            ui.end_row();
+                        }
+                    });
                 });
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button(t("Reset")).on_hover_text(t("Back to the pens a project starts with")).clicked() {
-                    for (c, s) in &mut d.draft {
-                        *s = default_of(c);
+            crate::popup::footer(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(t("Reset")).on_hover_text(t("Back to the pens a project starts with")).clicked() {
+                        for (c, s) in &mut d.draft {
+                            // A subcategory starts as its category does.
+                            *s = default_of(bimcraft_core::graphics::sub(c).map_or(c, |sub| sub.parent));
+                        }
                     }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    apply = ui.button(t("Apply")).clicked();
-                    cancel = ui.button(t("Cancel")).clicked();
-                    ok = ui.button(t("OK")).clicked();
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        apply = ui.button(t("Apply")).clicked();
+                        cancel = ui.button(t("Cancel")).clicked();
+                        ok = ui.button(t("OK")).clicked();
+                    });
                 });
             });
         });
