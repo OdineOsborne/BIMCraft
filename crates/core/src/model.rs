@@ -1788,9 +1788,13 @@ impl Model {
         self.price_lists.values().map(|l| l.currency.trim()).find(|c| !c.is_empty()).unwrap_or("EUR")
     }
 
-    /// The price list item of article `code`: the first list, by name, that holds it. A code in two lists is one
-    /// article, so the first answer is the answer; nothing holds it twice under one name.
+    /// The price list item of article `code`: the list in use's, where the project has chosen one, else the first
+    /// list, by name, that holds it. A code in two lists is one article, so the first answer is the answer; nothing
+    /// holds it twice under one name.
     pub fn price_item(&self, code: &str) -> Option<&PriceItem> {
+        if let Some(l) = self.price_list_in_use.as_deref().and_then(|n| self.price_lists.get(n)) {
+            return l.items.get(code);
+        }
         self.price_lists.values().find_map(|l| l.items.get(code))
     }
 
@@ -1958,6 +1962,11 @@ pub struct Model {
     /// item: `price_code` sets it. A project without one prices nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_parameter: Option<String>,
+    /// The price list prices come from, where the project has chosen one (`price_list_use`): a studio keeps the
+    /// region's and the province's side by side and prices with one. None is every list, the first by name that
+    /// holds a code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_list_in_use: Option<String>,
     /// What its pens draw on paper (Manage > Line Weights), once set; until then, what a project in its units starts with
     /// ([`Model::line_weights`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2017,6 +2026,7 @@ impl Model {
             option_sets: BTreeMap::new(),
             price_lists: BTreeMap::new(),
             code_parameter: None,
+            price_list_in_use: None,
             line_weights: None,
             object_styles: BTreeMap::new(),
             elements: Elements::new(),
@@ -3683,6 +3693,9 @@ impl Model {
                     return Err(format!("item `{code}` of price list `{n}` has no price a bill can use"));
                 }
             }
+        }
+        if let Some(n) = self.price_list_in_use.as_deref().filter(|n| !self.price_lists.contains_key(*n)) {
+            return Err(format!("the price list in use, `{n}`, is not one of the project's: choose another with `price_list_use`"));
         }
         for id in self.images.keys() {
             text(&format!("picture `{id}`"), "id", id)?;

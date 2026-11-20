@@ -55,6 +55,11 @@ pub struct PriceDialog {
     /// Why the file could not be read, or the list not made: said inside the window, because a status box in the view's
     /// corner can lie over the buttons of a modal.
     pub(crate) error: String,
+    /// Whether Assign to Selection gives the code beside the ones the elements carry, and how many times it is measured.
+    pub(crate) add: bool,
+    pub(crate) times: f64,
+    /// The bill of quantities, as `bill_of_quantities` last gave it, while the window shows it instead of the list.
+    pub(crate) bill: Option<Value>,
 }
 
 impl PriceDialog {
@@ -71,6 +76,9 @@ impl PriceDialog {
             search: String::new(),
             picked: String::new(),
             error: String::new(),
+            add: false,
+            times: 1.0,
+            bill: None,
         }
     }
 
@@ -139,9 +147,15 @@ impl BimApp {
     }
 
     pub(crate) fn price_window(&mut self, ctx: &Context) {
+        if self.price_dialog.as_ref().is_some_and(|d| d.bill.is_some()) {
+            self.bill_window(ctx);
+            return;
+        }
         let Some(mut d) = self.price_dialog.take() else { return };
         let (mut close, mut browse, mut reread, mut import) = (false, false, false, false);
-        let (mut assign, mut take_off) = (false, false);
+        let (mut assign, mut take_off, mut show_bill) = (false, false, false);
+        let mut use_list: Option<Option<String>> = None;
+        let in_use = self.session.model.price_list_in_use.clone();
         let columns = d.columns.clone();
         let lists: Vec<(String, usize)> = self.session.model.price_lists.iter().map(|(name, l)| (name.clone(), l.items.len())).collect();
         let needle = d.search.trim().to_lowercase();
@@ -247,6 +261,25 @@ impl BimApp {
             for (name, items) in &lists {
                 ui.label(tf("{}: {} items", &[name, &items.to_string()]));
             }
+            if !lists.is_empty() {
+                ui.horizontal(|ui| {
+                    let label = ui.label(t("Price list in use:"));
+                    let shown = in_use.clone().unwrap_or_else(|| t("(every list)").to_string());
+                    let c = ComboBox::from_id_salt("price-in-use").selected_text(shown).width(220.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(in_use.is_none(), t("(every list)")).clicked() && in_use.is_some() {
+                            use_list = Some(None);
+                        }
+                        for (name, _) in &lists {
+                            if ui.selectable_label(in_use.as_deref() == Some(name.as_str()), name).clicked()
+                                && in_use.as_deref() != Some(name.as_str())
+                            {
+                                use_list = Some(Some(name.clone()));
+                            }
+                        }
+                    });
+                    c.response.labelled_by(label.id);
+                });
+            }
             ui.add_space(10.0);
             ui.label(RichText::new(t("Article Code")).strong());
             ui.label(
@@ -279,6 +312,12 @@ impl BimApp {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                ui.checkbox(&mut d.add, t("Beside the codes they carry"));
+                ui.add_space(8.0);
+                let label = ui.label(t("Times:"));
+                ui.add(egui::DragValue::new(&mut d.times).range(0.5..=100.0).speed(0.5)).labelled_by(label.id);
+            });
+            ui.horizontal(|ui| {
                 assign = ui.add_enabled(selected > 0 && !d.picked.is_empty(), Button::new(t("Assign to Selection"))).clicked();
                 take_off = ui.add_enabled(selected > 0 && !carried.is_empty(), Button::new(t("Clear from Selection"))).clicked();
             });
@@ -289,6 +328,7 @@ impl BimApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 import = ui.add_enabled(d.ready(), Button::new(t("Import"))).clicked();
+                show_bill = ui.add_enabled(!lists.is_empty(), Button::new(t("Bill of Quantities…"))).clicked();
                 close = ui.button(t("Close")).clicked();
             });
         });
@@ -310,6 +350,20 @@ impl BimApp {
             self.price_assign(take_off);
             return;
         }
+        if let Some(name) = use_list {
+            if self.run("price_list_use", json!({"name": name})).is_none() {
+                let why = std::mem::take(&mut self.status.text);
+                self.status = crate::Status::default();
+                if let Some(d) = &mut self.price_dialog {
+                    d.error = why;
+                }
+            }
+            return;
+        }
+        if show_bill {
+            self.bill_read();
+            return;
+        }
         if closing {
             self.price_dialog = None;
         }
@@ -324,7 +378,10 @@ impl BimApp {
             return;
         }
         let ids: Vec<Value> = self.selection.iter().map(|id| json!(id)).collect();
-        let params = if clear { json!({"clear": true, "ids": ids}) } else { json!({"code": code, "ids": ids}) };
+        let params = match clear {
+            true => json!({"clear": true, "ids": ids}),
+            false => json!({"code": code, "ids": ids, "add": d.add, "times": d.times}),
+        };
         match self.run("price_code", params) {
             Some(reply) => {
                 let n = reply["elements"].as_u64().unwrap_or(0).to_string();
@@ -372,6 +429,101 @@ impl BimApp {
                     d.error = why;
                 }
             }
+        }
+    }
+    /// The bill of quantities, read again from the project: on opening it and after anything that changes it.
+    pub(crate) fn bill_read(&mut self) {
+        let reply = self.session.execute("bill_of_quantities", &json!({}));
+        if let Some(d) = &mut self.price_dialog {
+            match reply {
+                Ok(b) => d.bill = Some(b),
+                Err(why) => d.error = why,
+            }
+        }
+    }
+
+    /// Bill of Quantities: every article code the project's elements carry, its quantity, price and amount, the total,
+    /// and what could not be measured or priced; the bill and its specification saved as spreadsheets.
+    fn bill_window(&mut self, ctx: &Context) {
+        let Some(mut d) = self.price_dialog.take() else { return };
+        let b = d.bill.clone().unwrap_or(Value::Null);
+        let (mut back, mut export_bill, mut export_spec) = (false, false, false);
+        let money = |v: &Value| v.as_f64().map_or_else(String::new, |x| format!("{x:.2}"));
+        let currency = b["currency"].as_str().unwrap_or("EUR").to_string();
+        let lines = b["lines"].as_array().cloned().unwrap_or_default();
+        let r = Modal::new(UiId::new("bill-of-quantities")).show(ctx, |ui| {
+            ui.set_width(760.0);
+            ui.label(RichText::new(t("Bill of Quantities")).heading());
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(t(
+                    "Every article code the elements carry, measured by the unit of its price list: the area of a wall net of \
+                     its openings, a volume, a length, or a count.",
+                ))
+                .color(pal().muted),
+            );
+            ui.add_space(8.0);
+            if lines.is_empty() {
+                ui.label(RichText::new(t("Nothing carries an article code yet.")).color(pal().muted));
+            }
+            ScrollArea::vertical().id_salt("bill-lines").max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                Grid::new("bill-grid").striped(true).num_columns(7).spacing([10.0, 3.0]).show(ui, |ui| {
+                    for h in ["No.", "Code", "Description", "Unit", "Quantity", "Unit Price", "Amount"] {
+                        ui.label(RichText::new(t(h)).strong());
+                    }
+                    ui.end_row();
+                    for l in &lines {
+                        ui.label(l["number"].to_string());
+                        ui.label(l["code"].as_str().unwrap_or_default());
+                        ui.label(short(l["description"].as_str().unwrap_or_default()));
+                        ui.label(l["unit"].as_str().unwrap_or_default());
+                        ui.label(money(&l["quantity"]));
+                        ui.label(money(&l["price"]));
+                        ui.label(money(&l["amount"]));
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(tf("Total: {} {}", &[&money(&b["total"]), &currency])).strong());
+            let named = |v: &Value| strings(v).join(", ");
+            if !named(&b["unmeasured"]).is_empty() {
+                ui.label(RichText::new(tf("Not measured, by their unit: {}", &[&named(&b["unmeasured"])])).color(pal().error));
+            }
+            if !named(&b["unpriced"]).is_empty() {
+                ui.label(RichText::new(tf("In no price list in use: {}", &[&named(&b["unpriced"])])).color(pal().error));
+            }
+            if !d.error.is_empty() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(&d.error).color(pal().error));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                export_bill = ui.add_enabled(!lines.is_empty(), Button::new(t("Export Bill…"))).clicked();
+                export_spec = ui.add_enabled(!lines.is_empty(), Button::new(t("Export Specification…"))).clicked();
+                back = ui.button(t("Back")).clicked();
+            });
+        });
+        if back || r.should_close() {
+            d.bill = None;
+        }
+        self.price_dialog = Some(d);
+        for (go, key, name) in [(export_bill, "path", "computo.csv"), (export_spec, "spec_path", "capitolato.csv")] {
+            if !go {
+                continue;
+            }
+            let dialog = rfd::AsyncFileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name);
+            self.ask_file(ctx, dialog, true, move |app, path| {
+                let shown = path.to_string_lossy().into_owned();
+                match app.session.execute("bill_of_quantities", &json!({key: shown})) {
+                    Ok(_) => app.status = crate::Status { text: tf("Saved {}.", &[&shown]), error: false },
+                    Err(why) => {
+                        if let Some(d) = &mut app.price_dialog {
+                            d.error = why;
+                        }
+                    }
+                }
+            });
         }
     }
 }

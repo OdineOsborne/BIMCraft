@@ -5,6 +5,9 @@
 pub mod autosave;
 #[cfg(test)]
 mod autosave_tests;
+pub mod bill;
+#[cfg(test)]
+mod bill_tests;
 pub mod bridge;
 pub mod cloud;
 mod commands;

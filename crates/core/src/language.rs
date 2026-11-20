@@ -204,6 +204,15 @@ const WORDS: &[[&str; 4]] = &[
     ["Bill of Quantities", "Orçamento", "Presupuesto", "Computo metrico"],
     // The parameter that carries a price list's article code.
     ["Article Code", "Código do artigo", "Código de artículo", "Codice articolo"],
+    // The headings of a bill of quantities and of its specification, as `bill.rs` writes them.
+    ["No.", "N.º", "N.º", "N."],
+    ["Code", "Código", "Código", "Codice"],
+    ["Description", "Descrição", "Descripción", "Descrizione"],
+    ["Unit", "Unidade", "Unidad", "U.M."],
+    ["Quantity", "Quantidade", "Cantidad", "Quantità"],
+    ["Unit Price", "Preço unitário", "Precio unitario", "Prezzo unitario"],
+    ["Amount", "Valor", "Importe", "Importo"],
+    ["Specification", "Caderno de encargos", "Pliego de condiciones", "Capitolato"],
     ["Yes", "Sim", "Sí", "Sì"],
     ["No", "Não", "No", "No"],
 ];

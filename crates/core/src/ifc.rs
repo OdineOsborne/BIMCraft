@@ -473,66 +473,47 @@ impl Step {
 /// else — or a unit no element can answer — their count, which is always true. A code the price list no longer holds is
 /// written with its count and no price, so an element priced by a code that has gone is not quietly dropped.
 fn cost(w: &mut Step, m: &Model, products: &BTreeMap<Id, u64>) {
-    let mut by_code: BTreeMap<&str, Vec<(Id, u64)>> = BTreeMap::new();
-    for (&id, &ent) in products {
-        let Some(e) = m.elements.get(id) else { continue };
-        if let Some(code) = m.article_code(e) {
-            by_code.entry(code).or_default().push((id, ent));
-        }
-    }
-    if by_code.is_empty() {
+    // The same lines the bill of quantities has (`bill.rs`): an element may carry several codes, each measured by its
+    // own unit and as many times as it says.
+    let bill = crate::bill::bill(m);
+    let lines: Vec<_> = bill
+        .lines
+        .iter()
+        .map(|l| (l, l.items.iter().filter_map(|i| products.get(&i.id).copied()).collect::<Vec<u64>>()))
+        .filter(|(_, ents)| !ents.is_empty())
+        .collect();
+    if lines.is_empty() {
         return;
     }
-    let index = crate::walls::Index::new(m);
     let schedule = w.add(format!(
         "IFCCOSTSCHEDULE({},$,{},$,$,$,.PRICEDBILLOFQUANTITIES.,$,$,$)",
         w.guid(COST_SCHEDULE, 0),
         s(m.language.word("Bill of Quantities"))
     ));
     let mut items = Vec::new();
-    for (code, elements) in by_code {
+    for (line, mut priced) in lines {
+        priced.sort_unstable();
+        priced.dedup();
+        let code = line.code.as_str();
         let key = code_key(code);
-        let item = m.price_item(code);
-        let values = match item {
+        let values = match line.price {
             // `Unit cost` is what IFC calls a price for one of something; the money is the project's.
-            Some(i) => format!("(#{})", w.add(format!("IFCCOSTVALUE($,$,IFCMONETARYMEASURE({}),$,$,$,'Unit cost',$,$,$)", real(i.price)))),
+            Some(p) => format!("(#{})", w.add(format!("IFCCOSTVALUE($,$,IFCMONETARYMEASURE({}),$,$,$,'Unit cost',$,$,$)", real(p)))),
             None => "$".to_string(),
         };
-        let unit = item.map(|i| i.unit.trim().to_lowercase()).unwrap_or_default();
-        let json = |id: Id| crate::commands::element_json_indexed(m, id, Some(&index));
-        let sum = |key: &str| elements.iter().map(|(id, _)| json(*id).get(key).and_then(Value::as_f64).unwrap_or(0.0)).sum::<f64>();
-        let quantity = match unit.as_str() {
-            "m2" | "mq" | "m\u{b2}" => {
-                let area = elements
-                    .iter()
-                    .map(|(id, _)| {
-                        let j = json(*id);
-                        let net = j.get("net_area_m2").and_then(Value::as_f64);
-                        net.or_else(|| j.get("area_m2").and_then(Value::as_f64)).unwrap_or(0.0)
-                    })
-                    .sum::<f64>();
-                format!("IFCQUANTITYAREA('Area',$,$,{},$)", real(area))
-            }
-            "m3" | "mc" | "m\u{b3}" => {
-                let volume = elements
-                    .iter()
-                    .map(|(id, _)| {
-                        let j = json(*id);
-                        let net = j.get("net_volume_m3").and_then(Value::as_f64);
-                        net.or_else(|| j.get("volume_m3").and_then(Value::as_f64)).unwrap_or(0.0)
-                    })
-                    .sum::<f64>();
-                format!("IFCQUANTITYVOLUME('Volume',$,$,{},$)", real(volume))
-            }
+        let q = line.quantity.unwrap_or(0.0);
+        let quantity = match (line.price.is_some(), crate::bill::measure_of(&line.unit), line.quantity) {
+            (true, crate::bill::Measure::Area, Some(_)) => format!("IFCQUANTITYAREA('Area',$,$,{},$)", real(q)),
+            (true, crate::bill::Measure::Volume, Some(_)) => format!("IFCQUANTITYVOLUME('Volume',$,$,{},$)", real(q)),
             // Lengths are millimetres in this file, as every other length in it is.
-            "m" | "ml" => format!("IFCQUANTITYLENGTH('Length',$,$,{},$)", real(sum("length"))),
-            _ => format!("IFCQUANTITYCOUNT('Count',$,$,{},$)", real(elements.len() as f64)),
+            (true, crate::bill::Measure::Length, Some(_)) => format!("IFCQUANTITYLENGTH('Length',$,$,{},$)", real(q * 1000.0)),
+            // A count is always true, of a unit nothing measures as well.
+            _ => format!("IFCQUANTITYCOUNT('Count',$,$,{},$)", real(line.items.len() as f64)),
         };
         let quantity = w.add(quantity);
-        let name = item.map(|i| i.description.trim()).filter(|d| !d.is_empty()).unwrap_or(code);
+        let name = if line.description.is_empty() { code } else { line.description.as_str() };
         let ent =
             w.add(format!("IFCCOSTITEM({},$,{},$,$,{},.NOTDEFINED.,{values},(#{quantity}))", w.guid(COST_ITEM, key), s(name), s(code)));
-        let priced: Vec<u64> = elements.iter().map(|(_, ent)| *ent).collect();
         w.add(format!("IFCRELASSIGNSTOCONTROL({},$,$,$,({}),$,#{ent})", w.guid(COST_PRICES, key), refs(&priced)));
         items.push(ent);
     }

@@ -164,3 +164,43 @@ fn the_search_narrows_the_items_and_with_nothing_selected_nothing_can_be_assigne
     fill(&mut h, "Search:", "zzz");
     assert!(h.query_by_label("No item of that name.").is_some());
 }
+
+#[test]
+fn a_second_code_goes_beside_the_first_and_the_bill_shows_both() {
+    let mut h = with_a_price_list();
+    click(&mut h, P2(4000.0, 0.0));
+    let wall = *h.state().selection.first().expect("a wall is selected");
+    shortcut(&mut h, "PL");
+    press(&mut h, "B.02.100   Muratura   m2   89.40");
+    press(&mut h, "Assign to Selection");
+    // The plasterboard on both faces, beside the masonry: the same window, two settings.
+    press(&mut h, "B.02.200   Cartongesso   m2   34.10");
+    pick(&mut h, Role::CheckBox, "Beside the codes they carry");
+    h.state_mut().price_dialog.as_mut().expect("open").times = 2.0;
+    press(&mut h, "Assign to Selection");
+    let app = h.state();
+    let e = app.session.model.elements.get(wall).expect("the wall");
+    assert_eq!(app.session.model.article_code(e), Some("B.02.100; B.02.200 x2"));
+
+    press(&mut h, "Bill of Quantities…");
+    let bill = h.state().price_dialog.as_ref().and_then(|d| d.bill.clone()).expect("the bill is shown");
+    let lines = bill["lines"].as_array().expect("lines");
+    assert_eq!(lines.len(), 2, "{bill}");
+    let (one, two) = (lines[0]["quantity"].as_f64().expect("a"), lines[1]["quantity"].as_f64().expect("b"));
+    assert!((two - 2.0 * one).abs() < 0.02, "the plasterboard is measured twice: {one} {two}");
+    assert!(h.query_by_label("Export Bill…").is_some() && h.query_by_label("Export Specification…").is_some());
+    press(&mut h, "Back");
+    assert!(h.state().price_dialog.as_ref().is_some_and(|d| d.bill.is_none()), "back on the price list");
+}
+
+#[test]
+fn the_price_list_in_use_is_chosen_from_the_window() {
+    let mut h = with_a_price_list();
+    shortcut(&mut h, "PL");
+    h.get_by_role_and_label(Role::ComboBox, "Price list in use:").click_accesskit();
+    h.run();
+    let node = h.get_all_by_label("Prezzario").find(|n| n.accesskit_node().role() != Role::Label).expect("the list in the menu");
+    node.click_accesskit();
+    h.run();
+    assert_eq!(h.state().session.model.price_list_in_use.as_deref(), Some("Prezzario"));
+}

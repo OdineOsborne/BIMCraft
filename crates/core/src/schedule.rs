@@ -865,7 +865,9 @@ impl Row<'_> {
         if price_field(name) && m.prices_reach(cat) {
             // No code, or a code no list holds: no value, so an element that was never priced leaves the column empty
             // and an amount over it comes to nothing, instead of counting as zero.
-            let item = m.article_code(self.e).and_then(|code| m.price_item(code));
+            // Of the codes it carries, the first: the one a single price column can say.
+            let item =
+                m.article_code(self.e).and_then(|v| crate::bill::codes(m, v).into_iter().next()).and_then(|(code, _)| m.price_item(&code));
             return match (item, name) {
                 (Some(i), "Price Description") if !i.description.is_empty() => Value::String(i.description.clone()),
                 (Some(i), "Price Unit") if !i.unit.is_empty() => Value::String(i.unit.clone()),

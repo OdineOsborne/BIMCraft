@@ -94,8 +94,21 @@ pub static ALL: &[Command] = &[
          once, and given again when the model changes. The code is the value of a project parameter, `parameter` (the \
          project's own once one is set, else `Article Code`), which is made, and widened to their categories, where the \
          project hasn't it. A code no price list holds is refused, so a typo is not a silent hole in the bill of \
-         quantities. `clear` takes the code off instead. Returns `parameter`, `code`, `elements`",
+         quantities. An element carries several codes, one for each piece of work it is measured for (the masonry of a          wall, and the plaster on its two faces): `add` gives this one beside the ones it has, `remove` takes this one          off and leaves the others, and `times` (1 by default) says how many times it is measured on each element          (2 for both faces), written after the code (`I.01 x2`). `clear` takes every code off instead. Returns          `parameter`, `code`, `elements`",
         price_code,
+    ),
+    other(
+        "bill_of_quantities",
+        "Bill of Quantities",
+        "{path?, spec_path?} the bill of quantities of the project (an estimate: Italian `computo metrico estimativo`),          read from the article codes its elements carry (`price_code`) and the price list in use: a line for each code,          in the order of the codes, with the price list's `description` and `unit`, the `quantity` the unit is for          summed over the elements (square metres their area, a wall's net of its openings; cubic metres their volume;          metres their length; a unit of pieces, `cad`, `n`, `nr`, their count), each times as often as it carries the          code, the unit `price` and the `amount`, and under it the `elements` it measures, each with its own quantity.          A unit nothing of an element measures (`kg`, `h`) keeps no quantity and no amount and is listed in          `unmeasured`, never guessed at; a code no price list holds keeps its count and no price, in `unpriced`.          `path` writes the bill as a spreadsheet (.csv) in the project's language, the elements of each line under          it and the total at the end, and `spec_path` the specification: every item the bill uses with the price          list's whole wording, as the descriptive part of a tender's specification (`capitolato`) lists it. A          language that writes a decimal comma gets one, with `;` between the columns, as its spreadsheets read them.          It changes nothing and is no undo step. Returns `currency`, `lines`, `total`, `unpriced`, `unmeasured`",
+        bill_of_quantities,
+    ),
+    edit(
+        "price_list_use",
+        "Price List in Use",
+        &[],
+        "{name?} which of the project's price lists prices come from: a studio keeps a region's and a province's side          by side and prices a job with one of them. The bill of quantities, the schedules' price fields and the IFC          export read a code's item from that list alone, so a code it has not is unpriced and said. Without `name`,          every list again: the first by name that holds a code. Returns `in_use` (null for every list) and `lists`",
+        price_list_use,
     ),
     other(
         "dxf",
@@ -4894,11 +4907,38 @@ const ARTICLE_CODE: &str = "Article Code";
 fn price_code(s: &mut Session, p: &Value) -> R {
     let c = "price_code";
     let clear = flag(c, p, "clear")?;
+    let add = flag(c, p, "add")?;
+    let remove = flag(c, p, "remove")?;
+    if [clear, add, remove].iter().filter(|f| **f).count() > 1 {
+        return Err(bad(c, "`clear`, `add` and `remove` are three different things: give one"));
+    }
+    let times = match num(c, p, "times")? {
+        None => 1.0,
+        Some(n) if n > 0.0 && n <= crate::bill::MAX_TIMES => n,
+        Some(n) => {
+            return Err(bad(
+                c,
+                format!(
+                    "`times` is how many times the code is measured on each element, more than 0 and up to {}, not {n}",
+                    crate::bill::MAX_TIMES
+                ),
+            ));
+        }
+    };
     let code = string(c, p, "code")?.map(|v| v.trim().to_string()).unwrap_or_default();
     if code.is_empty() && !clear {
         return Err(bad(c, "`code` is required: the article code of a price list's item, or `clear` to take one off"));
     }
-    if !clear && s.model.price_item(&code).is_none() {
+    if code.contains(';') {
+        return Err(bad(c, "one code at a time: give the others with `add`"));
+    }
+    // What is written: the code, and how many times it is measured where that is not once.
+    let given = if times == 1.0 {
+        code.clone()
+    } else {
+        format!("{code} x{}", if times.fract() == 0.0 { format!("{times:.0}") } else { format!("{times}") })
+    };
+    if !clear && !remove && s.model.price_item(&code).is_none() {
         let lists: Vec<&str> = s.model.price_lists.keys().map(String::as_str).collect();
         return Err(bad(
             c,
@@ -4978,10 +5018,35 @@ fn price_code(s: &mut Session, p: &Value) -> R {
     let mut done = 0usize;
     for id in &ids {
         let Some(params) = m.elements.get_mut(*id).and_then(Element::params_mut) else { continue };
-        match clear {
-            true => done += usize::from(params.remove(&parameter).is_some()),
-            false => {
-                params.insert(parameter.clone(), json!(code));
+        let was = params.get(&parameter).and_then(Value::as_str).unwrap_or_default().to_string();
+        match (clear, add, remove) {
+            (true, ..) => done += usize::from(params.remove(&parameter).is_some()),
+            (false, _, true) => {
+                // The others the element carries stay, each with how many times it is measured.
+                let rest: Vec<String> =
+                    was.split(';').map(str::trim).filter(|p| !p.is_empty() && code_of(p) != code).map(str::to_string).collect();
+                if rest.len() != was.split(';').map(str::trim).filter(|p| !p.is_empty()).count() {
+                    done += 1;
+                }
+                match rest.is_empty() {
+                    true => drop(params.remove(&parameter)),
+                    false => drop(params.insert(parameter.clone(), json!(rest.join("; ")))),
+                }
+            }
+            (false, true, false) => {
+                let mut parts: Vec<String> = was.split(';').map(str::trim).filter(|p| !p.is_empty()).map(str::to_string).collect();
+                match parts.iter().position(|p| code_of(p) == code) {
+                    Some(i) => parts[i] = given.clone(),
+                    None if parts.len() >= crate::bill::MAX_CODES => {
+                        return Err(bad(c, format!("element {id} carries {} codes already, the most one does", parts.len())));
+                    }
+                    None => parts.push(given.clone()),
+                }
+                params.insert(parameter.clone(), json!(parts.join("; ")));
+                done += 1;
+            }
+            (false, false, false) => {
+                params.insert(parameter.clone(), json!(given));
                 done += 1;
             }
         }
@@ -4990,6 +5055,48 @@ fn price_code(s: &mut Session, p: &Value) -> R {
         m.code_parameter = Some(parameter.clone());
     }
     Ok(json!({"parameter": parameter, "code": code, "elements": done}))
+}
+
+/// `bill_of_quantities`: the project's bill of quantities, and the spreadsheets of it.
+fn bill_of_quantities(s: &mut Session, p: &Value) -> R {
+    let c = "bill_of_quantities";
+    let m = &s.model;
+    let b = crate::bill::bill(m);
+    if let Some(path) = string(c, p, "path")? {
+        std::fs::write(&path, crate::bill::bill_csv(m, &b)).map_err(|e| bad(c, format!("{path}: {e}")))?;
+    }
+    if let Some(path) = string(c, p, "spec_path")? {
+        std::fs::write(&path, crate::bill::spec_csv(m, &b)).map_err(|e| bad(c, format!("{path}: {e}")))?;
+    }
+    Ok(crate::bill::to_json(&b))
+}
+
+/// `price_list_use`: the price list prices come from.
+fn price_list_use(s: &mut Session, p: &Value) -> R {
+    let c = "price_list_use";
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if let Some(n) = &name
+        && !s.model.price_lists.contains_key(n)
+    {
+        let lists: Vec<&str> = s.model.price_lists.keys().map(String::as_str).collect();
+        return Err(bad(
+            c,
+            match lists.is_empty() {
+                true => format!("the project has no price list `{n}`, nor any: read one with `price_list`"),
+                false => format!("the project has no price list `{n}`; it has {}", lists.join(", ")),
+            },
+        ));
+    }
+    if s.model.price_list_in_use != name {
+        s.model_mut().price_list_in_use = name.clone();
+    }
+    let lists: Vec<&String> = s.model.price_lists.keys().collect();
+    Ok(json!({"in_use": name, "lists": lists}))
+}
+
+/// The code of one part of an element's article codes, without how many times it is measured (`I.01 x2` is `I.01`).
+fn code_of(part: &str) -> String {
+    crate::bill::times(part.trim()).map_or_else(|| part.trim().to_string(), |(c, _)| c)
 }
 
 /// How many rows of a price list `price_columns` gives back, so a mapping can be looked at before the list is read.
