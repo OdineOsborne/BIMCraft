@@ -8,7 +8,9 @@ on:
   pull_request:
   # Pushes to main as well: they go in without a pull request, and a Windows or macOS break shouldn't wait for a tag.
   push:
-    branches: [main]
+    # On the OdineOsborne fork also the working branch and the branches Friday (Stark's agent on the server) pushes:
+    # the server can't build the workspace, so this is where its work gets compiled and tested.
+    branches: [main, beams-from-revit, "friday/**"]
   workflow_dispatch:
 
 permissions:
