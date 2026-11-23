@@ -226,6 +226,9 @@ pub struct Reading {
     /// How many of the walls it found met no other wall: the land around the building rather than the building. They
     /// are left out of `walls` unless [`How::alone`] asked for them, and counted here either way.
     pub alone: usize,
+    /// Where a wall carries on in another thickness along the same face, the step between the two axes: no wall can
+    /// close it, so a room separation line does, or the rooms on either side of the wall run into one another.
+    pub steps: Vec<(P2, P2)>,
 }
 
 /// One face of a wall: a straight run of the drawing, long enough to be one.
@@ -248,8 +251,8 @@ impl Face {
 pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
     let (faces, names, marks, mark_layers, longest) = faces_of(m, u, &how)?;
-    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks, &mark_layers);
-    Ok(Reading { walls, holes, faces: faces.len(), longest, alone })
+    let (walls, holes, alone, steps) = pair_up(&faces, &names, &how, &marks, &mark_layers);
+    Ok(Reading { walls, holes, faces: faces.len(), longest, alone, steps })
 }
 
 /// What a drawing is read into before anything is made of it: the faces, the names of the layers they are on,
@@ -754,7 +757,7 @@ fn rungs(faces: &[Face], squares: &Squares, inside: &[bool], how: &How) -> Vec<b
 
 /// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them and
 /// how many of them stood alone.
-fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)], mark_layers: &[usize]) -> (Vec<Found>, Vec<Hole>, usize) {
+fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)], mark_layers: &[usize]) -> Reached {
     let squares = Squares::of(&faces.iter().map(|f| (f.at, f.end())).collect::<Vec<(P2, P2)>>());
     let inside = inside(faces, &squares, how);
     let rung = rungs(faces, &squares, &inside, how);
@@ -798,16 +801,96 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)], mark
         true => open_up(&mut walls, &marks, how),
         false => Vec::new(),
     };
-    walls.retain(|w| w.length() >= how.shortest);
+    // A piece shorter than it is thick is no wall, and gone before the ends are looked at, or an end resting against it
+    // takes it for the wall it meets: a wall that thickens where a flue stands in the corner left its end on the flue.
+    walls.retain(|w| w.length() >= how.shortest && w.length() > w.thickness);
     if how.openings {
         holes.extend(open_ends(&mut walls, &marks, how));
         holes.extend(glazed_openings(&walls, &marks, how));
     }
     meet(&mut walls, how);
     let alone = tidy(&mut walls, how);
+    let steps = close(&mut walls, how);
     let holes = placed(&walls, &holes, how);
-    (walls, holes, alone)
+    (walls, holes, alone, steps)
 }
+
+/// What [`pair_up`] reads: the walls, their openings, how many stood alone, and the steps rooms need closing.
+type Reached = (Vec<Found>, Vec<Hole>, usize, Vec<(P2, P2)>);
+
+/// The corners [`meet`] leaves open, closed. Two walls whose ends lie within half of their two thicknesses of each other
+/// and whose axes do not meet: where they turn a corner, both ends are taken to where the axes cross — a wall 300 thick
+/// and one 400 thick meeting at a corner drawn to their outer faces have axes 50 apart there — and where one carries on
+/// from the other along the same face in another thickness, the step between the two axes is given back, for a room
+/// separation line to close. Rooms are bounded by the axes, so a corner open by 50 mm lets one room into the next.
+fn close(walls: &mut [Found], how: &How) -> Vec<(P2, P2)> {
+    let square = how.skew.to_radians().sin();
+    let reach_of = |a: &Found, b: &Found| (a.thickness + b.thickness) / 2.0;
+    let squares = Squares::of(&axes(walls));
+    let mut steps: Vec<(P2, P2)> = Vec::new();
+    // The corners first, then the steps: a step whose end a corner just closed onto a third wall needs no line.
+    for steps_now in [false, true] {
+        for i in 0..walls.len() {
+            for j in squares.near(walls[i].start, walls[i].end, how.thick + how.slack(how.thick)) {
+                if j <= i {
+                    continue;
+                }
+                for (far_i, far_j) in [(false, false), (false, true), (true, false), (true, true)] {
+                    let (Some(a), Some(b)) = (walls.get(i), walls.get(j)) else { continue };
+                    let (e, q) = (if far_i { a.end } else { a.start }, if far_j { b.end } else { b.start });
+                    let reach = reach_of(a, b);
+                    let apart = e.dist(q);
+                    // Ends that meet already, or an end that stands on the other's axis, are a corner or a T.
+                    if apart <= JOINED || apart > reach || away(b, e) <= JOINED || away(a, q) <= JOINED {
+                        continue;
+                    }
+                    let turns = a.dir().cross(b.dir()).abs() > square;
+                    if turns == steps_now {
+                        continue;
+                    }
+                    if turns {
+                        let Some(x) = crate::geom::line_intersection(a.start, a.end, b.start, b.end) else { continue };
+                        if x.dist(e) > reach || x.dist(q) > reach {
+                            continue;
+                        }
+                        for (k, far) in [(i, far_i), (j, far_j)] {
+                            if let Some(w) = walls.get_mut(k) {
+                                match far {
+                                    true => w.end = x,
+                                    false => w.start = x,
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Parallel: a step only where the one carries on from the other, end to end, and the two lie across
+                    // one another's thickness. Two walls side by side are no step, whatever their ends do.
+                    let (along, off) = on(a, q);
+                    let (along_far, _) = on(a, if far_j { b.start } else { b.end });
+                    let at_end = if far_i { a.length() } else { 0.0 };
+                    let carries_on = match far_i {
+                        true => along_far > a.length(),
+                        false => along_far < 0.0,
+                    };
+                    let held = |p: P2| walls.iter().enumerate().any(|(k, w)| k != i && k != j && away(w, p) <= JOINED);
+                    if (along - at_end).abs() <= how.slack(reach)
+                        && carries_on
+                        && off.abs() > JOINED
+                        && off.abs() <= reach
+                        && !held(e)
+                        && !held(q)
+                    {
+                        steps.push((e, q));
+                    }
+                }
+            }
+        }
+    }
+    steps
+}
+
+/// How close two ends are taken to meet already, in millimetres.
+const JOINED: f64 = 1.0;
 
 /// Two faces paired across a wall: the one, the other, how far across, and the stretch of the one they run alongside.
 type Pair = (usize, usize, f64, f64, f64);
@@ -1583,6 +1666,40 @@ mod tests {
     /// One wall 6 m long and 300 thick, its faces broken from `a` to `b`: a doorway, as a drawing leaves one.
     fn doorway(a: f64, b: f64) -> Vec<(&'static str, [f64; 4])> {
         vec![("A", [0.0, 0.0, a, 0.0]), ("A", [b, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, a, 300.0]), ("A", [b, 300.0, 6000.0, 300.0])]
+    }
+
+    fn wall(start: [f64; 2], end: [f64; 2], thickness: f64) -> Found {
+        Found { start: P2(start[0], start[1]), end: P2(end[0], end[1]), thickness, layers: ["A".into(), "A".into()] }
+    }
+
+    #[test]
+    fn a_corner_whose_axes_miss_by_the_difference_of_two_thicknesses_is_closed() {
+        // A north wall 300 thick drawn to the outer face of the wall over the corner, and the east wall under it 400
+        // thick: the north wall's axis stops 50 short of the east wall's, where the room under them would leak out.
+        let mut walls = vec![
+            wall([10648.0, -6924.0], [2108.0, -6924.0], 300.0),
+            wall([10648.0, -2694.0], [10648.0, -6924.0], 300.0),
+            wall([10698.0, -6924.0], [10698.0, -14670.0], 400.0),
+        ];
+        let steps = close(&mut walls, &How::default());
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(walls[0].start, P2(10698.0, -6924.0), "taken to where the axes cross");
+        assert_eq!(walls[1].end, P2(10648.0, -6924.0), "the wall over the corner stands on it as before");
+        assert_eq!(walls[2].start, P2(10698.0, -6924.0));
+    }
+
+    #[test]
+    fn a_wall_carrying_on_in_another_thickness_along_one_face_gives_the_step_between_the_axes() {
+        let mut walls = vec![wall([3611.0, -10919.0], [2108.0, -10919.0], 130.0), wall([10058.0, -10835.0], [3611.0, -10835.0], 300.0)];
+        let before = walls.clone();
+        let steps = close(&mut walls, &How::default());
+        assert_eq!(walls, before, "neither moves");
+        let [(a, b)] = steps[..] else { panic!("one step: {steps:?}") };
+        let ends = [a, b];
+        assert!(ends.contains(&P2(3611.0, -10919.0)) && ends.contains(&P2(3611.0, -10835.0)), "{steps:?}");
+        // Two walls side by side, their ends level, are no step.
+        let mut side = vec![wall([0.0, 0.0], [5000.0, 0.0], 300.0), wall([0.0, 180.0], [5000.0, 180.0], 100.0)];
+        assert!(close(&mut side, &How::default()).is_empty());
     }
 
     #[test]

@@ -7309,6 +7309,13 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     }
     out["ids"] = json!(at_wall.iter().flatten().collect::<Vec<&Id>>());
     out["opening_ids"] = json!(holes_made);
+    // Where a wall carries on in another thickness, a room separation line across the step between the two axes, so
+    // the rooms on either side of it are rooms of their own.
+    let separators: Vec<Id> =
+        reading.steps.iter().map(|(a, b)| m.insert(Element::RoomSeparator(RoomSeparator { level, start: *a, end: *b }))).collect();
+    if !separators.is_empty() {
+        out["separator_ids"] = json!(separators);
+    }
     if too_high > 0 {
         out["too_high"] = json!(too_high);
     }
