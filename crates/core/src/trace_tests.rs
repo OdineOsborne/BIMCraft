@@ -521,3 +521,119 @@ fn the_walls_it_builds_are_walls_like_any_other() {
     run(&mut s, "undo", json!({})).expect("the walls, undone");
     assert!(walls(&s).is_empty(), "one command, one undo");
 }
+
+/// The ground floor the inner walls of a permesso di costruire taught this: a room of 300 walls with, inside it, a
+/// wall that is 300 thick for most of its length and 130 at one end, sharing its lower face, a 100 wall above it, a
+/// partition between the two that is a door from jamb to jamb, and a wall that carries on past the corner of another
+/// to a door and the jamb beyond it. Every line on layer `0`.
+fn inner_walls() -> Vec<(String, [f64; 4])> {
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    let mut lines = room("0", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    lines.extend([
+        // One lower face under two walls: 300 thick from 3000 on, 130 thick before it.
+        l(300.0, 2000.0, 7700.0, 2000.0),
+        l(3000.0, 2300.0, 7700.0, 2300.0),
+        l(300.0, 2130.0, 3000.0, 2130.0),
+        l(3000.0, 2130.0, 3000.0, 2300.0),
+        // A 100 wall over it.
+        l(300.0, 3300.0, 7700.0, 3300.0),
+        l(300.0, 3400.0, 7700.0, 3400.0),
+        // Between the two, a partition that is all door: a 100 jamb at each end, closed on the door's side.
+        l(4000.0, 2300.0, 4000.0, 2400.0),
+        l(4100.0, 2300.0, 4100.0, 2400.0),
+        l(4000.0, 2400.0, 4100.0, 2400.0),
+        l(4000.0, 3200.0, 4000.0, 3300.0),
+        l(4100.0, 3200.0, 4100.0, 3300.0),
+        l(4000.0, 3200.0, 4100.0, 3200.0),
+        // Above, a wall down from the north wall, met on its east side by a 100 wall at 4500..4600, carrying on past
+        // that corner 200 more on its east face, then a door 800 wide and a 100 jamb on the wall below.
+        l(6000.0, 5700.0, 6000.0, 4300.0),
+        l(6100.0, 5700.0, 6100.0, 4600.0),
+        l(6100.0, 4600.0, 7700.0, 4600.0),
+        l(6100.0, 4500.0, 7700.0, 4500.0),
+        l(6100.0, 4500.0, 6100.0, 4300.0),
+        l(6000.0, 4300.0, 6100.0, 4300.0),
+        l(6000.0, 3400.0, 6000.0, 3500.0),
+        l(6100.0, 3400.0, 6100.0, 3500.0),
+        l(6000.0, 3500.0, 6100.0, 3500.0),
+    ]);
+    lines
+}
+
+/// A wall found: its axis's two ends and its thickness.
+type Axis = ([f64; 2], [f64; 2], f64);
+
+/// What Find found: each wall as its axis's ends and its thickness, and each opening's width.
+fn found(s: &mut Session) -> (Vec<Axis>, Vec<f64>) {
+    let out = run(s, "trace_walls", json!({"preview": true})).expect("it reads");
+    let point = |v: &Value| [v[0].as_f64().unwrap_or(f64::NAN), v[1].as_f64().unwrap_or(f64::NAN)];
+    let walls = out["found"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|w| (point(&w["start"]), point(&w["end"]), w["thickness"].as_f64().unwrap_or(0.0)));
+    let holes = out["holes"].as_array().into_iter().flatten().map(|h| h["width"].as_f64().unwrap_or(0.0));
+    (walls.collect(), holes.collect())
+}
+
+/// The walls found running along `x` (upright) or `y` (across), as their stretch of the other coordinate and their
+/// thickness.
+fn along(walls: &[Axis], upright: bool, at: f64, near: f64) -> Vec<(f64, f64, f64)> {
+    let (k, other) = if upright { (0, 1) } else { (1, 0) };
+    walls
+        .iter()
+        .filter(|(a, b, _)| (a[k] - at).abs() <= near && (b[k] - at).abs() <= near)
+        .map(|(a, b, t)| (a[other].min(b[other]), a[other].max(b[other]), *t))
+        .collect()
+}
+
+#[test]
+fn one_face_shared_by_two_walls_of_different_thickness_makes_both() {
+    let mut s = linked(&inner_walls());
+    let (walls, _) = found(&mut s);
+    // The 300 stretch and the 130 one, both on the same lower face: the nearer pair at one end takes nothing from
+    // the farther one at the other.
+    let thick = along(&walls, false, 2150.0, 20.0);
+    assert!(thick.iter().any(|(lo, hi, t)| (*t - 300.0).abs() < 1.0 && *lo <= 3050.0 && *hi >= 7650.0), "{walls:?}");
+    let thin = along(&walls, false, 2065.0, 20.0);
+    assert!(thin.iter().any(|(lo, hi, t)| (*t - 130.0).abs() < 1.0 && *lo <= 350.0 && *hi >= 2950.0), "{walls:?}");
+}
+
+#[test]
+fn a_partition_that_is_a_door_from_jamb_to_jamb_is_a_wall_with_a_door_in_it() {
+    let mut s = linked(&inner_walls());
+    let (walls, holes) = found(&mut s);
+    // From the wall under it to the wall over it, 100 thick, with the door between the jambs.
+    let partition = along(&walls, true, 4050.0, 20.0);
+    assert!(partition.iter().any(|(lo, hi, t)| (*t - 100.0).abs() < 1.0 && *lo <= 2310.0 && *hi >= 3290.0), "{walls:?}");
+    assert!(holes.iter().any(|w| (*w - 800.0).abs() <= 120.0), "the door: {holes:?}");
+}
+
+#[test]
+fn a_wall_carries_on_past_a_corner_through_its_door_to_the_jamb_beyond() {
+    let mut s = linked(&inner_walls());
+    let (walls, holes) = found(&mut s);
+    // Down from the north wall past the corner at 4500, through the door, to the wall under it at 3400.
+    let wall = along(&walls, true, 6050.0, 20.0);
+    assert!(wall.iter().any(|(lo, hi, t)| (*t - 100.0).abs() < 1.0 && *lo <= 3410.0 && *hi >= 5690.0), "{walls:?}");
+    assert!(holes.iter().filter(|w| (**w - 800.0).abs() <= 120.0).count() >= 2, "both doors: {holes:?}");
+}
+
+#[test]
+fn short_pairs_that_meet_nothing_and_close_no_door_build_nothing() {
+    // Two short parallel lines and their end, alone in a room: a mark, and no wall.
+    let mut lines = room("0", [0.0, 0.0, 8000.0, 6000.0], 300.0);
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    lines.extend([l(3000.0, 3000.0, 3000.0, 3200.0), l(3100.0, 3000.0, 3100.0, 3200.0), l(3000.0, 3200.0, 3100.0, 3200.0)]);
+    // A porch's piers in a row in front of it, each a box 200 square, 2600 apart: closed at both ends, and no jamb.
+    for k in 0..4 {
+        let x = 300.0 + 2600.0 * f64::from(k);
+        lines.extend(rect("0", [x, -1700.0, x + 200.0, -1500.0]));
+    }
+    // A door's cross, 600 across, a wall's thickness from the wall's face: it stands on nothing.
+    lines.extend([l(5000.0, 5100.0, 5600.0, 5100.0), l(5300.0, 4800.0, 5300.0, 5400.0)]);
+    let mut s = linked(&lines);
+    let (walls, holes) = found(&mut s);
+    assert_eq!(walls.len(), 4, "the room's four walls and nothing else: {walls:?}");
+    assert!(holes.is_empty(), "{holes:?}");
+}

@@ -247,14 +247,14 @@ impl Face {
 /// is not loaded holds none.
 pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
-    let (faces, names, marks, longest) = faces_of(m, u, &how)?;
-    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks);
+    let (faces, names, marks, mark_layers, longest) = faces_of(m, u, &how)?;
+    let (walls, holes, alone) = pair_up(&faces, &names, &how, &marks, &mark_layers);
     Ok(Reading { walls, holes, faces: faces.len(), longest, alone })
 }
 
 /// What a drawing is read into before anything is made of it: the faces, the names of the layers they are on,
-/// every run of it however short, and the longest of those.
-type Lines = (Vec<Face>, Vec<String>, Vec<(P2, P2)>, f64);
+/// every run of it however short, the layer each of those is on, and the longest of them.
+type Lines = (Vec<Face>, Vec<String>, Vec<(P2, P2)>, Vec<usize>, f64);
 
 /// Every straight run of the drawing long enough to be a wall's face, in the project's millimetres: those faces,
 /// the names of the layers they are on, every run of it however short (what marks an opening is drawn with those),
@@ -265,6 +265,7 @@ fn faces_of(m: &Model, u: &Underlay, how: &How) -> Result<Lines, String> {
     // Every run of the drawing, however short: a wall's faces are the long ones, and what marks an opening in a wall
     // is drawn with the short ones.
     let mut marks: Vec<(P2, P2)> = Vec::new();
+    let mut mark_layers: Vec<usize> = Vec::new();
     let mut longest = 0.0f64;
     for (layer, points, closed) in crate::underlay::lines_by_layer(m, u) {
         let at = match names.iter().position(|n| *n == layer) {
@@ -292,6 +293,7 @@ fn faces_of(m: &Model, u: &Underlay, how: &How) -> Result<Lines, String> {
             }
             longest = longest.max(len);
             marks.push((a, b));
+            mark_layers.push(at);
             if len < how.shortest {
                 continue;
             }
@@ -304,7 +306,7 @@ fn faces_of(m: &Model, u: &Underlay, how: &How) -> Result<Lines, String> {
             faces.push(Face { layer: at, dir: (b - a).unit(), at: a, len });
         }
     }
-    Ok((faces, names, marks, longest))
+    Ok((faces, names, marks, mark_layers, longest))
 }
 
 /// How far apart two lines of one flight may stand, in millimetres: no step has a going deeper than this, and
@@ -684,7 +686,10 @@ fn inside(faces: &[Face], squares: &Squares, how: &How) -> Vec<bool> {
                 return true;
             }
             let across = across_from(faces, &near(i, how.thick * 2.0), i, how, &marks, how.thick * 2.0);
-            let along = |d: &f64, run: &f64, up: bool| (*d > 0.0) == up && *run >= how.shortest;
+            // A leaf's faces run the length of it, broken only where it is: three quarters of it at the least. Two
+            // short marks drawn a way off (the crosses of two doors side by side, a sill) add up to a stretch as long
+            // as a wall, and made this line the inside of a wall they are no face of.
+            let along = |d: &f64, run: &f64, up: bool| (*d > 0.0) == up && *run >= how.shortest.max(faces[i].len * 0.75);
             let near = |up: bool| across.iter().filter(|(d, run)| along(d, run, up)).map(|(d, _)| d.abs()).min_by(f64::total_cmp);
             let (Some(up), Some(down)) = (near(true), near(false)) else { return false };
             if up + down > how.thick || (up - down).abs() <= how.slack(up.min(down)) {
@@ -749,12 +754,11 @@ fn rungs(faces: &[Face], squares: &Squares, inside: &[bool], how: &How) -> Vec<b
 
 /// Every face paired with the nearest face across it, as the walls that makes, tidied, with the openings in them and
 /// how many of them stood alone.
-fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (Vec<Found>, Vec<Hole>, usize) {
+fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)], mark_layers: &[usize]) -> (Vec<Found>, Vec<Hole>, usize) {
     let squares = Squares::of(&faces.iter().map(|f| (f.at, f.end())).collect::<Vec<(P2, P2)>>());
     let inside = inside(faces, &squares, how);
     let rung = rungs(faces, &squares, &inside, how);
-    let mut pairs: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
-    let mut nearest = vec![f64::INFINITY; faces.len()];
+    let mut pairs: Vec<Pair> = Vec::new();
     // The two faces of a wall are no farther apart than a wall is thick, so no face farther off than that from this
     // one is weighed against it at all.
     let reach = how.thick + how.slack(how.thick);
@@ -768,29 +772,33 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
                 continue;
             }
             let Some((d, s0, s1)) = across(a, b, how) else { continue };
-            nearest[i] = nearest[i].min(d.abs());
-            nearest[j] = nearest[j].min(d.abs());
             pairs.push((i, j, d, s0, s1));
         }
     }
+    let farther = farther_pairs(faces, &pairs, how);
     let mut walls: Vec<Found> = Vec::new();
-    for (i, j, d, s0, s1) in pairs {
+    for (k, (i, j, d, s0, s1)) in pairs.into_iter().enumerate() {
         // A face's wall is the nearest face across it. A farther one is the other side of a room — and the same wall,
         // drawn a little out of true, must not be told from itself, which is what the slack is for.
-        let t = d.abs();
-        if t > nearest[i] + how.slack(t) || t > nearest[j] + how.slack(t) {
+        if farther[k] {
             continue;
         }
+        let t = d.abs();
         let (a, half) = (&faces[i], d / 2.0);
         let mid = |s: f64| a.at + a.dir * s + a.dir.perp() * half;
         walls.push(Found { start: mid(s0), end: mid(s1), thickness: t, layers: [name_of(names, a.layer), name_of(names, faces[j].layer)] });
     }
+    // The jambs of a door are shorter than a face, so a partition that is a door from end to end, or the end of a wall
+    // past a corner to its door, is drawn with nothing long enough to pair: it comes in as the jambs, which join the
+    // wall they carry on or take the door between them in, or stay too short to be anything and go.
+    walls.extend(jambs(marks, mark_layers, names, how));
     join(&mut walls, how);
     let marks = Marks::of(marks);
     let mut holes = match how.openings {
         true => open_up(&mut walls, &marks, how),
         false => Vec::new(),
     };
+    walls.retain(|w| w.length() >= how.shortest);
     if how.openings {
         holes.extend(open_ends(&mut walls, &marks, how));
         holes.extend(glazed_openings(&walls, &marks, how));
@@ -799,6 +807,126 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)]) -> (
     let alone = tidy(&mut walls, how);
     let holes = placed(&walls, &holes, how);
     (walls, holes, alone)
+}
+
+/// Two faces paired across a wall: the one, the other, how far across, and the stretch of the one they run alongside.
+type Pair = (usize, usize, f64, f64, f64);
+
+/// Which pairs of faces are the far side of a room and no wall: those with a nearer pair across the same face over the
+/// same stretch of it, by more than the slack that keeps one wall drawn out of true from being told from itself. Only
+/// where the two overlap, because one long face is often the face of two walls of different thickness in turn — a
+/// wall 300 thick for most of its length and 130 at one end, both on the one lower face — and the nearer pair at the
+/// one end says nothing of the other.
+fn farther_pairs(faces: &[Face], pairs: &[Pair], how: &How) -> Vec<bool> {
+    // For each face, the stretch of it each of its pairs covers, and how far across that pair is.
+    let mut on_face: Vec<Vec<(usize, f64, f64, f64)>> = vec![Vec::new(); faces.len()];
+    for (k, &(i, j, d, s0, s1)) in pairs.iter().enumerate() {
+        let (a, Some(b)) = (&faces[i], faces.get(j)) else { continue };
+        let t = |s: f64| b.dir.dot(a.at + a.dir * s - b.at);
+        let (u0, u1) = (t(s0), t(s1));
+        if let Some(row) = on_face.get_mut(i) {
+            row.push((k, s0, s1, d.abs()));
+        }
+        if let Some(row) = on_face.get_mut(j) {
+            row.push((k, u0.min(u1), u0.max(u1), d.abs()));
+        }
+    }
+    let mut farther = vec![false; pairs.len()];
+    for row in &on_face {
+        for &(k, lo, hi, t) in row {
+            let covered = row.iter().any(|&(q, qlo, qhi, qt)| {
+                let overlap = hi.min(qhi) - lo.max(qlo);
+                q != k && qt + how.slack(t) < t && (overlap >= how.shortest || overlap >= (hi - lo) * 0.5)
+            });
+            if covered && let Some(f) = farther.get_mut(k) {
+                *f = true;
+            }
+        }
+    }
+    farther
+}
+
+/// The shortest jamb read: a door frame's stub against the wall beyond it is a few centimetres long.
+const JAMB: f64 = 50.0;
+
+/// The jambs of the doors a drawing draws: two lines a wall's thickness apart, too short to be faces, with the end of
+/// the jamb drawn across between them on the door's side — which is what tells a jamb from any two short lines that
+/// happen to lie alongside one another. One of the two may be part of a longer line: the face of the wall the jamb
+/// carries on, past a corner. Each comes in as a short wall, which [`join`] and [`open_up`] take into the wall it
+/// carries on or join to the jamb across the door, and which is dropped if neither does.
+fn jambs(marks: &[(P2, P2)], mark_layers: &[usize], names: &[String], how: &How) -> Vec<Found> {
+    let squares = Squares::of(marks);
+    let square = how.skew.to_radians().sin();
+    let mut out: Vec<Found> = Vec::new();
+    for (i, &(a, b)) in marks.iter().enumerate() {
+        let len = a.dist(b);
+        if !(JAMB..how.shortest).contains(&len) {
+            continue;
+        }
+        let dir = (b - a).unit();
+        let (along, off) = (|p: P2| dir.dot(p - a), |p: P2| dir.perp().dot(p - a));
+        // The nearest line alongside the whole of it, a wall's thickness across.
+        let mut best: Option<(f64, usize)> = None;
+        for j in squares.near(a, b, how.thick + how.slack(how.thick)) {
+            let Some(&(p, q)) = marks.get(j) else { continue };
+            if j == i || (q - p).length() <= 0.0 || dir.cross((q - p).unit()).abs() > square {
+                continue;
+            }
+            let (o0, o1) = (off(p), off(q));
+            if (o0 - o1).abs() > how.slack(o0.abs().min(o1.abs())) {
+                continue;
+            }
+            let d = (o0 + o1) / 2.0;
+            let (t0, t1) = (along(p).min(along(q)), along(p).max(along(q)));
+            if !(how.thin..=how.thick).contains(&d.abs()) || t0 > how.slack(d) || t1 < len - how.slack(d) {
+                continue;
+            }
+            if best.is_none_or(|(near, _)| d.abs() < near.abs()) {
+                best = Some((d, j));
+            }
+        }
+        let Some((d, j)) = best else { continue };
+        // The jamb's end drawn across, from the one line to the other, at one end of it.
+        let closed = |end: P2| {
+            let other = end + dir.perp() * d;
+            let near = squares.near(end, other, how.slack(d));
+            near.iter().filter_map(|k| marks.get(*k)).any(|&(p, q)| {
+                let slack = how.slack(d);
+                (p.dist(end) <= slack && q.dist(other) <= slack) || (q.dist(end) <= slack && p.dist(other) <= slack)
+            })
+        };
+        // Closed on the door's side and standing on a wall at the other: at both corners of the end that is not closed
+        // the drawing goes on — a face of the wall the jamb stands on running across it, or the face of the wall the
+        // jamb carries on running on past it. A pier drawn as a box is closed at both ends, and a door's own marks (its
+        // leaf, the cross at its middle) stand on nothing.
+        let goes_on = |end: P2, out: P2| {
+            let slack = how.slack(d);
+            let corners = [end, end + dir.perp() * d];
+            corners.iter().all(|&c| {
+                squares.near(c, c, slack).iter().filter_map(|k| marks.get(*k)).any(|&(p, q)| {
+                    let v = q - p;
+                    if v.length() <= 0.0 || crate::geom::dist_to_segment(c, p, q) > slack {
+                        return false;
+                    }
+                    let across = dir.cross(v.unit()).abs() >= 1.0 - square;
+                    let past = dir.cross(v.unit()).abs() <= square && (out.dot(p - c) > slack || out.dot(q - c) > slack);
+                    across || past
+                })
+            })
+        };
+        let stands = match (closed(a), closed(b)) {
+            (true, false) => goes_on(b, dir),
+            (false, true) => goes_on(a, dir * -1.0),
+            _ => false,
+        };
+        if !stands {
+            continue;
+        }
+        let half = dir.perp() * (d / 2.0);
+        let layer = |k: usize| name_of(names, mark_layers.get(k).copied().unwrap_or(usize::MAX));
+        out.push(Found { start: a + half, end: b + half, thickness: d.abs(), layers: [layer(i), layer(j)] });
+    }
+    out
 }
 
 /// What a survey draws that pairs as a wall does and is no wall of the building, taken out of the walls found: a
