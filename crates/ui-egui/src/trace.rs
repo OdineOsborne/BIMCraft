@@ -295,7 +295,7 @@ fn layers_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) 
 
 /// The Parts tab: what each part of the drawing is of the building. A change is its own `cad_parts`, carrying the
 /// whole list, as the Layers tab's clicks are their own `cad_layers`.
-fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
+fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>, mark: &mut bool) {
     let Some(u) = underlay_of(m, d.underlay) else { return };
     let said = t(
         "What each part of the drawing is of the building. A survey is often saved as a whole set of sheets side by side in one file, and this says which rectangle of it is which, so that each is read as what it is.",
@@ -305,7 +305,18 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
     let mut parts = u.parts.clone();
     let mut changed = false;
     let cropped = d.crop.is_some();
-    let add = ui.add_enabled(cropped, Button::new(t("Add the plan's crop as a part")));
+    let (add, marking) = ui
+        .horizontal(|ui| {
+            let marking = ui
+                .button(t("Mark Parts on the Drawing"))
+                .on_hover_text(t(
+                    "Draw a rectangle round each sheet of the drawing, two clicks a sheet: its caption names it and says whether it is a plan, an elevation, a section, a detail or the site plan. This window steps aside meanwhile, and Esc brings it back.",
+                ))
+                .clicked();
+            (ui.add_enabled(cropped, Button::new(t("Add the plan's crop as a part"))), marking)
+        })
+        .inner;
+    *mark = marking;
     let clicked = add.clicked();
     if !cropped {
         add.on_hover_text(t("Crop the plan to the part of the drawing to trace, and only that part is read."));
@@ -326,8 +337,7 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
         return;
     }
     let none = t("<None>").to_string();
-    let kinds: Vec<String> =
-        [PartKind::Plan, PartKind::Elevation, PartKind::Section].iter().map(|k| t(kind_word(*k)).to_string()).collect();
+    let kinds: Vec<String> = PartKind::ALL.iter().map(|k| t(kind_word(*k)).to_string()).collect();
     let levels: Vec<(String, Id)> = m.levels().iter().map(|(id, l)| (l.name.clone(), *id)).collect();
     let level_options: Vec<String> = std::iter::once(none.clone()).chain(levels.iter().map(|(name, _)| name.clone())).collect();
     let phase_options: Vec<String> = std::iter::once(none.clone()).chain(m.phases.iter().cloned()).collect();
@@ -346,11 +356,7 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
                 let named = |column: &str| format!("{}: {row}", t(column));
                 let now = t(kind_word(part.kind)).to_string();
                 if let Some(picked) = phase_combo(ui, (d.underlay, &format!("kind {salt}")), named("What it is"), &now, &kinds) {
-                    part.kind = match kinds.iter().position(|k| *k == picked) {
-                        Some(1) => PartKind::Elevation,
-                        Some(2) => PartKind::Section,
-                        _ => PartKind::Plan,
-                    };
+                    part.kind = kinds.iter().position(|k| *k == picked).and_then(|i| PartKind::ALL.get(i).copied()).unwrap_or_default();
                     changed = true;
                 }
                 let on = part.level.and_then(|g| levels.iter().find(|(_, id)| m.guid(*id) == g)).map(|(name, _)| name.clone());
@@ -366,11 +372,11 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) {
                 }
                 // What an elevation writes about how high things are, and whether its marks bear one another out:
                 // an area that holds two views of the building holds two datums, and the marks say so.
-                match part.kind {
-                    PartKind::Plan => {
+                match part.kind.is_view() {
+                    false => {
                         ui.label("");
                     }
-                    _ => {
+                    true => {
                         let read = bimcraft_core::underlay::heights(m, u, part.region);
                         let said = match (read.marks.len(), read.worst <= bimcraft_core::underlay::HEIGHTS_AGREE) {
                             (0, _) => t("None written").to_string(),
@@ -407,6 +413,8 @@ fn kind_word(kind: PartKind) -> &'static str {
         PartKind::Plan => "Plan",
         PartKind::Elevation => "Elevation",
         PartKind::Section => "Section",
+        PartKind::Detail => bimcraft_i18n::msg!("Detail"),
+        PartKind::Site => bimcraft_i18n::msg!("Site Plan"),
     }
 }
 
@@ -1357,6 +1365,12 @@ impl BimApp {
 
     pub(crate) fn trace_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.trace_dialog.take() else { return };
+        // Stepped aside while Mark Part draws round the sheets, so that none of them is under it: Esc or Done brings it
+        // back as it was, on its Parts tab.
+        if matches!(self.tool, crate::Tool::MarkPart { .. }) {
+            self.trace_dialog = Some(d);
+            return;
+        }
         let model = Arc::clone(&self.session.model);
         // The plan may have been cropped, or uncropped, since the last frame; with no crop there is nothing to look
         // inside, so the window stops offering it.
@@ -1377,6 +1391,7 @@ impl BimApp {
         let (mut storey, mut roofing, mut slabbing) = (None::<Value>, None::<Value>, None::<Value>);
         let (mut stairing, mut grounding) = (None::<Value>, None::<Value>);
         let mut open = true;
+        let mut mark = false;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
             .open(&mut open)
@@ -1409,7 +1424,7 @@ impl BimApp {
                 ui.separator();
                 match d.tab {
                     0 => layers_tab(ui, &d, &model, &mut layers),
-                    1 => parts_tab(ui, &d, &model, &mut parts),
+                    1 => parts_tab(ui, &d, &model, &mut parts, &mut mark),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build, &mut stairing),
                     3 => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
                     _ => ground_tab(ui, &mut d, &model, &mut grounding),
@@ -1478,8 +1493,75 @@ impl BimApp {
                 }
             }
         }
+        if mark {
+            self.set_tool(crate::Tool::MarkPart { underlay: d.underlay, first: None });
+        }
         if open && !close {
             self.trace_dialog = Some(d);
+        }
+    }
+
+    /// A click while Mark Part draws a rectangle round a sheet, at `at` in the plan's millimetres: its first corner,
+    /// then its opposite one, which makes the sheet a part of the drawing (`cad_part`) and says what it was taken
+    /// for. The tool goes on to the next sheet, and Trace Walls, where it is open, turns to its Parts tab, where
+    /// what the caption could not say is put right.
+    pub(crate) fn mark_part_at(&mut self, at: P2) {
+        let crate::Tool::MarkPart { underlay, first } = self.tool else { return };
+        let Some(a) = first else {
+            self.tool = crate::Tool::MarkPart { underlay, first: Some(at) };
+            return;
+        };
+        self.tool = crate::Tool::MarkPart { underlay, first: None };
+        if (a.0 - at.0).abs() < 1.0 || (a.1 - at.1).abs() < 1.0 {
+            return;
+        }
+        let params = json!({"underlay": underlay, "region": [[a.0, a.1], [at.0, at.1]]});
+        let Some(reply) = self.run("cad_part", params) else { return };
+        let part = &reply["part"];
+        let name = part["name"].as_str().unwrap_or_default();
+        let kind = PartKind::from_word(part["kind"].as_str().unwrap_or_default()).unwrap_or_default();
+        let m = &self.session.model;
+        let level = part["level"].as_u64().and_then(|id| m.levels().into_iter().find(|(l, _)| *l == id));
+        let text = match level {
+            Some((_, l)) => tf("{} marked: {}, of {}.", &[name, t(kind_word(kind)), &l.name]),
+            None => tf("{} marked: {}.", &[name, t(kind_word(kind))]),
+        };
+        self.status = crate::Status { text, error: false };
+        if let Some(d) = self.trace_dialog.as_mut() {
+            d.tab = 1;
+        }
+    }
+
+    /// The parts of the drawing under the plan of `level`, each its rectangle and its name in a corner of it, while
+    /// Trace Walls is open or Mark Part is drawing: what has been said of the sheets, over the sheets themselves.
+    pub(crate) fn paint_parts(&self, p: &egui::Painter, view: &View, origin: Pos2, level: Id) {
+        let underlay = match (&self.tool, &self.trace_dialog) {
+            (crate::Tool::MarkPart { underlay, .. }, _) => *underlay,
+            (_, Some(d)) => d.underlay,
+            _ => return,
+        };
+        let m = &self.session.model;
+        let Some(u) = underlay_of(m, underlay) else { return };
+        if u.level != m.guid(level) {
+            return;
+        }
+        let at = |q: P2| {
+            let (x, y) = view.px(q);
+            origin + vec2(x, y)
+        };
+        let ink = pal().accent;
+        for part in &u.parts {
+            let [sw, ne] = part.region;
+            let r = egui::Rect::from_two_pos(at(sw), at(ne));
+            p.rect_filled(r, 0.0, ink.gamma_multiply(0.05));
+            p.rect_stroke(r, 0.0, Stroke::new(1.5, ink), egui::StrokeKind::Middle);
+            let said = format!("{}  ({})", part.name, t(kind_word(part.kind)));
+            let font = egui::FontId::proportional(12.0);
+            let galley = p.layout_no_wrap(said, font, ink);
+            let corner = r.left_top() + vec2(4.0, 3.0);
+            let back = egui::Rect::from_min_size(corner, galley.size()).expand(2.0);
+            p.rect_filled(back, 2.0, pal().panel.gamma_multiply(0.85));
+            p.galley(corner, galley, ink);
         }
     }
 

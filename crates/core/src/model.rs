@@ -196,7 +196,13 @@ pub const MAX_SLOPE: f64 = 75.0;
 /// newer upstream BIMCraft, whose changes this build does not know. A file of 20 needs no step. The fork's builds on 0.8.0 stamped its files 5 to 9,
 /// on top of 0.8.0's 4; a file of theirs holds none of what upstream's 5 to 19 added, so it is read as one older than 18
 /// and takes the steps such a file takes, its own fields read as they were written.
-pub const FORMAT: u32 = 100;
+///
+/// 101 is the fork's next: a part of a drawing may be a construction detail (`detail`) or a site plan (`site`) as well,
+/// which a build that reads up to 100 would refuse with a word it does not know instead of saying the file is newer. A
+/// file of 100 needs no step.
+pub const FORMAT: u32 = 101;
+/// The LaCorona fork's first format: the fork's files are stamped from here to [`FORMAT`].
+pub const FORK_FIRST_FORMAT: u32 = 100;
 /// The newest of upstream's formats this build reads: 0.12's.
 pub const UPSTREAM_FORMAT: u32 = 20;
 /// How far past the model a level reaches without an extent of its own, mm.
@@ -1662,16 +1668,36 @@ pub enum PartKind {
     Elevation,
     /// A cut through it.
     Section,
+    /// A construction detail: a wall's or a floor's layers drawn large, what a type's layers are read from.
+    Detail,
+    /// The site plan: the plot, the roads and the land round the building, seen from above.
+    Site,
 }
 
 impl PartKind {
+    /// Every kind, in the order a list offers them.
+    pub const ALL: [PartKind; 5] = [PartKind::Plan, PartKind::Elevation, PartKind::Section, PartKind::Detail, PartKind::Site];
+
     /// The word a command says it by.
     pub fn word(&self) -> &'static str {
         match self {
             PartKind::Plan => "plan",
             PartKind::Elevation => "elevation",
             PartKind::Section => "section",
+            PartKind::Detail => "detail",
+            PartKind::Site => "site",
         }
+    }
+
+    /// The kind a command's word names.
+    pub fn from_word(word: &str) -> Option<PartKind> {
+        PartKind::ALL.into_iter().find(|k| k.word() == word)
+    }
+
+    /// Whether it is a view of the building stood on its side, an elevation or a section: what heights are read
+    /// off.
+    pub fn is_view(&self) -> bool {
+        matches!(self, PartKind::Elevation | PartKind::Section)
     }
 }
 
@@ -4433,7 +4459,7 @@ impl Model {
         use serde_json::Value;
         let mut v: Value = crate::memory::json(text, budget)?;
         let format = v.get("format").map_or(Some(0), Value::as_u64).ok_or("`format` must be a whole number")?;
-        if format > u64::from(FORMAT) || (format > u64::from(UPSTREAM_FORMAT) && format < u64::from(FORMAT)) {
+        if format > u64::from(FORMAT) || (format > u64::from(UPSTREAM_FORMAT) && format < u64::from(FORK_FIRST_FORMAT)) {
             return Err(format!(
                 "it was saved by a newer BIMCraft (file format {format}; this one reads up to {UPSTREAM_FORMAT} of upstream \
                  BIMCraft's, and reads up to {FORMAT} of the LaCorona fork's): update BIMCraft to open it"

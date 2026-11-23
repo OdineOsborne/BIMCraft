@@ -169,6 +169,54 @@ pub fn caption(m: &Model, u: &Underlay, region: [P2; 2]) -> Option<String> {
     best.map(|(_, _, said)| said)
 }
 
+/// What a part captioned `caption` is, by the word a survey captions it with: `PIANTA` a plan, `PROSPETTO` an
+/// elevation, `SEZIONE` a section, `PARTICOLARE` or `DETTAGLIO` a construction detail, `PLANIMETRIA` the site plan,
+/// and their English words. The site plan is looked for first, because a survey captions it `PLANIMETRIA GENERALE -
+/// PIANTA COPERTURA` as often as not, and a detail before a section, which a detail is often drawn of. None where the
+/// caption says none of them.
+pub fn kind_from_caption(caption: &str) -> Option<crate::model::PartKind> {
+    use crate::model::PartKind;
+    let words = caption_words(caption);
+    let has = |any: &[&str]| words.iter().any(|w| any.contains(&w.as_str()));
+    let site = has(&["PLANIMETRIA", "INQUADRAMENTO"]) || caption.to_uppercase().contains("SITE PLAN");
+    [
+        (site, PartKind::Site),
+        (has(&["PARTICOLARE", "PARTICOLARI", "DETTAGLIO", "DETTAGLI", "STRATIGRAFIA", "DETAIL", "DETAILS"]), PartKind::Detail),
+        (has(&["SEZIONE", "SEZIONI", "SECTION", "SECTIONS"]), PartKind::Section),
+        (has(&["PROSPETTO", "PROSPETTI", "ELEVATION", "ELEVATIONS"]), PartKind::Elevation),
+        (has(&["PIANTA", "PIANTE", "PLAN", "PLANS"]), PartKind::Plan),
+    ]
+    .into_iter()
+    .find_map(|(said, kind)| said.then_some(kind))
+}
+
+/// The level a plan captioned `caption` is the plan of: the one whose name's own words (`terra` of `Piano terra`, not
+/// the `piano` every level's name has) the caption says, whole words and not inside others (`SEMINTERRATO` holds
+/// `TERRA` and is no ground floor). Where two say as many of their words, or none says any, it is not said.
+pub fn level_from_caption(m: &Model, caption: &str) -> Option<crate::model::Id> {
+    const EVERY_LEVEL: [&str; 7] = ["PIANO", "LIVELLO", "LEVEL", "FLOOR", "STOREY", "STORY", "QUOTA"];
+    let said = caption_words(caption);
+    let mut best: Option<(usize, crate::model::Id)> = None;
+    let mut tied = false;
+    for (id, level) in m.levels() {
+        let own: Vec<String> = caption_words(&level.name).into_iter().filter(|w| !EVERY_LEVEL.contains(&w.as_str())).collect();
+        if own.is_empty() || !own.iter().all(|w| said.contains(w)) {
+            continue;
+        }
+        match best {
+            Some((n, _)) if n > own.len() => {}
+            Some((n, _)) if n == own.len() => tied = true,
+            _ => (best, tied) = (Some((own.len(), id)), false),
+        }
+    }
+    best.filter(|_| !tied).map(|(_, id)| id)
+}
+
+/// The words of a caption, upper case, split wherever it is not a letter or a digit.
+fn caption_words(caption: &str) -> Vec<String> {
+    caption.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_uppercase).collect()
+}
+
 /// A height an elevation writes on itself: what it says, in metres above whatever it is measured from, and where in
 /// the project the drawing writes it.
 #[derive(Clone, Copy, Debug, PartialEq)]

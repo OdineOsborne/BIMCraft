@@ -159,6 +159,69 @@ fn a_part_is_added_from_the_crop_with_the_survey_own_name_for_it_and_traced_by_n
 }
 
 #[test]
+fn mark_parts_draws_a_rectangle_round_each_sheet_and_its_caption_says_what_it_is() {
+    // Two sheets side by side, a plan and an elevation, each captioned under it as a survey captions its sheets.
+    let mut lines = one_room("MURI");
+    lines.extend(rect("MURI", [20_000.0, 0.0, 28_000.0, 3000.0]));
+    let captions = "0
+TEXT
+8
+TESTO
+10
+2000
+20
+-900
+40
+300
+1
+PIANTA PIANO TERRA
+                    0
+TEXT
+8
+TESTO
+10
+22000
+20
+-900
+40
+300
+1
+PROSPETTO SUD
+";
+    let mut h = app("");
+    h.state_mut().session.execute("underlay", &json!({"path": drawing_with(&lines, captions)})).expect("it comes in");
+    h.run();
+    shortcut(&mut h, "ZF");
+    shortcut(&mut h, "TW");
+    press(&mut h, "Parts");
+    press(&mut h, "Mark Parts on the Drawing");
+    assert!(matches!(h.state().tool, crate::Tool::MarkPart { first: None, .. }), "{:?}", h.state().tool);
+    // Two clicks a sheet, one corner and the opposite one; the tool goes on to the next sheet.
+    click(&mut h, P2(-1500.0, 7000.0));
+    assert!(matches!(h.state().tool, crate::Tool::MarkPart { first: Some(_), .. }));
+    click(&mut h, P2(9000.0, -1500.0));
+    click(&mut h, P2(19_000.0, -1500.0));
+    click(&mut h, P2(29_000.0, 4000.0));
+    assert!(matches!(h.state().tool, crate::Tool::MarkPart { first: None, .. }), "it goes on until Esc");
+    let parts = h.state().session.model.elements.values().find_map(|e| match e {
+        bimcraft_core::model::Element::Underlay(u) => Some(u.parts.clone()),
+        _ => None,
+    });
+    let parts = parts.expect("the drawing");
+    let said: Vec<(&str, bimcraft_core::model::PartKind)> = parts.iter().map(|p| (p.name.as_str(), p.kind)).collect();
+    use bimcraft_core::model::PartKind;
+    assert_eq!(said, [("PIANTA PIANO TERRA", PartKind::Plan), ("PROSPETTO SUD", PartKind::Elevation)]);
+    assert!(h.state().status.text.contains("PROSPETTO SUD"), "{}", h.state().status.text);
+    // The window stood aside meanwhile; Esc ends and brings it back on its Parts tab, where what the caption could not
+    // say is put right.
+    assert!(h.query_by_label("Mark Parts on the Drawing").is_none(), "the window is out of the way of the sheets");
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, crate::Tool::Modify);
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.tab), Some(1));
+    assert!(says(&h, "PROSPETTO SUD"), "its row is there");
+}
+
+#[test]
 fn find_says_what_it_found_and_draws_it_and_nothing_is_built_until_build() {
     let mut h = linked(&one_room("MURI"), None);
     shortcut(&mut h, "TW");

@@ -271,7 +271,7 @@ other_files(
         "{underlay?, parts?: [{name, kind, region, level?, phase?}, \u{2026}]} what the parts of a drawing under a plan \
          are of the building: a survey is often saved as a whole set of sheets side by side in one file, and this is \
          where each rectangle of it is said to be the plan of a floor, an elevation of a side or a section. A part is \
-         a `name` (the survey's own caption for it, as a rule), a `kind` (`plan`, `elevation` or `section`), a `region` \
+         a `name` (the survey's own caption for it, as a rule), a `kind` (`plan`, `elevation`, `section`, `detail` or `site`), a `region` \
          [[x, y], [x, y]] \u{2014} its south-west corner and its north-east, where the drawing stands \u{2014} the `level` it is \
          the plan of, and the `phase` what it draws is in: a survey's existing state is often a sheet of its own rather \
          than a layer of its own, so a part says the phase of everything in it, whatever its layers say. `parts` is \
@@ -279,6 +279,23 @@ other_files(
          `underlay` is which drawing (the only one there is, unless there are several). Trace Walls takes one by name \
          (`part`), which is its area, its level and its phase in one word. Returns `id`, `name` and `parts`",
         cad_parts,
+    ),
+    edit(
+        "cad_part",
+        ui_msg!("Mark Part"),
+        &[],
+        "{underlay?, region, name?, kind?, level?, phase?} one more part of a drawing under a plan, from the rectangle \
+         drawn round it: what `cad_parts` keeps, one at a time and read from the drawing itself where it is not said. \
+         `region` is two opposite corners, [[x, y], [x, y]], in either order. The `name` is the survey's own caption for \
+         it, the words written largest inside the rectangle, and where another part has that name already (a set of \
+         sheets captions the existing state's plan and the project's alike) it is numbered, `PIANTA PIANO TERRA (2)`. \
+         The `kind` is the caption's first word for one: `PIANTA` a `plan`, `PROSPETTO` an `elevation`, `SEZIONE` a \
+         `section`, `PARTICOLARE` or `DETTAGLIO` a `detail`, `PLANIMETRIA` the `site` plan, and their English words; \
+         a plan where the caption says none. A plan's `level` is the one whose name's own words the caption says \
+         (`PIANTA PIANO SEMINTERRATO` is the plan of `Piano seminterrato`), and none where no level's name is said. \
+         The `phase` is only what is said. What is said is taken as said, and a name another part has is refused. \
+         Returns `id`, `name`, `part` and `guessed`, the fields read from the drawing rather than said",
+        cad_part,
     ),
     other(
         "cad_heights",
@@ -4909,10 +4926,9 @@ fn part_told(c: &str, m: &Model, row: &Value) -> Result<crate::model::CadPart, S
     }
     let name = string(c, row, "name")?.ok_or_else(|| bad(c, format!("a part needs a `name`, and {row} has none")))?;
     let kind = match string(c, row, "kind")?.as_deref() {
-        Some("plan") => PartKind::Plan,
-        Some("elevation") => PartKind::Elevation,
-        Some("section") => PartKind::Section,
-        Some(other) => return Err(bad(c, format!("a part is a `plan`, an `elevation` or a `section`, not a `{other}`"))),
+        Some(word) => PartKind::from_word(word).ok_or_else(|| {
+            bad(c, format!("a part is a `plan`, an `elevation`, a `section`, a `detail` or a `site` plan, not a `{word}`"))
+        })?,
         None => return Err(bad(c, format!("a part needs a `kind`, and {row} has none"))),
     };
     let region = match points(c, row, "region")?.as_slice() {
@@ -5046,6 +5062,64 @@ fn cad_parts(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "name": name, "parts": parts}))
 }
 
+fn cad_part(s: &mut Session, p: &Value) -> R {
+    use crate::model::PartKind;
+    let c = "cad_part";
+    let (id, mut u) = chosen_underlay(c, &s.model, p, "mark")?;
+    let region = match points(c, p, "region")?.as_slice() {
+        [a, b] => [P2(a.0.min(b.0), a.1.min(b.1)), P2(a.0.max(b.0), a.1.max(b.1))],
+        _ => return Err(bad(c, "`region` is two opposite corners of the part, [[x, y], [x, y]]")),
+    };
+    let m = &s.model;
+    let mut guessed: Vec<&str> = Vec::new();
+    let taken = |name: &str| u.parts.iter().any(|part| part.name == name);
+    let caption = crate::underlay::caption(m, &u, region);
+    let name = match string(c, p, "name")? {
+        Some(name) if taken(&name) => return Err(bad(c, format!("`{}` has a part `{name}` already", u.name))),
+        Some(name) => name,
+        None => {
+            guessed.push("name");
+            let base = caption.clone().unwrap_or_else(|| format!("Part {}", u.parts.len() + 1));
+            let mut name = base.clone();
+            let mut n = 1;
+            while taken(&name) {
+                n += 1;
+                name = format!("{base} ({n})");
+            }
+            name
+        }
+    };
+    let kind = match string(c, p, "kind")? {
+        Some(word) => PartKind::from_word(&word).ok_or_else(|| {
+            bad(c, format!("a part is a `plan`, an `elevation`, a `section`, a `detail` or a `site` plan, not a `{word}`"))
+        })?,
+        None => {
+            guessed.push("kind");
+            caption.as_deref().and_then(crate::underlay::kind_from_caption).unwrap_or(PartKind::Plan)
+        }
+    };
+    let level = match p.get("level") {
+        v if absent(v) => match (kind, caption.as_deref().and_then(|said| crate::underlay::level_from_caption(m, said))) {
+            (PartKind::Plan, Some(level)) => {
+                guessed.push("level");
+                Some(m.guid(level))
+            }
+            _ => None,
+        },
+        _ => Some(m.guid(level_param(c, m, p, "level")?)),
+    };
+    let phase = string(c, p, "phase")?;
+    let part = crate::model::CadPart { name, kind, region, level, phase, anchor: None };
+    let said = part_json(m, &part);
+    let drawing = u.name.clone();
+    u.parts.push(part);
+    match s.model_mut().elements.get_mut(id) {
+        Some(Element::Underlay(slot)) => *slot = u,
+        _ => return Err(bad(c, format!("{id} is no drawing under a plan"))),
+    }
+    Ok(json!({"id": id, "name": drawing, "part": said, "guessed": guessed}))
+}
+
 /// The part of `u` that `name` names, or what it is made of instead.
 fn part_of(c: &str, u: &crate::model::Underlay, name: &str) -> Result<crate::model::CadPart, String> {
     match u.parts.iter().find(|part| part.name == name) {
@@ -5157,8 +5231,12 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
     let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the openings off"))?;
     let part = part_of(c, &u, &name)?;
-    if part.kind == crate::model::PartKind::Plan {
-        return Err(bad(c, format!("`{name}` is a plan: the sills and the heads are drawn by an elevation or a section, not by a plan")));
+    let kind = part.kind.word();
+    if !part.kind.is_view() {
+        return Err(bad(
+            c,
+            format!("`{name}` is a {kind}: the sills and the heads are drawn by an elevation or a section, not by a {kind}"),
+        ));
     }
     let Some(anchor) = part.anchor else {
         return Err(bad(
@@ -5494,8 +5572,12 @@ fn cad_storey(s: &mut Session, p: &Value) -> R {
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
     let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the storey off"))?;
     let part = part_of(c, &u, &name)?;
-    if part.kind == crate::model::PartKind::Plan {
-        return Err(bad(c, format!("`{name}` is a plan: how high a storey stands is drawn by an elevation or a section, not by a plan")));
+    let kind = part.kind.word();
+    if !part.kind.is_view() {
+        return Err(bad(
+            c,
+            format!("`{name}` is a {kind}: how high a storey stands is drawn by an elevation or a section, not by a {kind}"),
+        ));
     }
     let floor = num(c, p, "floor")?;
     let told = num(c, p, "top")?;
@@ -5686,10 +5768,11 @@ fn cad_roof(s: &mut Session, p: &Value) -> R {
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
     let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the roof off"))?;
     let part = part_of(c, &u, &name)?;
-    if part.kind == crate::model::PartKind::Plan {
+    let kind = part.kind.word();
+    if !part.kind.is_view() {
         return Err(bad(
             c,
-            format!("`{name}` is a plan: a plan draws a roof flat, and the pitch of it is drawn by an elevation or a section"),
+            format!("`{name}` is a {kind}: a plan draws a roof flat, and the pitch of it is drawn by an elevation or a section"),
         ));
     }
     let (floor, told_slope, told_eaves, told_over) =
@@ -6024,11 +6107,12 @@ fn cad_floor(s: &mut Session, p: &Value) -> R {
     let (id, u) = chosen_underlay(c, &s.model, p, "read")?;
     let name = string(c, p, "part")?.ok_or_else(|| bad(c, "`part` is which elevation of the drawing to read the slab off"))?;
     let part = part_of(c, &u, &name)?;
-    if part.kind == crate::model::PartKind::Plan {
+    let kind = part.kind.word();
+    if !part.kind.is_view() {
         return Err(bad(
             c,
             format!(
-                "`{name}` is a plan: a plan draws the outline of a slab and nothing of how thick it is, which an elevation or a \
+                "`{name}` is a {kind}: a plan draws the outline of a slab and nothing of how thick it is, which an elevation or a \
                  section draws"
             ),
         ));

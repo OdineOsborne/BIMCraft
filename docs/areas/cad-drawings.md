@@ -471,6 +471,19 @@ lines like any others, and the clusters the shapes fall into are not sheets eith
 are one cluster as readily as two). A wrong guess would silently trace half a building, so the user draws the area —
 which they can see — and the drawing only names it.
 
+**Marking the sheets, one rectangle each** (`cad_part`, the Parts tab's **Mark Parts on the Drawing**, `Tool::MarkPart`).
+Cropping the plan to a sheet and adding the crop is one sheet at a time; a permesso di costruire has a dozen. So the plan
+shows the whole drawing, and two clicks round a sheet make it a part: the window steps aside meanwhile, so no sheet is
+under it, and the parts already said are drawn over the drawing as rectangles with their names in a corner, so what is
+left to mark is what has none. `cad_part` reads what it can from the caption: the name, numbered where another part has
+it already (a set of sheets captions the existing state's ground floor plan and the project's alike), the kind by the
+caption's first word for one (`PIANTA`, `PROSPETTO`, `SEZIONE`, `PARTICOLARE` or `DETTAGLIO`, `PLANIMETRIA`, and their
+English words; the site plan first, since a survey captions it `PLANIMETRIA GENERALE - PIANTA COPERTURA`), and a plan's
+level by the level whose name's own words it says, whole words only (`SEMINTERRATO` holds `TERRA` and is no ground
+floor). The reply lists in `guessed` what was read rather than said, and the Parts tab is where a wrong reading is put
+right. Two kinds came with it (format 101): `detail`, a construction detail, where a type's layers are to be read
+from, and `site`, the plot round the building; neither is a view heights are read off (`PartKind::is_view`).
+
 A room takes the name the survey writes inside it, and which survey that is depends on who is asking. `place_rooms`
 takes the drawings under the plan it is filling, as it always has. Trace Walls takes **the drawing it has just
 traced**, wherever that drawing stands: a part traced onto a floor of its own is a plan of that floor, though the

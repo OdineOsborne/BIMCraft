@@ -1778,3 +1778,92 @@ fn a_height_written_too_far_from_a_marker_is_no_height_of_that_marker() {
     let e = s.execute("cad_ground", &json!({"part": "RILIEVO", "floor": 69_850, "apply": true})).unwrap_err();
     assert!(e.contains("three"), "{e}");
 }
+
+/// A sheet set of four sheets side by side, each captioned under it: the existing state's ground floor plan, the
+/// project's ground floor and basement plans, and a detail of a wall; its path.
+fn sheet_set() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("bimcraft-sheets-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tavole.dxf");
+    let words = |x: f64, height: f64, text: &str| format!("0\nTEXT\n8\nTESTO\n10\n{x}\n20\n-800\n40\n{height}\n1\n{text}\n");
+    let text = format!(
+        "0\nSECTION\n2\nENTITIES\n{}{}{}{}{}0\nENDSEC\n0\nEOF\n",
+        words(1000.0, 300.0, "PIANTA PIANO TERRA"),
+        words(21000.0, 300.0, "PIANTA PIANO TERRA"),
+        words(41000.0, 300.0, "PIANTA PIANO SEMINTERRATO"),
+        words(61000.0, 300.0, "PARTICOLARE COSTRUTTIVO MURO ESTERNO"),
+        words(1500.0, 150.0, "SOGGIORNO"),
+    );
+    std::fs::write(&path, text).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_part_drawn_round_a_sheet_is_named_and_told_what_it_is_by_its_caption() {
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": sheet_set()})).expect("it comes in");
+    let levels = s.model.levels();
+    let ground = levels[0].0;
+    run(&mut s, "modify", json!({"id": ground, "name": "Piano terra"})).expect("renamed");
+    let basement = run(&mut s, "level", json!({"elevation": -2800, "name": "Piano seminterrato"})).expect("a level")["id"].clone();
+    // Drawn from its north-east corner to its south-west one: a rectangle is two corners in either order.
+    let out = run(&mut s, "cad_part", json!({"region": [[10000, 5000], [-1000, -1500]]})).expect("it is marked");
+    assert_eq!(out["part"]["name"], json!("PIANTA PIANO TERRA"), "{out}");
+    assert_eq!(out["part"]["kind"], json!("plan"));
+    assert_eq!(out["part"]["level"], json!(ground), "its caption names the ground floor: {out}");
+    assert_eq!(out["part"]["region"], json!([[-1000.0, -1500.0], [10000.0, 5000.0]]));
+    assert_eq!(out["guessed"], json!(["name", "kind", "level"]));
+    // The project's plan of the same floor is captioned as the existing state's is, so it is numbered.
+    let out = run(&mut s, "cad_part", json!({"region": [[19000, -1500], [30000, 5000]]})).expect("it is marked");
+    assert_eq!(out["part"]["name"], json!("PIANTA PIANO TERRA (2)"), "{out}");
+    // The basement's caption holds TERRA inside SEMINTERRATO, and is no ground floor.
+    let out = run(&mut s, "cad_part", json!({"region": [[39000, -1500], [50000, 5000]]})).expect("it is marked");
+    assert_eq!((out["part"]["kind"].clone(), out["part"]["level"].clone()), (json!("plan"), basement), "{out}");
+    // A detail is a detail, and the plan of no level.
+    let out = run(&mut s, "cad_part", json!({"region": [[59000, -1500], [70000, 5000]]})).expect("it is marked");
+    assert_eq!((out["part"]["kind"].clone(), out["part"]["level"].clone()), (json!("detail"), Value::Null), "{out}");
+    // Nothing written in it: a plan, numbered, and what is said is taken as said.
+    let phase = s.model.phases.first().cloned().expect("a phase");
+    let out =
+        run(&mut s, "cad_part", json!({"region": [[80000, 0], [90000, 5000]], "kind": "site", "phase": phase})).expect("it is marked");
+    assert_eq!((out["part"]["name"].clone(), out["part"]["kind"].clone()), (json!("Part 5"), json!("site")), "{out}");
+    assert_eq!(out["guessed"], json!(["name"]));
+    // A name taken, a kind there is none of, a phase there is none of, or no rectangle: refused, and nothing is lost.
+    for bad in [
+        json!({"region": [[0, 0], [1000, 1000]], "name": "PIANTA PIANO TERRA"}),
+        json!({"region": [[0, 0], [1000, 1000]], "kind": "floor plan"}),
+        json!({"region": [[0, 0], [1000, 1000]], "phase": "Someday"}),
+        json!({"region": [[0, 0]]}),
+        json!({}),
+    ] {
+        assert!(run(&mut s, "cad_part", bad.clone()).is_err(), "{bad}");
+    }
+    assert_eq!(run(&mut s, "cad_parts", json!({})).expect("it reads")["parts"].as_array().map(Vec::len), Some(5));
+    // cad_parts takes the new kinds too, and the project's file keeps them.
+    let file = serde_json::to_string(&*s.model).expect("written");
+    let (read, left_out) = crate::model::Model::read(&file).expect("read back");
+    assert!(left_out.is_empty(), "{left_out:?}");
+    let kinds: Vec<&str> = read
+        .elements
+        .values()
+        .find_map(|e| match e {
+            Element::Underlay(u) => Some(u.parts.iter().map(|p| p.kind.word()).collect()),
+            _ => None,
+        })
+        .expect("the drawing");
+    assert_eq!(kinds, ["plan", "plan", "plan", "detail", "site"]);
+}
+
+#[test]
+fn a_file_of_the_fork_s_first_format_still_opens() {
+    let mut s = Session::new();
+    run(&mut s, "underlay", json!({"path": sheet_set()})).expect("it comes in");
+    let mut v = serde_json::to_value(&*s.model).expect("written");
+    v["format"] = json!(crate::model::FORK_FIRST_FORMAT);
+    let (m, _) = crate::model::Model::read(&v.to_string()).expect("a file of 100 opens");
+    assert_eq!(m.format, crate::model::FORMAT);
+    v["format"] = json!(crate::model::FORMAT + 1);
+    assert!(crate::model::Model::read(&v.to_string()).is_err(), "a newer one is refused");
+}

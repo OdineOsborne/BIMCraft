@@ -192,6 +192,13 @@ pub enum Tool {
     /// The rectangle an export is cut to, drawn in the view while the Export dialog steps aside: its first corner, once
     /// clicked, in the view's own coordinates.
     ExportRegion(Option<P2>),
+    /// Mark Part: a rectangle drawn round a sheet of the drawing under the plan (`underlay`), which becomes one of its parts
+    /// (`cad_part`), named and told what it is by its caption: its first corner, once clicked. It goes on to the next sheet
+    /// until Esc.
+    MarkPart {
+        underlay: Id,
+        first: Option<P2>,
+    },
     /// Acquire Coordinates: the link or CAD drawing clicked gives the project its shared coordinates.
     Acquire,
     /// Mirror the selection across a line picked, or with `draw`, a line drawn from `start`.
@@ -1851,6 +1858,7 @@ impl BimApp {
             | Tool::PatternCorner(_)
             | Tool::SpecifyPoint
             | Tool::ExportRegion(_)
+            | Tool::MarkPart { .. }
             | Tool::Acquire => None,
             Tool::Wall(_) => Some(msg!("Place Wall")),
             Tool::Paint => Some("Paint"),
@@ -5619,6 +5627,11 @@ impl BimApp {
                         self.set_tool(Tool::Modify);
                     }
                 }
+                Tool::MarkPart { .. } => {
+                    if ui.button(t("Done")).clicked() {
+                        self.set_tool(Tool::Modify);
+                    }
+                }
                 Tool::Mirror { .. } => {
                     ui.checkbox(&mut self.mirror_copy, t("Copy"));
                 }
@@ -5964,6 +5977,10 @@ impl BimApp {
             Tool::SpotCoordinate(Some(_)) => msg!("Click where its leader ends. Esc cancels."),
             Tool::ExportRegion(None) => msg!("Click a corner of the region to export. Esc goes back to Export."),
             Tool::ExportRegion(Some(_)) => msg!("Click the region's opposite corner. Esc goes back to Export."),
+            Tool::MarkPart { first: None, .. } => msg!("Click a corner of a sheet of the drawing to mark it as a part. Esc ends."),
+            Tool::MarkPart { first: Some(_), .. } => {
+                msg!("Click the sheet's opposite corner: its caption names it and says what it is. Esc ends.")
+            }
             Tool::SpecifyPoint => {
                 msg!(
                     "Click the point the shared coordinates typed are at: it snaps, and a wall's corner is its bottom, a slab's its top. Esc goes back."

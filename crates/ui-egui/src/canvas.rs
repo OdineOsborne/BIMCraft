@@ -1868,6 +1868,8 @@ impl BimApp {
         p.extend(crop);
         // The walls Trace Walls found and has not built, over the drawing they were read from.
         p.extend(self.traced_shapes(&view, rect.min, level));
+        // The parts the drawing is made of, each its rectangle and its name, while they are being marked or read.
+        self.paint_parts(&p, &view, rect.min, level);
         let lit: Vec<Id> = hovered.iter().chain(&self.selection).copied().collect();
         let outlines = self.canvas.drawing.room_outlines(&model, &lit);
         let hover_lit = usize::from(hovered.is_some());
@@ -2295,6 +2297,7 @@ impl BimApp {
                 };
             }
             Tool::ExportRegion(_) => self.export_region_at(v.mm(at)),
+            Tool::MarkPart { .. } => self.mark_part_at(v.mm(at)),
             Tool::SpecifyPoint => {
                 // Snapped as any point; its height by what it snapped to.
                 let f = self.snap(m, level, v, at, &[], false);
@@ -4482,7 +4485,7 @@ impl BimApp {
                 }
                 return;
             }
-            &Tool::ExportRegion(first) => {
+            &Tool::ExportRegion(first) | &Tool::MarkPart { first, .. } => {
                 crate::export::region_band(p, first.map(|a| sc.screen(a)), cursor);
                 return;
             }

@@ -6836,7 +6836,7 @@ fn a_file_of_the_family_editors_unreleased_formats_21_to_32_is_refused_as_newer(
     // format is 20, which every change since 0.11 shares, so a file of those builds stamped 20 opens as one of 0.12's, and 21
     // to 32 are refused as any newer file is.
     use crate::model::{FORMAT, Model};
-    assert_eq!(FORMAT, 100);
+    assert_eq!(FORMAT, 101);
     let mut s = Session::new();
     house(&mut s);
     let v = serde_json::to_value(&*s.model).unwrap();
