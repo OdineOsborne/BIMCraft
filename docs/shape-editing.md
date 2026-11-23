@@ -72,6 +72,11 @@ Status, on the branch `mod-16-shape-editing` (raised upstream as IPedrax/BIMCraf
   closed Brep; `ci/ifc-coverage.txt` has both kinds) and the check (tests `a_roofs_variable_layer_*`,
   `a_section_shows_a_roofs_insulation_*`, `a_roof_point_that_would_leave_its_insulation_*`).
 - **Phase 5**, the extras, is built:
+  - **Falls in the window** (`Tool::Falls`, `BimApp::work_out_falls`): Shape Editing's Falls tool takes the drains
+    clicked on the selected floor's or flat roof's top, the Options Bar's Least Fall (1.5 % to start) and Work Out the
+    Falls, which runs `falls` and turns to Modify Sub Elements on what it made. It says how deep the lowest drain went
+    and how thick the type's variable layer is left there, in red under 30 mm (`THINNEST_SCREED`), because a screed laid
+    to falls is thinnest at the drain and that is what a builder checks first (test `falls_click_the_drains_*`).
   - **`falls`** (`crates/core/src/falls.rs`): a floor's or flat roof's shape from its drains and the least fall. Each
     drain takes the part of the outline nearer it than any other; where two parts meet a ridge runs at the top's height;
     from each drain a valley runs to each corner of its part; each drain goes down as far as the fall takes its farthest

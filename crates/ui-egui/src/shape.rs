@@ -234,10 +234,56 @@ pub(crate) fn arrows(p: &Painter, c: Pos2) -> [Pos2; 2] {
     [up, down]
 }
 
+/// The thinnest a screed laid to falls is any use at a drain, mm: under it, it cracks and lifts.
+const THINNEST_SCREED: f64 = 30.0;
+
 impl BimApp {
     /// The floor or flat roof being shaped: the one selected, while a Shape Editing tool is on.
     pub(crate) fn shaping(&self) -> Option<Id> {
-        self.selected_shapeable().filter(|_| matches!(self.tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_)))
+        self.selected_shapeable()
+            .filter(|_| matches!(self.tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Falls(_)))
+    }
+
+    /// Falls worked out on the selected floor or flat roof to `drains`, at the Options Bar's least fall, in one `falls`; then
+    /// Modify Sub Elements, to see and touch the points it made. Refused, it says why where the status says things, and the
+    /// drains stay for another try.
+    pub(crate) fn work_out_falls(&mut self, drains: &[P2]) {
+        let Some(id) = self.selected_shapeable() else { return };
+        let fall = self.falls_fall.trim().replace(',', ".");
+        let Ok(fall) = fall.parse::<f64>() else {
+            self.status = crate::Status { text: t("The least fall is a number, in %: 1.5, say.").into(), error: true };
+            return;
+        };
+        let drains: Vec<[f64; 2]> = drains.iter().map(|d| [d.0, d.1]).collect();
+        if let Some(reply) = self.run("falls", serde_json::json!({"id": id, "drains": drains, "fall": fall})) {
+            let deepest = reply["drains"].as_array().into_iter().flatten().filter_map(|d| d["z"].as_f64()).fold(0.0_f64, f64::min);
+            let m = &self.session.model;
+            // How thick the type's variable layer is left at the lowest drain: the screed takes the falls up, and at the
+            // drain it is at its thinnest, which is what a builder asks first.
+            let variable = m.shapeable(id).ok().and_then(|f| {
+                ["floor", "roof"].iter().find_map(|c| m.type_layers(c, &f.type_name).iter().find(|l| l.variable).map(|l| l.thickness))
+            });
+            let depth = m.units.length(-deepest);
+            let (text, error) = match variable {
+                Some(t) if t + deepest < THINNEST_SCREED => (
+                    tf(
+                        "Falls worked out: the lowest drain {} under the top, and the variable layer only {} thick there: thicken it in the type.",
+                        &[&depth, &m.units.length(t + deepest)],
+                    ),
+                    true,
+                ),
+                Some(t) => (
+                    tf(
+                        "Falls worked out: the lowest drain {} under the top, the variable layer {} thick there.",
+                        &[&depth, &m.units.length(t + deepest)],
+                    ),
+                    false,
+                ),
+                None => (tf("Falls worked out: the lowest drain {} under the top.", &[&depth]), false),
+            };
+            self.status = crate::Status { text, error };
+            self.set_tool(Tool::ModifySubElements);
+        }
     }
 
     /// The selected floor or flat roof as shape editing sees it now (`Model::shapeable`: a roof's top as a floor's).

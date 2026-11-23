@@ -3786,6 +3786,30 @@ fn shape_editing_raises_points_draws_split_lines_and_resets_a_floor() {
 }
 
 #[test]
+fn falls_click_the_drains_and_work_the_top_out_to_them_at_the_least_fall() {
+    let mut h = app(BOX);
+    tool(&mut h, "Floor");
+    press(&mut h, "Walls' Outline");
+    press(&mut h, "Finish Edit Mode");
+    let floor = ids(&h, "floor");
+    press(&mut h, "Falls");
+    assert_eq!(h.state().tool, Tool::Falls(Vec::new()));
+    // Nothing to work out before a drain is clicked; one in the middle, snapped onto the top.
+    click(&mut h, P2(4000.0, 3000.0));
+    assert!(matches!(&h.state().tool, Tool::Falls(d) if d.len() == 1), "{:?}", h.state().tool);
+    type_into(&mut h, "Least Fall:", "2");
+    press(&mut h, "Work Out the Falls");
+    // The drain is the lowest of the top, as deep as 2 % takes the farthest corner, up to 5 m away: up to 100 mm.
+    let shape = field(&h, floor[0], "shape");
+    assert!(shape["points"].as_array().is_some_and(|p| !p.is_empty()), "{shape}");
+    let top = field(&h, floor[0], "top");
+    let low = top[0].as_f64().unwrap_or(0.0);
+    assert!((-101.0..-85.0).contains(&low), "the drain about 100 under the top: {top}");
+    assert_eq!(h.state().tool, Tool::ModifySubElements, "to see and touch what it made");
+    assert!(h.state().status.text.contains("Falls worked out"), "{}", h.state().status.text);
+}
+
+#[test]
 fn modify_sub_elements_selects_then_sets_a_points_height_or_an_edges_both_ends_and_deletes() {
     let mut h = app(BOX);
     tool(&mut h, "Floor");

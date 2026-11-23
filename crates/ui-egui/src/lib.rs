@@ -312,6 +312,9 @@ pub enum Tool {
     ModifySubElements,
     /// Shape Editing's Add Point: a point on the selected floor's top at the Options Bar's elevation.
     AddPoint,
+    /// Falls: the drains clicked so far on the selected floor's or flat roof's top; the Options Bar's least fall and its
+    /// button then work the top's shape out to them (`falls`).
+    Falls(Vec<P2>),
     /// Shape Editing's Add Split Line: a crease across the selected floor's top; its first end, once clicked.
     AddSplitLine(Option<P2>),
     /// Sketch mode's Draw panel: the points clicked so far of the shape it draws (Line: since the last loop closed).
@@ -698,6 +701,8 @@ pub struct BimApp {
     /// the floor's level.
     pub(crate) shape_along: bool,
     pub(crate) shape_offset: String,
+    /// Falls' least fall, in %, as typed on the Options Bar.
+    pub(crate) falls_fall: String,
     /// The selected floor's shape point a drag under Modify Sub Elements holds, where it was.
     shape_grip: Option<P2>,
     /// The selected floor as a grip's drag would leave it, plan or 3D, while it's dragged: its creases drawn over it.
@@ -1553,6 +1558,7 @@ impl BimApp {
             shape_base: crate::shape::Base::default(),
             shape_along: true,
             shape_offset: "0".into(),
+            falls_fall: "1.5".into(),
             shape_grip: None,
             shape_preview: None,
             shape_label_edit: None,
@@ -1852,6 +1858,7 @@ impl BimApp {
             | Tool::SlopeArrow(_)
             | Tool::ModifySubElements
             | Tool::AddPoint
+            | Tool::Falls(_)
             | Tool::AddSplitLine(_)
             | Tool::SketchLine(_)
             | Tool::SketchPick
@@ -3043,7 +3050,9 @@ impl BimApp {
             self.status = Status { text: t("select the floor to slope first").into(), error: true };
             return;
         }
-        if matches!(tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_)) && self.selected_shapeable().is_none() {
+        if matches!(tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Falls(_))
+            && self.selected_shapeable().is_none()
+        {
             self.status = Status { text: t("select the floor or flat roof to shape first").into(), error: true };
             return;
         }
@@ -3065,7 +3074,8 @@ impl BimApp {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
             self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
-        let shaping = matches!(tool, Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_));
+        let shaping =
+            matches!(tool, Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Falls(_));
         if tool != Tool::Modify && tool != Tool::Attach && tool != Tool::GableEdge && !shaping && !edits {
             self.selection.clear();
         }
@@ -3194,6 +3204,13 @@ impl BimApp {
                 if small_button(ui, Icon::ResetShape, "Reset Shape", false, tip).clicked() {
                     self.run("reset_shape", serde_json::json!({"id": id}));
                     self.tool = Tool::Modify;
+                }
+            });
+            ui.horizontal(|ui| {
+                let tip = msg!("Falls: click each drain on the top, then Work Out the Falls on the Options Bar; the top falls to them at no less than its least fall, the screed taking it up where the type has a variable layer");
+                let active = matches!(self.tool, Tool::Falls(_));
+                if small_button(ui, Icon::AddPoint, msg!("Falls"), active, tip).clicked() {
+                    self.set_tool(Tool::Falls(Vec::new()));
                 }
             });
         });
@@ -5351,7 +5368,7 @@ impl BimApp {
             });
         }
         // A roof selected: which of its edges stand upright; a flat one's shape too.
-        let shaping = matches!(self.tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_));
+        let shaping = matches!(self.tool, Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Falls(_));
         if let Some(roof) = self.selected_roof()
             && (matches!(self.tool, Tool::Modify | Tool::GableEdge) || shaping)
         {
@@ -5367,7 +5384,10 @@ impl BimApp {
         }
         // A floor selected: its slope arrow, or its shape's points and split lines.
         if let Some(floor) = self.selected_floor()
-            && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_))
+            && matches!(
+                self.tool,
+                Tool::Modify | Tool::SlopeArrow(_) | Tool::ModifySubElements | Tool::AddPoint | Tool::AddSplitLine(_) | Tool::Falls(_)
+            )
         {
             panel(ui, "Shape Editing", |ui| {
                 let tip = msg!("Slope Arrow: click its tail, then its head; the floor rises toward the head at the Options Bar's slope");
@@ -5538,6 +5558,20 @@ impl BimApp {
                 Tool::SlopeArrow(_) => {
                     let l = ui.label(t("Slope:"));
                     ui.add(TextEdit::singleline(&mut self.floor_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
+                }
+                // Falls: the drains clicked, the least fall, and the button that works the top out to them.
+                Tool::Falls(ref drains) => {
+                    let drains = drains.clone();
+                    ui.label(tf("Drains: {}", &[&drains.len().to_string()]));
+                    let l = ui.label(t("Least Fall:"));
+                    ui.add(TextEdit::singleline(&mut self.falls_fall).desired_width(48.0).hint_text("%")).labelled_by(l.id);
+                    ui.label("%");
+                    if ui.add_enabled(!drains.is_empty(), egui::Button::new(t("Work Out the Falls"))).clicked() {
+                        self.work_out_falls(&drains);
+                    }
+                    if ui.add_enabled(!drains.is_empty(), egui::Button::new(t("Clear the Drains"))).clicked() {
+                        self.tool = Tool::Falls(Vec::new());
+                    }
                 }
                 // Add Point along the surface as it is, an offset over it; or Absolute, an elevation above the level.
                 Tool::AddPoint => {
@@ -6101,6 +6135,8 @@ impl BimApp {
                 msg!("Click on the top: a point there, the Options Bar's offset over the surface, or at its Absolute elevation.")
             }
             Tool::AddSplitLine(None) => msg!("Click where the split line starts: a point, a corner or an edge of the top."),
+            Tool::Falls(drains) if drains.is_empty() => msg!("Click where each drain is on the top: a corner, an edge or inside it."),
+            Tool::Falls(_) => msg!("Click another drain, or Work Out the Falls on the Options Bar. Esc ends."),
             Tool::AddSplitLine(Some(_)) => msg!("Click where it ends: the top folds along it. Esc cancels."),
             Tool::SketchLine(_) | Tool::SketchPick => msg!("Click where the line starts."),
             Tool::PatternCorner(_) => msg!("Click on Bottom Left Corner"),

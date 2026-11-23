@@ -2774,6 +2774,15 @@ impl BimApp {
                 let (p, _) = self.shape_landing(m, level, v, at, &[], mods.shift);
                 self.shape_add_point(p);
             }
+            // A drain where clicked on the top, snapped as a point would be; the Options Bar works the falls out.
+            Tool::Falls(_) => {
+                let (p, _) = self.shape_landing(m, level, v, at, &[], mods.shift);
+                if let Tool::Falls(drains) = &mut self.tool
+                    && !drains.iter().any(|d| d.dist(p) <= 1.0)
+                {
+                    drains.push(p);
+                }
+            }
             // A point of the selected floor's shape or a corner picked, or else an edge (a split line's, the outline's or an
             // opening's): selected, or with Shift or Ctrl added to the selection; the Options Bar's Elevation then reads it.
             Tool::ModifySubElements => {
@@ -4384,6 +4393,18 @@ impl BimApp {
             | Tool::SlopeArrow(None)
             | Tool::Measure(_) => start_of(&self.tool),
             // The point a click would add, and its elevation.
+            // The drains clicked, each a ring with a cross, and where the next would go.
+            Tool::Falls(drains) => {
+                for d in drains {
+                    let c = sc.screen(*d);
+                    p.circle_stroke(c, 6.0, stroke);
+                    p.line_segment([c - vec2(4.0, 4.0), c + vec2(4.0, 4.0)], thin);
+                    p.line_segment([c - vec2(4.0, -4.0), c + vec2(4.0, -4.0)], thin);
+                }
+                let to = self.shape_found(sc, q, &[], shift);
+                p.circle_stroke(sc.screen(to), 6.0, thin);
+                return;
+            }
             // The point a click would add, and how high above the level it would be.
             Tool::AddPoint => {
                 let to = self.shape_found(sc, q, &[], shift);
