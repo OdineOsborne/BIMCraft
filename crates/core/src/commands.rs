@@ -621,7 +621,14 @@ other_files(
          `rooms` places a room in every area the walls it built shut in, as Place Rooms Automatically does, and \
          says how many in `rooms` and what they measure together in `room_area_m2`. `preview` \
          finds and reports and builds nothing, and says in `holes` where each opening runs ({kind, width, \
-         thickness, from, to}). Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
+         thickness, from, to}) and in `found_columns` what stands ({at, width, depth, angle}). What stands in the \
+         plan and is no wall comes in as a column, of the project's own type of its size or one made for it, and is \
+         counted in `columns` (`column_ids`): a closed box no bigger than 600 a side, standing free (the drawing \
+         carries on in line past no more than one side of it, where a pier between two openings is carried on past \
+         both) with nothing drawn inside it, which is a pillar and none of its sides a wall's face; and the mass a \
+         wall's faces turn round where they stop, as round a flue in the corner of a room: where the faces turn \
+         away from the wall at the ends of a gap and nothing is drawn across it from face to face, the gap is no \
+         opening, the wall runs on through it, and the box the faces turn round is the column. Returns `walls`, `ids`, `length`, `thicknesses` [{thickness, type, \
          walls, made}, …], `doors`, `windows`, `opening_ids`, `openings` [{kind, width, type, openings, made}, \
          …], `phases` [{phase, walls}, …], `faces` how many lines were long enough to be a wall\'s \
          face, and `longest`, the longest line in the drawing: a survey whose longest line is 13 mm is a survey drawn \
@@ -7177,6 +7184,7 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
         "windows": reading.holes.iter().filter(|h| h.window).count(),
         "openings": openings,
         "alone": reading.alone,
+        "columns": reading.columns.len(),
     });
     if !disagreed.is_empty() {
         out["disagreed"] = json!(disagreed);
@@ -7212,6 +7220,18 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
                     let thickness = hundredth(w.thickness);
                     Some(json!({"from": ends[0], "to": ends[1], "width": hundredth(h.width), "thickness": thickness, "kind": kind}))
                 })
+                .collect::<Vec<Value>>()
+        );
+        out["found_columns"] = json!(
+            reading
+                .columns
+                .iter()
+                .map(|c| json!({
+                    "at": [hundredth(c.at.0), hundredth(c.at.1)],
+                    "width": hundredth(c.width),
+                    "depth": hundredth(c.depth),
+                    "angle": hundredth(c.angle),
+                }))
                 .collect::<Vec<Value>>()
         );
         return Ok(out);
@@ -7318,6 +7338,42 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
     }
     if too_high > 0 {
         out["too_high"] = json!(too_high);
+    }
+    // What stands in the plan and is no wall, a pillar or the mass of a flue, as a column of a type its size: the
+    // project's own of that width and depth, or one made for it.
+    let mut column_ids: Vec<Id> = Vec::new();
+    for c in &reading.columns {
+        let (width, depth) = (by_ten(c.width) as f64, by_ten(c.depth) as f64);
+        let same = |t: &ColumnType| !t.round && t.profile.is_none() && (t.width - width).abs() <= 1.0 && (t.depth - depth).abs() <= 1.0;
+        let type_name = match m.types.column.iter().find(|(_, t)| same(t)) {
+            Some((name, _)) => name.clone(),
+            None => {
+                let base = format!("Rectangular {} x {}", width as i64, depth as i64);
+                let name = match m.types.column.contains_key(&base) {
+                    false => base,
+                    true => (2..100).map(|n| format!("{base} ({n})")).find(|n| !m.types.column.contains_key(n)).unwrap_or(base),
+                };
+                m.types.column.insert(name.clone(), ColumnType { width, depth, round: false, profile: None });
+                name
+            }
+        };
+        column_ids.push(m.insert(Element::Column(Column {
+            type_name,
+            level,
+            at: c.at,
+            angle: c.angle,
+            top_level,
+            height,
+            base_offset: 0.0,
+            top_offset: 0.0,
+            attach_top: None,
+            attach_base: None,
+            params: BTreeMap::new(),
+            room_bounding: true,
+        })));
+    }
+    if !column_ids.is_empty() {
+        out["column_ids"] = json!(column_ids);
     }
     // The rooms the walls just built shut in, placed with them: one command, so one undo step takes the lot back.
     if rooms {

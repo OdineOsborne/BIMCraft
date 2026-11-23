@@ -88,6 +88,9 @@
 use crate::geom::P2;
 use crate::model::{Model, Underlay};
 
+mod solids;
+pub use solids::{PILLAR, Pillar};
+
 /// The widest space between two lines that is inside a wall rather than a room between two walls: a cavity, the
 /// glass a window is drawn with, a duct, the gap in hatching. Anything wider is somewhere a person can be, and the
 /// two lines are two walls' faces. It is a measure of buildings and not of drawings, so it is not the user's to set.
@@ -229,6 +232,9 @@ pub struct Reading {
     /// Where a wall carries on in another thickness along the same face, the step between the two axes: no wall can
     /// close it, so a room separation line does, or the rooms on either side of the wall run into one another.
     pub steps: Vec<(P2, P2)>,
+    /// What stands in the plan and is no wall: a pillar drawn as a closed box standing free, and the mass a wall's faces
+    /// turn round where they stop and no opening is drawn — a flue in a room's corner, its stack out of the outer face.
+    pub columns: Vec<Pillar>,
 }
 
 /// One face of a wall: a straight run of the drawing, long enough to be one.
@@ -251,8 +257,20 @@ impl Face {
 pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
     let (faces, names, marks, mark_layers, longest) = faces_of(m, u, &how)?;
-    let (walls, holes, alone, steps) = pair_up(&faces, &names, &how, &marks, &mark_layers);
-    Ok(Reading { walls, holes, faces: faces.len(), longest, alone, steps })
+    // A pillar drawn as a box is no wall: its sides are taken out of the drawing before anything is paired.
+    let (mut columns, sides) = solids::pillars(&marks, &how);
+    let side_runs: Vec<(P2, P2)> = marks.iter().zip(&sides).filter(|(_, side)| **side).map(|(run, _)| *run).collect();
+    let is_side = |a: P2, b: P2| side_runs.iter().any(|(p, q)| (*p == a && *q == b) || (*p == b && *q == a));
+    let faces: Vec<Face> = faces.into_iter().filter(|f| !is_side(f.at, f.end())).collect();
+    let (marks, mark_layers): (Vec<(P2, P2)>, Vec<usize>) =
+        marks.iter().zip(&mark_layers).zip(&sides).filter(|(_, side)| !**side).map(|((run, layer), _)| (*run, *layer)).unzip();
+    let (walls, holes, alone, steps, masses) = pair_up(&faces, &names, &how, &marks, &mark_layers);
+    for mass in masses {
+        if !columns.iter().any(|c| c.at.dist(mass.at) <= c.width.max(c.depth) / 4.0) {
+            columns.push(mass);
+        }
+    }
+    Ok(Reading { walls, holes, faces: faces.len(), longest, alone, steps, columns })
 }
 
 /// What a drawing is read into before anything is made of it: the faces, the names of the layers they are on,
@@ -736,6 +754,22 @@ fn rungs(faces: &[Face], squares: &Squares, inside: &[bool], how: &How) -> Vec<b
                 return false;
             }
             let a = &faces[i];
+            // A line a longer face carries on in line from, a step off its end, is that face, broken where a wall meets
+            // it, and no rung: over a stair that starts at a wall, the wall's inner face is the flight's first line, and
+            // reading it as a rung took the wall away over the stair and left a hole in the corner above it.
+            let in_line = squares.near(a.at, a.end(), NARROWEST).into_iter().any(|k| {
+                let Some(b) = faces.get(k) else { return false };
+                if k == i || inside.get(k) == Some(&true) || b.len <= a.len || a.dir.cross(b.dir).abs() > how.skew.to_radians().sin() {
+                    return false;
+                }
+                let off = |p: P2| a.dir.perp().dot(p - a.at);
+                let (t0, t1) = (a.dir.dot(b.at - a.at), a.dir.dot(b.end() - a.at));
+                let gap = (t0.min(t1) - a.len).max(-t0.max(t1));
+                off(b.at).abs() <= how.slack(how.thin) && off(b.end()).abs() <= how.slack(how.thin) && (0.0..NARROWEST).contains(&gap)
+            });
+            if in_line {
+                return false;
+            }
             let apart: Vec<f64> = squares
                 .near(a.at, a.end(), reach)
                 .iter()
@@ -797,26 +831,29 @@ fn pair_up(faces: &[Face], names: &[String], how: &How, marks: &[(P2, P2)], mark
     walls.extend(jambs(marks, mark_layers, names, how));
     join(&mut walls, how);
     let marks = Marks::of(marks);
+    let mut masses: Vec<Pillar> = Vec::new();
     let mut holes = match how.openings {
-        true => open_up(&mut walls, &marks, how),
+        true => open_up(&mut walls, &marks, how, &mut masses),
         false => Vec::new(),
     };
     // A piece shorter than it is thick is no wall, and gone before the ends are looked at, or an end resting against it
     // takes it for the wall it meets: a wall that thickens where a flue stands in the corner left its end on the flue.
     walls.retain(|w| w.length() >= how.shortest && w.length() > w.thickness);
     if how.openings {
-        holes.extend(open_ends(&mut walls, &marks, how));
+        holes.extend(open_ends(&mut walls, &marks, how, &mut masses));
         holes.extend(glazed_openings(&walls, &marks, how));
     }
     meet(&mut walls, how);
+    jogs(&mut walls, marks.all, how);
     let alone = tidy(&mut walls, how);
     let steps = close(&mut walls, how);
     let holes = placed(&walls, &holes, how);
-    (walls, holes, alone, steps)
+    (walls, holes, alone, steps, masses)
 }
 
-/// What [`pair_up`] reads: the walls, their openings, how many stood alone, and the steps rooms need closing.
-type Reached = (Vec<Found>, Vec<Hole>, usize, Vec<(P2, P2)>);
+/// What [`pair_up`] reads: the walls, their openings, how many stood alone, the steps rooms need closing, and the masses
+/// the walls' faces turn round.
+type Reached = (Vec<Found>, Vec<Hole>, usize, Vec<(P2, P2)>, Vec<Pillar>);
 
 /// The corners [`meet`] leaves open, closed. Two walls whose ends lie within half of their two thicknesses of each other
 /// and whose axes do not meet: where they turn a corner, both ends are taken to where the axes cross — a wall 300 thick
@@ -891,6 +928,81 @@ fn close(walls: &mut [Found], how: &How) -> Vec<(P2, P2)> {
 
 /// How close two ends are taken to meet already, in millimetres.
 const JOINED: f64 = 1.0;
+
+/// A wall that steps aside by a thickness or two and carries on, carried round the step. Its two faces turn across to
+/// where the wall carries on, a pair of short lines too short to be faces, so the wall comes in as two walls side by
+/// side, the one ending where the other begins a little aside, and the room beside it runs out through the gap: on the
+/// permesso di costruire this was written against, a partition 100 thick stepping 200 aside left a garage of 25 m²
+/// open into the stair and the cavity round the cellar, at 49. Where the drawing draws the step, a line across from
+/// the one wall's face to the other's, both are taken to the middle of the step and a wall as thick as they are is
+/// built across it.
+fn jogs(walls: &mut Vec<Found>, marks: &[(P2, P2)], how: &How) {
+    let square = how.skew.to_radians().sin();
+    let mut made: Vec<Found> = Vec::new();
+    let mut moved = vec![[false; 2]; walls.len()];
+    let end_of = |w: &Found, far: bool| if far { w.end } else { w.start };
+    for i in 0..walls.len() {
+        for j in 0..walls.len() {
+            for (far_a, far_b) in [(true, false), (true, true), (false, false), (false, true)] {
+                let (Some(a), Some(b)) = (walls.get(i), walls.get(j)) else { continue };
+                let t = a.thickness;
+                if i == j || (t - b.thickness).abs() > how.slack(t) || a.dir().cross(b.dir()).abs() > square {
+                    continue;
+                }
+                if moved[i][usize::from(far_a)] || moved[j][usize::from(far_b)] {
+                    continue;
+                }
+                // This end of the one, the way out of it, and that end of the other, with its far end.
+                let (e, q, b_far) = (end_of(a, far_a), end_of(b, far_b), end_of(b, !far_b));
+                let out = if far_a { a.dir() } else { a.dir() * -1.0 };
+                let (along, aside) = (out.dot(q - e), out.perp().dot(q - e));
+                // The other begins no farther on than twice the wall's thickness and carries on beyond it, aside of it by
+                // more than a line's slack and by no more than the thickest wall.
+                let slack = how.slack(t);
+                if !(0.0..=t * 2.0).contains(&along)
+                    || out.dot(b_far - e) <= along + slack
+                    || aside.abs() <= slack
+                    || aside.abs() > how.thick
+                {
+                    continue;
+                }
+                let held = |p: P2| walls.iter().enumerate().any(|(k, w)| k != i && k != j && away(w, p) <= (w.thickness + t) / 2.0);
+                if held(e) || held(q) {
+                    continue;
+                }
+                // The step drawn: a line across, from the face of the one to the face of the other on the same side.
+                let side = aside.signum();
+                let drawn = marks.iter().any(|(p, r)| {
+                    let v = *r - *p;
+                    if v.length() <= 0.0 || out.dot(v.unit()).abs() > square {
+                        return false;
+                    }
+                    let s = out.dot((*p + *r) * 0.5 - e);
+                    let (o0, o1) = (out.perp().dot(*p - e) * side, out.perp().dot(*r - e) * side);
+                    let (lo, hi) = (o0.min(o1), o0.max(o1));
+                    s >= -slack && s <= along + slack && lo <= t / 2.0 + slack && hi >= aside.abs() - t / 2.0 - slack
+                });
+                if !drawn {
+                    continue;
+                }
+                let (e2, q2) = (e + out * (along / 2.0), q - out * (along / 2.0));
+                made.push(Found { start: e2, end: q2, thickness: t, layers: a.layers.clone() });
+                for (k, far, to) in [(i, far_a, e2), (j, far_b, q2)] {
+                    if let Some(w) = walls.get_mut(k) {
+                        match far {
+                            true => w.end = to,
+                            false => w.start = to,
+                        }
+                    }
+                    if let Some(ends) = moved.get_mut(k) {
+                        ends[usize::from(far)] = true;
+                    }
+                }
+            }
+        }
+    }
+    walls.extend(made);
+}
 
 /// Two faces paired across a wall: the one, the other, how far across, and the stretch of the one they run alongside.
 type Pair = (usize, usize, f64, f64, f64);
@@ -1289,7 +1401,7 @@ impl<'a> Marks<'a> {
 
 /// Pieces of one wall with a doorway between them, made one wall with an opening in it. What it found: the middle of
 /// each opening, how wide, and whether it is a window.
-fn open_up(walls: &mut Vec<Found>, marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
+fn open_up(walls: &mut Vec<Found>, marks: &Marks, how: &How, masses: &mut Vec<Pillar>) -> Vec<(P2, f64, bool)> {
     let mut holes: Vec<(P2, f64, bool)> = Vec::new();
     let mut taken = vec![false; walls.len()];
     // The piece beyond a wall's end is no farther off than the widest opening, so each wall is weighed against the
@@ -1307,7 +1419,13 @@ fn open_up(walls: &mut Vec<Found>, marks: &Marks, how: &How) -> Vec<(P2, f64, bo
             let a = &walls[i];
             let (gap, dir) = (lo - a.length(), a.dir());
             let (mid, end) = (a.start + dir * (a.length() + gap / 2.0), a.start + dir * hi);
-            holes.push((mid, gap, glazed(a, &marks.near(a), a.length(), lo, how)));
+            // Where the faces turn away round a mass and nothing is drawn across, the wall runs on through it, and
+            // there is no opening.
+            let lines = marks.near(a);
+            match solids::solid(a, (a.length(), lo), (a.length(), lo), &lines, how) {
+                Some(found) => masses.extend(found),
+                None => holes.push((mid, gap, glazed(a, &lines, a.length(), lo, how))),
+            }
             walls[i].end = end;
             squares.add(i, walls[i].start, walls[i].end);
             taken[j] = true;
@@ -1358,7 +1476,7 @@ fn beyond(walls: &[Found], taken: &[bool], i: usize, how: &How, squares: &Square
 /// it was going to meet is taken to it, and what is left between where it stopped and the face of that wall is the
 /// opening. The gap between two pieces of one wall is [`open_up`]'s; this is the gap at a corner. What it found: the
 /// middle of each opening, how wide, and whether it is a window.
-fn open_ends(walls: &mut [Found], marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
+fn open_ends(walls: &mut [Found], marks: &Marks, how: &How, masses: &mut Vec<Pillar>) -> Vec<(P2, f64, bool)> {
     let was: Vec<Found> = walls.to_vec();
     let square = how.skew.to_radians().sin();
     let mut holes = Vec::new();
@@ -1411,7 +1529,16 @@ fn open_ends(walls: &mut [Found], marks: &Marks, how: &How) -> Vec<(P2, f64, boo
             if !face_across(mine, &lines, from, to, how) {
                 continue;
             }
-            holes.push((p + out * (width / 2.0), width, glazed(mine, &lines, from, to, how)));
+            // The faces turning away at this end, round a mass, with nothing drawn across: the wall runs on to the
+            // wall it meets, with no opening. The far end is where it meets that wall, whose own face turns away there.
+            let ends = match far {
+                true => (t, t + width / 2.0),
+                false => (t - width / 2.0, t),
+            };
+            match solids::solid(mine, (from, to), ends, &lines, how) {
+                Some(found) => masses.extend(found),
+                None => holes.push((p + out * (width / 2.0), width, glazed(mine, &lines, from, to, how))),
+            }
             match far {
                 true => wall.end = at,
                 false => wall.start = at,

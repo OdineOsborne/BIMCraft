@@ -333,6 +333,47 @@ in `too_high`. Each width found, to the nearest 10 mm, comes in as the project's
 tenth of it, or as `Single <w> x 2100` or `Fixed <w> x 1500`, made for it. `openings: false` leaves the drawing as it
 is: two walls with a gap between them.
 
+## Pillars, flues and steps in a wall
+
+Four things the survey of a house a permesso di costruire draws (the one Mark Parts was written against) came in wrong,
+and each is now read for what it is (`trace/solids.rs`, `trace::jogs`):
+
+- **A pillar drawn as a box is a column** (`solids::pillars`). A pillar 400 square stands in that house's cellar under
+  the corner of the floor above, whose outline the drawing lays in red over two of its sides and carries on across the
+  room; its lower side paired with that red line, and the cellar got a wall 400 thick from the pillar to the next
+  wall, with a door in it. A closed box of four lines of its own, no bigger than `PILLAR` (600) a side, with nothing
+  drawn inside it (a box with a basin in it is a sink), is a pillar, and its sides are taken out of the drawing before
+  anything is paired. What it must also do is stand free: the pier between two openings is a box of its two faces and
+  its two jambs as well, and the wall's faces carry on in line past both its long sides, where a pillar has at most a
+  line laid over one side. A row of pillars carries on past one another, so the sides of the other boxes do not count.
+  Each comes in as a column (`columns`, `column_ids`, `found_columns` in a preview) of the project's own type of its
+  size, to the nearest 10 mm, or `Rectangular <w> x <d>` made for it, standing on the walls' level and up to their top.
+- **A flue is no doorway** (`solids::solid`). The flue in the corner of the living room is a block 450 square against
+  the east wall and the wall between the living room and the bathroom, and its stack stands 300 out of the east wall's
+  outer face; the faces of both walls stop where it stands, as they stop at a doorway, and it came in as a door 750
+  wide in the one wall and 440 in the other. What tells the two apart is what is drawn at the ends of the gap: every
+  doorway of that drawing is closed by its jambs, a line across the wall from the one face to the other, while round
+  the flue the faces turn away from the wall, out round the block. So a gap where a face turns away at an end and
+  nothing is drawn across from face to face is no opening: the pieces are one wall through it (`open_up`), or the wall
+  is taken on to the wall it meets (`open_ends`, where only the near half of the gap is asked, because the far end is
+  where the other wall's own face turns away), and the box the face turns round, a leg out from the face and a line
+  back along the wall within the gap, both no bigger than a pillar, comes in as a column: the flue and its stack. A
+  doorway drawn with no jambs and nothing at its ends stays a doorway, as before; one drawn with no jambs, a door leaf
+  standing out from its hinge, would be read as a mass, which no survey seen so far draws.
+- **A wall's face is no rung of the stair that starts at it.** Over the stair in the north-east corner the north wall's
+  inner face is also where the flight starts, its treads 280 apart under it and a metre long, as long as that piece of
+  the face (the stair's partition breaks the face there). The ladder rule read the piece as the first rung, the wall
+  lost its inner face over the stair, and the corner above the stair was left open. A line that a longer face carries
+  on in line from, a gap narrower than `NARROWEST` off its end, is that face, broken where a wall meets it, and no rung.
+- **A wall that steps aside is carried round the step** (`trace::jogs`). The garage's partition in that cellar steps
+  200 to the east halfway along, its two faces turning across, each turn 200 long and too short to be a face; it came
+  in as two walls side by side, one ending where the other begins aside of it, and the garage ran out through the gap
+  into the stair and the cavity round the cellar, 49 m² for a garage of 25. Where two walls as thick as each other are
+  parallel, the one begins no farther on than twice their thickness from where the other ends and carries on beyond,
+  aside of it by no more than the thickest wall, nothing else holds either end, and the drawing draws the step (a line
+  across from the face of the one to the face of the other), both are taken to the middle of the step and a wall as
+  thick as they are is built across it.
+
 ## The land around the building, and what else is no wall
 
 What the pairing leaves is then tidied of three things that pair as a wall does and are no wall of the building

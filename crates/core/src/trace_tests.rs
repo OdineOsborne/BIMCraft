@@ -637,3 +637,181 @@ fn short_pairs_that_meet_nothing_and_close_no_door_build_nothing() {
     assert_eq!(walls.len(), 4, "the room's four walls and nothing else: {walls:?}");
     assert!(holes.is_empty(), "{holes:?}");
 }
+
+/// What a preview found standing on its own: each column's middle, its width and its depth.
+fn columns_found(s: &mut Session) -> Vec<([f64; 2], f64, f64)> {
+    let out = run(s, "trace_walls", json!({"preview": true})).expect("it reads");
+    let num = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
+    out["found_columns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| ([num(&c["at"][0]), num(&c["at"][1])], num(&c["width"]), num(&c["depth"])))
+        .collect()
+}
+
+/// The corner of a living room on a permesso di costruire with a flue in it: an east wall 400 thick (its inner face, its
+/// outer face and the line of its render 100 inside that), a cross wall 300 thick running into it, the flue a block
+/// 450 square in the corner under the cross wall, and the flue's stack a box 300 by 496 standing out of the east
+/// wall's outer face. The faces stop where the flue stands, as the drawing has it, and turn round it. The room is
+/// closed by a wall 300 thick to the west and walls 400 thick north and south; the line of the render stops 100 short
+/// of the outer corners, as that drawing has it. Every line on layer `0`.
+fn flue_corner() -> Vec<(String, [f64; 4])> {
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    vec![
+        // The north wall and the south wall.
+        l(6654.0, -7600.0, 10898.0, -7600.0),
+        l(6954.0, -8000.0, 10498.0, -8000.0),
+        l(6654.0, -14400.0, 10908.0, -14400.0),
+        l(6954.0, -14000.0, 10508.0, -14000.0),
+        // The west wall, broken where the cross wall meets it.
+        l(6654.0, -7600.0, 6654.0, -14400.0),
+        l(6954.0, -8000.0, 6954.0, -10685.0),
+        l(6954.0, -10985.0, 6954.0, -14000.0),
+        // The cross wall: its north face runs to the east wall, its south face stops at the flue and turns down it.
+        l(6954.0, -10685.0, 10498.0, -10685.0),
+        l(6954.0, -10985.0, 10058.0, -10985.0),
+        l(10058.0, -10985.0, 10058.0, -11435.0),
+        l(10058.0, -11435.0, 10508.0, -11435.0),
+        // The east wall north of the flue, and south of it.
+        l(10498.0, -8000.0, 10498.0, -10685.0),
+        l(10898.0, -7600.0, 10898.0, -10814.0),
+        l(10798.0, -7700.0, 10798.0, -10814.0),
+        l(10508.0, -11435.0, 10508.0, -14000.0),
+        l(10908.0, -11310.0, 10908.0, -14400.0),
+        l(10808.0, -11310.0, 10808.0, -14300.0),
+        // The stack, out of the outer face.
+        l(10798.0, -10814.0, 11208.0, -10814.0),
+        l(11208.0, -10814.0, 11208.0, -11310.0),
+        l(11208.0, -11310.0, 10808.0, -11310.0),
+    ]
+}
+
+#[test]
+fn a_flue_in_a_corner_is_a_solid_and_makes_no_door_in_the_walls_it_stands_in() {
+    let mut s = linked(&flue_corner());
+    let (walls, holes) = found(&mut s);
+    assert!(holes.is_empty(), "a flue is no doorway: {holes:?}");
+    // The east wall runs whole past the flue, and the cross wall runs on to it.
+    let east = along(&walls, true, 10700.0, 30.0);
+    assert!(east.iter().any(|(lo, hi, t)| (*t - 400.0).abs() < 15.0 && *lo <= -13900.0 && *hi >= -8100.0), "{walls:?}");
+    let cross = along(&walls, false, -10835.0, 20.0);
+    assert!(cross.iter().any(|(_, hi, t)| (*t - 300.0).abs() < 1.0 && *hi >= 10490.0), "{walls:?}");
+    // The flue and its stack are what stands there: two columns of their sizes.
+    let columns = columns_found(&mut s);
+    let near = |x: f64, y: f64, a: f64, b: f64| {
+        columns.iter().any(|([cx, cy], w, d)| {
+            let size = ((w - a).abs() <= 30.0 && (d - b).abs() <= 30.0) || ((w - b).abs() <= 30.0 && (d - a).abs() <= 30.0);
+            (cx - x).abs() <= 30.0 && (cy - y).abs() <= 30.0 && size
+        })
+    };
+    assert!(near(10283.0, -11210.0, 450.0, 450.0), "the flue: {columns:?}");
+    assert!(near(11055.0, -11062.0, 305.0, 496.0), "its stack: {columns:?}");
+    assert_eq!(columns.len(), 2, "{columns:?}");
+}
+
+#[test]
+fn a_small_closed_square_standing_free_is_a_column_and_no_wall() {
+    // A cellar of 300 walls with a pillar 400 square in it, under the corner of the floor above, whose outline the
+    // drawing lays over the pillar's two sides in red and carries on across the room.
+    let mut lines = room("0", [0.0, 0.0, 6000.0, 5000.0], 300.0);
+    lines.extend(rect("0", [2000.0, 2000.0, 2400.0, 2400.0]));
+    lines.push(("rosso".to_string(), [2000.0, 2400.0, 5700.0, 2400.0]));
+    lines.push(("rosso".to_string(), [2000.0, 2400.0, 2000.0, 300.0]));
+    // And the mark of the entrance outside it, a box 300 by 72: a symbol, slenderer than anything that bears a floor.
+    lines.extend(rect("0", [3000.0, -600.0, 3300.0, -528.0]));
+    let mut s = linked(&lines);
+    let (found_walls, holes) = found(&mut s);
+    assert_eq!(found_walls.len(), 4, "the cellar's four walls and no wall to the pillar: {found_walls:?}");
+    assert!(holes.is_empty(), "{holes:?}");
+    assert_eq!(columns_found(&mut s), vec![([2200.0, 2200.0], 400.0, 400.0)]);
+    // Built, it is a column of a type its size, standing on the level the walls stand on.
+    let out = run(&mut s, "trace_walls", json!({})).expect("it traces");
+    assert_eq!(out["columns"], json!(1), "{out}");
+    let columns = ids(&s, "column");
+    assert_eq!(out["column_ids"], json!(columns));
+    let Some(Element::Column(c)) = s.model.elements.get(columns[0]) else { panic!("a column") };
+    let kind = &s.model.types.column[&c.type_name];
+    assert_eq!((kind.width, kind.depth, c.at), (400.0, 400.0, crate::geom::P2(2200.0, 2200.0)));
+    assert_eq!(Some(c.level), walls(&s).first().map(|w| w.level));
+}
+
+#[test]
+fn a_pier_between_two_openings_is_wall_and_no_column() {
+    // A wall 300 thick with a door 1000 wide and a window 1200 wide in it, 500 apart: the pier between them is drawn as a
+    // box of its two faces and its two jambs, and it is the wall, not a pillar standing in it.
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    let lines = vec![
+        l(0.0, 0.0, 1000.0, 0.0),
+        l(0.0, 300.0, 1000.0, 300.0),
+        l(1000.0, 0.0, 1000.0, 300.0),
+        l(2000.0, 0.0, 2000.0, 300.0),
+        l(2000.0, 0.0, 2500.0, 0.0),
+        l(2000.0, 300.0, 2500.0, 300.0),
+        l(2500.0, 0.0, 2500.0, 300.0),
+        l(3700.0, 0.0, 3700.0, 300.0),
+        l(2500.0, 150.0, 3700.0, 150.0),
+        l(3700.0, 0.0, 6000.0, 0.0),
+        l(3700.0, 300.0, 6000.0, 300.0),
+    ];
+    let mut s = linked(&lines);
+    let (walls, holes) = found(&mut s);
+    assert!(columns_found(&mut s).is_empty());
+    assert_eq!(walls.len(), 1, "{walls:?}");
+    assert_eq!(holes.len(), 2, "{holes:?}");
+}
+
+#[test]
+fn a_wall_over_a_stair_whose_first_tread_is_its_inner_face_still_meets_the_wall_at_its_end() {
+    // A north wall 350 thick over a room and a stair beside it, its inner face broken where the stair's partition meets
+    // it; over the stair that face is also where the flight starts, its treads 280 apart under it. The east wall is 300.
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    let mut lines = vec![
+        l(3198.0, -2344.0, 10798.0, -2344.0),
+        l(3548.0, -2694.0, 9398.0, -2694.0),
+        l(9498.0, -2694.0, 10498.0, -2694.0),
+        l(3198.0, -2344.0, 3198.0, -6000.0),
+        l(3548.0, -2694.0, 3548.0, -5650.0),
+        l(10798.0, -2344.0, 10798.0, -6000.0),
+        l(10498.0, -2694.0, 10498.0, -5650.0),
+        l(3198.0, -6000.0, 10798.0, -6000.0),
+        l(3548.0, -5650.0, 10498.0, -5650.0),
+        l(9398.0, -2694.0, 9398.0, -5650.0),
+        l(9498.0, -2694.0, 9498.0, -5650.0),
+    ];
+    for k in 0..10 {
+        let y = -2974.0 - 280.0 * f64::from(k);
+        lines.push(("Ciano".to_string(), [9498.0, y, 10498.0, y]));
+    }
+    let mut s = linked(&lines);
+    let (walls, _) = found(&mut s);
+    let north = along(&walls, false, -2519.0, 20.0);
+    assert!(north.iter().any(|(lo, hi, t)| (*t - 350.0).abs() < 1.0 && *lo <= 3400.0 && *hi >= 10640.0), "{walls:?}");
+    let east = along(&walls, true, 10648.0, 20.0);
+    assert!(east.iter().any(|(_, hi, _)| *hi >= -2530.0), "the east wall stands on the north one: {walls:?}");
+}
+
+#[test]
+fn a_wall_that_jogs_aside_by_its_thickness_is_carried_round_the_jog() {
+    // A partition 100 thick down a cellar that steps 200 to the east halfway, the step drawn as its two faces turning
+    // across: the room beside it is closed, so the partition goes round the step.
+    let l = |x0: f64, y0: f64, x1: f64, y1: f64| ("0".to_string(), [x0, y0, x1, y1]);
+    let mut lines = room("0", [8000.0, -5000.0, 11000.0, 1000.0], 300.0);
+    lines.extend([
+        l(9298.0, -2414.0, 9298.0, 700.0),
+        l(9198.0, -2514.0, 9198.0, 700.0),
+        l(9498.0, -2414.0, 9298.0, -2414.0),
+        l(9398.0, -2514.0, 9198.0, -2514.0),
+        l(9498.0, -4700.0, 9498.0, -2414.0),
+        l(9398.0, -4700.0, 9398.0, -2514.0),
+    ]);
+    let mut s = linked(&lines);
+    let (walls, _) = found(&mut s);
+    let upper = along(&walls, true, 9248.0, 5.0);
+    let lower = along(&walls, true, 9448.0, 5.0);
+    let step = along(&walls, false, -2464.0, 5.0);
+    assert!(upper.iter().any(|(lo, _, _)| (*lo + 2464.0).abs() <= 1.0), "{walls:?}");
+    assert!(lower.iter().any(|(_, hi, _)| (*hi + 2464.0).abs() <= 1.0), "{walls:?}");
+    let [(lo, hi, t)] = step[..] else { panic!("one wall across the step: {walls:?}") };
+    assert_eq!((lo, hi, t), (9248.0, 9448.0, 100.0));
+}
