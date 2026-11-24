@@ -302,7 +302,11 @@ joined, it is one wall 8.6 m long, and the house has a top to it. A gap that is 
 doorway, and a doorway is not a gap between two walls but a door in one wall, which is what the building is: the two
 pieces are made one wall and `Hole` records the opening in it. A survey marks an opening the other way too, carrying
 the wall's faces across it and drawing two lines across the wall at the jambs, and that is read as well — but only
-with the glass between them, because the space between two windows is a pair of lines at a pair of jambs as well.
+with the glass between them, or with the opening's axis drawn across the wall halfway between them (`axis_marked`:
+through both faces and longer than a jamb, as a survey draws the line it measures an opening from), because the space
+between two windows is a pair of lines at a pair of jambs as well, and nobody draws an axis through a pier. With the
+axis and no glass it is a door: on the PDC the technical room's door has its threshold drawn on both faces and was not
+found at all before.
 
 A jamb is drawn from the one face of the wall to the other, so it is as long as the wall is thick (`t * 0.8..=t *
 1.3`); a mark half as long again is the survey's own — which way the door opens, where the sill is — and is no jamb.
@@ -313,6 +317,14 @@ which is a door. Nothing else in a plan says which it is: the survey this was wr
 all, so an arc is not looked for. A line that runs more than half the length of the wall at that distance off its
 axis is the wall's own and no glass (`runs_along`): the line between a wall's two leaves lies inside its thickness
 from end to end, so without that the pier between two windows reads as a window itself.
+
+**One face carried across an opening makes it a door, whatever is drawn in it** (`trace::window`). A plan is cut a
+metre or so over the floor, so under a window the wall goes on below the cut and its sill is drawn across the opening
+on both sides; through a door nothing stands, and the face on the side the floor runs in from is left open. The line
+drawn in such an opening is its threshold or its frame and not glass. On the PDC the cellar door and the garage door
+are drawn with the outside face carried across and the threshold's edge 50 inside it, and read as windows until this;
+camera 2's French window, drawn the same way, now comes in as a door too. Glass still decides where both faces are
+carried across or neither is.
 
 **A wall that stops short of the wall it runs into has a doorway at its end** (`trace::open_ends`). The piece of
 wall between a door and the corner is a few centimetres long, which is shorter than anything a draughtsman draws as a

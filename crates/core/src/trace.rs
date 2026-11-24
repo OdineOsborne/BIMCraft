@@ -47,7 +47,10 @@
 //! the wall is thick, and a mark half as long again is the survey's own — which way the door opens, where the sill
 //! is. Glass drawn in an opening makes it a window; an opening with nothing in it is a door, because a hole you can
 //! walk through is a door. What runs the length of the wall is the wall's own line and no glass, or the pier between
-//! two windows would be a window itself. A plan says nothing of heights, so what is built takes the project's own
+//! two windows would be a window itself. A plan is cut a metre over the floor, so a window's sill is drawn across it
+//! on both sides of the wall and a door leaves open the face its floor runs in from: an opening with the one face
+//! carried across and the other open is a door, and the line drawn in it is its threshold. And a door whose threshold
+//! carries both faces across is found by its jambs and the axis a survey draws across the wall halfway between them. A plan says nothing of heights, so what is built takes the project's own
 //! door and window sizes.
 //!
 //! A wall that stops short of the wall it runs into has a doorway at its end ([`open_ends`]). The piece of wall
@@ -1262,24 +1265,58 @@ fn runs_along(wall: &Found, marks: &[(P2, P2)], off: f64, how: &How) -> f64 {
 /// beyond the wall's own ends: the face of a wall is drawn past the door at the end of it, though the piece of wall
 /// left there is too short to be read as a face of its own.
 fn face_across(wall: &Found, marks: &[(P2, P2)], from: f64, to: f64, how: &How) -> bool {
+    faces_across(wall, marks, from, to, how) > 0
+}
+
+/// How many of the wall's two faces the drawing carries across the stretch `from..to` of its axis.
+fn faces_across(wall: &Found, marks: &[(P2, P2)], from: f64, to: f64, how: &How) -> usize {
     let half = wall.thickness / 2.0;
     let slack = how.slack(wall.thickness);
-    [half, -half].iter().any(|face| {
-        let mut spans: Vec<(f64, f64)> = marks
-            .iter()
-            .filter_map(|(p, q)| {
-                let (o0, o1, lo, hi) = axiswise(wall, *p, *q, how)?;
-                (((o0 + o1) / 2.0 - face).abs() <= slack).then(|| (lo.max(from), hi.min(to)))
-            })
-            .filter(|(lo, hi)| hi > lo)
-            .collect();
-        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (mut drawn, mut far) = (0.0, f64::NEG_INFINITY);
-        for (lo, hi) in spans {
-            drawn += (hi - lo.max(far)).max(0.0);
-            far = far.max(hi);
+    [half, -half]
+        .iter()
+        .filter(|face| {
+            let mut spans: Vec<(f64, f64)> = marks
+                .iter()
+                .filter_map(|(p, q)| {
+                    let (o0, o1, lo, hi) = axiswise(wall, *p, *q, how)?;
+                    (((o0 + o1) / 2.0 - **face).abs() <= slack).then(|| (lo.max(from), hi.min(to)))
+                })
+                .filter(|(lo, hi)| hi > lo)
+                .collect();
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (mut drawn, mut far) = (0.0, f64::NEG_INFINITY);
+            for (lo, hi) in spans {
+                drawn += (hi - lo.max(far)).max(0.0);
+                far = far.max(hi);
+            }
+            drawn >= (to - from) * 0.8
+        })
+        .count()
+}
+
+/// Whether the opening in the stretch `a..b` of `wall` is a window. A plan is cut a metre or so over the floor, so
+/// under a window the wall goes on below the cut and the plan draws its sill across the opening on both sides of the
+/// wall; through a door nothing stands, and the face on the side the floor runs in from is not drawn across. So an
+/// opening with the one face of the wall carried across it and the other left open is a door, whatever is drawn in
+/// it — the line there is its threshold or its frame, not glass. Otherwise glass drawn in it makes it a window.
+fn window(wall: &Found, marks: &[(P2, P2)], a: f64, b: f64, how: &How) -> bool {
+    faces_across(wall, marks, a, b, how) != 1 && glazed(wall, marks, a, b, how)
+}
+
+/// Whether the drawing marks the middle of the stretch `a..b` of `wall` as an opening's: a line drawn across the wall
+/// there, through both its faces and longer than the wall is thick, as a survey draws an opening's axis to measure it
+/// from. A jamb is as long as the wall is thick and runs from face to face; the axis runs out past them.
+fn axis_marked(wall: &Found, marks: &[(P2, P2)], a: f64, b: f64, how: &How) -> bool {
+    let (t, square) = (wall.thickness, how.skew.to_radians().sin());
+    let (mid, slack) = ((a + b) / 2.0, how.slack(t).max(t * 0.25));
+    marks.iter().any(|(p, q)| {
+        let v = *q - *p;
+        if v.length() < t * 1.3 || v.unit().cross(wall.dir().perp()).abs() > square {
+            return false;
         }
-        drawn >= (to - from) * 0.8
+        let ((t0, o0), (t1, o1)) = (on(wall, *p), on(wall, *q));
+        let (lo, hi) = (o0.min(o1), o0.max(o1));
+        ((t0 + t1) / 2.0 - mid).abs() <= slack && lo <= -t / 2.0 + slack && hi >= t / 2.0 - slack
     })
 }
 
@@ -1424,7 +1461,7 @@ fn open_up(walls: &mut Vec<Found>, marks: &Marks, how: &How, masses: &mut Vec<Pi
             let lines = marks.near(a);
             match solids::solid(a, (a.length(), lo), (a.length(), lo), &lines, how) {
                 Some(found) => masses.extend(found),
-                None => holes.push((mid, gap, glazed(a, &lines, a.length(), lo, how))),
+                None => holes.push((mid, gap, window(a, &lines, a.length(), lo, how))),
             }
             walls[i].end = end;
             squares.add(i, walls[i].start, walls[i].end);
@@ -1537,7 +1574,7 @@ fn open_ends(walls: &mut [Found], marks: &Marks, how: &How, masses: &mut Vec<Pil
             };
             match solids::solid(mine, (from, to), ends, &lines, how) {
                 Some(found) => masses.extend(found),
-                None => holes.push((p + out * (width / 2.0), width, glazed(mine, &lines, from, to, how))),
+                None => holes.push((p + out * (width / 2.0), width, window(mine, &lines, from, to, how))),
             }
             match far {
                 true => wall.end = at,
@@ -1548,8 +1585,10 @@ fn open_ends(walls: &mut [Found], marks: &Marks, how: &How, masses: &mut Vec<Pil
     holes
 }
 
-/// The windows a drawing marks without breaking the wall: two lines drawn across it at the jambs, with the glass
-/// between them. A pair with no glass between is not taken, because the space between two windows is a pair too.
+/// The openings a drawing marks without breaking the wall: two lines drawn across it at the jambs, with the glass
+/// between them, or with the opening's axis drawn across the wall halfway between them, which is how a survey draws a
+/// door whose threshold carries both faces across. A pair with neither is not taken, because the space between two
+/// windows is a pair too.
 fn glazed_openings(walls: &[Found], marks: &Marks, how: &How) -> Vec<(P2, f64, bool)> {
     let mut holes = Vec::new();
     let square = how.skew.to_radians().sin();
@@ -1572,8 +1611,14 @@ fn glazed_openings(walls: &[Found], marks: &Marks, how: &How) -> Vec<(P2, f64, b
         cuts.sort_by(f64::total_cmp);
         for (a, b) in cuts.iter().zip(cuts.iter().skip(1)) {
             let width = b - a;
-            if (NARROWEST..=WIDEST).contains(&width) && glazed(wall, &lines, *a, *b, how) {
-                holes.push((wall.start + wall.dir() * ((a + b) / 2.0), width, true));
+            if !(NARROWEST..=WIDEST).contains(&width) {
+                continue;
+            }
+            // Glass between the two makes a window. With nothing between them, the pair is an opening only where the
+            // drawing marks its axis between them, and then a door; otherwise it is the pier between two openings.
+            let glass = glazed(wall, &lines, *a, *b, how);
+            if glass || axis_marked(wall, &lines, *a, *b, how) {
+                holes.push((wall.start + wall.dir() * ((a + b) / 2.0), width, glass));
             }
         }
     }
@@ -2037,6 +2082,47 @@ mod tests {
         // Without the glass the pair of lines says nothing: the space between two windows is a pair too.
         let bare: Vec<(&str, [f64; 4])> = lines[..4].to_vec();
         assert!(reading(&bare).holes.is_empty());
+    }
+
+    #[test]
+    fn an_opening_with_one_face_carried_across_it_is_a_door_whatever_is_drawn_in_it() {
+        // An outside door as a survey draws it: the inside face open where the floor runs in, the outside face carried
+        // across on the threshold, and the threshold's inner edge drawn 50 inside it. That line is inside the wall and
+        // alongside it, as glass would be, but under a window the wall goes on below the cut on both sides.
+        let mut lines = doorway(2550.0, 3450.0);
+        lines.extend([("A", [2550.0, 300.0, 3450.0, 300.0]), ("A", [2550.0, 250.0, 3450.0, 250.0])]);
+        lines.extend([("A", [2550.0, 0.0, 2550.0, 300.0]), ("A", [3450.0, 0.0, 3450.0, 300.0])]);
+        let r = reading(&lines);
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}: {:?}", r.holes.len(), r.holes) };
+        assert!(!hole.window && (hole.width - 900.0).abs() < 1e-6, "a door: {hole:?}");
+        // With its sill drawn on both sides and the glass between, the same opening is a window.
+        let mut sill = lines.clone();
+        sill.extend([("A", [2550.0, 0.0, 3450.0, 0.0]), ("A", [2550.0, 150.0, 3450.0, 150.0])]);
+        let [hole] = &reading(&sill).holes[..] else { panic!("one opening") };
+        assert!(hole.window, "{hole:?}");
+    }
+
+    #[test]
+    fn a_doorway_the_wall_runs_past_is_found_by_its_jambs_and_the_axis_drawn_between_them() {
+        // A door with its threshold drawn on both faces: the faces carry on across it, the jambs are drawn across the
+        // wall, and nothing lies between them but the opening's axis, drawn across the wall and out past both faces.
+        let mut lines = vec![("A", [0.0, 0.0, 6000.0, 0.0]), ("A", [0.0, 300.0, 6000.0, 300.0])];
+        lines.extend([("A", [2500.0, 0.0, 2500.0, 300.0]), ("A", [3500.0, 0.0, 3500.0, 300.0])]);
+        let pier = reading(&lines);
+        assert!(pier.holes.is_empty(), "two jambs alone are a pier between two openings: {:?}", pier.holes);
+        lines.push(("A", [3000.0, -150.0, 3000.0, 450.0]));
+        let r = reading(&lines);
+        let [wall] = &r.walls[..] else { panic!("one wall, not {}", r.walls.len()) };
+        assert!((wall.length() - 6000.0).abs() < 1e-6);
+        let [hole] = &r.holes[..] else { panic!("one opening, not {}: {:?}", r.holes.len(), r.holes) };
+        assert!(!hole.window && (hole.width - 1000.0).abs() < 1e-6 && (hole.at - 3000.0).abs() < 1e-6, "{hole:?}");
+        // An axis drawn off the middle of the pair, or one too short to cross the wall, marks nothing there.
+        let mut off = lines.clone();
+        off.last_mut().unwrap().1 = [2600.0, -150.0, 2600.0, 450.0];
+        assert!(reading(&off).holes.is_empty(), "{:?}", reading(&off).holes);
+        let mut short = lines.clone();
+        short.last_mut().unwrap().1 = [3000.0, 200.0, 3000.0, 700.0];
+        assert!(reading(&short).holes.is_empty(), "{:?}", reading(&short).holes);
     }
 
     #[test]
