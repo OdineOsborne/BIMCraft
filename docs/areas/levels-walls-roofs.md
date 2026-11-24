@@ -193,7 +193,10 @@ thickness below, plumb (`roof_rise`), so its slabs, IFC, sections and the walls 
 draw its creases thin. Under its type's variable layer a shaped roof's underside stays level at its base
 (`Model::roof_under`, `roof_prisms`), as a floor's does: its layers in 3D and sections share `Variable::bounds` through
 `Model::variable_under`, walls attached under it stop at that underside, IFC writes it as one closed faceted Brep
-(`Model::roof_solid`), and `Model::check` refuses a point that leaves the layer thinner than nothing. `falls` (`falls.rs`) gives a floor or a flat roof its shape from its drains and the least fall:
+(`Model::roof_solid`), and `Model::check` refuses a point that leaves the layer thinner than nothing. In IFC every roof is
+an `IfcRoof` with no body of its own aggregating its pieces, an `IfcSlab` of type `ROOF` for each (a slope, or the one
+closed Brep of a shaped roof), each with the type's layers, as Revit's exporter writes a roof: Edificius left out a roof
+that carried its own body. A roof of one piece has what voids it void that piece. `falls` (`falls.rs`) gives a floor or a flat roof its shape from its drains and the least fall:
 catchments nearest each drain, ridges between them at the top's height, valleys from each drain to its catchment's corners,
 each drain as deep as the fall takes its farthest corner; round an opening the valleys turn at its corners, which lie on
 the drain's cone, and ridges drawn part the top first. A slab or flat roof whose top isn't one plane comes in from IFC

@@ -106,6 +106,8 @@ const COST_ITEM: u64 = 91;
 const COST_PRICES: u64 = 92;
 const COST_LISTED: u64 = 93;
 const SITE_HOLDS: u64 = 94;
+const ROOF_PIECE: u64 = 95;
+const ROOF_PARTS: u64 = 96;
 
 /// Site footprint metadata in curve order: Names, Guids and Levels (native GUIDs).
 pub const PROPERTY_LINES: &str = "BIMCraft_PropertyLines";
@@ -1514,6 +1516,8 @@ pub(crate) fn export_with(m: &Model, reference_rooms: bool, at: Origin, schema: 
     let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
     // Floors, ceilings and roofs as (entity, placement, its height), for the shafts through them.
     let mut hosts: BTreeMap<Id, (u64, u64, f64)> = BTreeMap::new();
+    // Each roof's pieces, the IfcSlabs of type ROOF it aggregates.
+    let mut roof_pieces: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     // Stairs and ramps as (entity, placement, its height, its parts), for the railings along them.
     let mut wholes: BTreeMap<Id, (u64, u64, f64, Vec<u64>)> = BTreeMap::new();
     // Reinforcing bars as (level, host, entity): aggregated to their host, else in their level.
@@ -2090,25 +2094,46 @@ pub(crate) fn export_with(m: &Model, reference_rooms: bool, at: Origin, schema: 
                     Some(solid) => vec![w.polyhedron(&solid, m.elevation(r.level))],
                     None => pieces.iter().map(|(face, rise)| w.brep(face, m.elevation(r.level), *rise)).collect(),
                 };
-                let shape = w.solid(&breps, &[]);
                 let kind = match (&r.extrusion, r.slope == 0.0, r.gable || !r.gables.is_empty()) {
                     (Some(x), ..) => [".SHED_ROOF.", ".GABLE_ROOF."].get(x.profile.len().saturating_sub(2)).unwrap_or(&".FREEFORM."),
                     (None, true, _) => ".FLAT_ROOF.",
                     (None, false, true) => ".GABLE_ROOF.",
                     (None, false, false) => ".HIP_ROOF.",
                 };
-                let ent = w.add(format!(
-                    "IFCROOF({},$,{},$,{},#{at},#{shape},'{id}',{kind})",
-                    w.guid(ELEMENT, id),
-                    s(&r.type_name),
-                    s(&r.type_name)
-                ));
+                // The roof is the sum of its pieces, as Revit's exporter writes it and as other programs read a roof
+                // (Edificius among them, which leaves out an IfcRoof that carries its own body): an IfcSlab of type ROOF
+                // for each piece, each with its body, and the IfcRoof, with none, aggregating them.
+                let ent =
+                    w.add(format!("IFCROOF({},$,{},$,{},#{at},$,'{id}',{kind})", w.guid(ELEMENT, id), s(&r.type_name), s(&r.type_name)));
+                let mut slabs = Vec::new();
+                for (i, brep) in breps.iter().enumerate() {
+                    let shape = w.solid(&[*brep], &[]);
+                    let piece_at = w.place(Some(at), (0.0, 0.0, 0.0), None);
+                    slabs.push((
+                        w.add(format!(
+                            "IFCSLAB({},$,{},$,{},#{piece_at},#{shape},'{id}',.ROOF.)",
+                            w.guid(ROOF_PIECE, w.part(id, i)),
+                            s(&r.type_name),
+                            s(&r.type_name)
+                        )),
+                        piece_at,
+                    ));
+                }
+                let pieces: Vec<u64> = slabs.iter().map(|(slab, _)| *slab).collect();
+                if !pieces.is_empty() {
+                    w.add(format!("IFCRELAGGREGATES({},$,$,$,#{ent},({}))", w.guid(ROOF_PARTS, id), refs(&pieces)));
+                }
+                roof_pieces.insert(id, pieces);
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
                 // Its type is flat only where the roof is (the test its own kind takes above), else NOTDEFINED.
                 let flat = r.extrusion.is_none() && r.slope == 0.0;
                 w.typed("IFCROOFTYPE", if flat { ".FLAT_ROOF." } else { ".NOTDEFINED." }, &r.type_name, ent);
-                hosts.insert(id, (ent, at, m.elevation(r.level)));
+                // What voids it voids the piece that has a body: the one piece of a roof of one, else the roof.
+                match slabs.as_slice() {
+                    [(slab, piece_at)] => hosts.insert(id, (*slab, *piece_at, m.elevation(r.level))),
+                    _ => hosts.insert(id, (ent, at, m.elevation(r.level))),
+                };
                 // Gross follows the actual planes with authored openings filled; courtyards and joins remain.
                 // Net follows the same roof geometry used for export, less its openings and intersecting shafts.
                 // A roof whose faces can't be found (a gable edge its footprint doesn't have) has no area to say: none is written.
@@ -2372,7 +2397,12 @@ pub(crate) fn export_with(m: &Model, reference_rooms: bool, at: Origin, schema: 
             _ => continue,
         };
         if !m.type_layers(cat, name).is_empty() {
-            slab_uses.entry((cat, name, offset)).or_default().push(ent);
+            let uses = slab_uses.entry((cat, name, offset)).or_default();
+            // A roof's layers are its pieces' as well as its own: the pieces are what has a body.
+            match (roof_pieces.get(&id), products.get(&id)) {
+                (Some(pieces), Some(roof)) => uses.extend(pieces.iter().copied().chain([*roof])),
+                _ => uses.push(ent),
+            }
         }
     }
     let mut slab_sets: BTreeMap<(&str, &str), u64> = BTreeMap::new();
@@ -2731,7 +2761,9 @@ mod tests {
         assert!(f.contains("FILE_SCHEMA(('IFC4'));"));
         let n = |e: &str| f.matches(&format!("={e}(")).count();
         assert_eq!([n("IFCPROJECT"), n("IFCSITE"), n("IFCBUILDING"), n("IFCBUILDINGSTOREY")], [1, 1, 1, 2]);
-        assert_eq!([n("IFCWALL"), n("IFCDOOR"), n("IFCWINDOW"), n("IFCSLAB"), n("IFCSPACE")], [7, 4, 5, 1, 4]);
+        // The floor's slab, and the hipped roof's four slopes, each an IfcSlab of type ROOF the IfcRoof aggregates.
+        assert_eq!([n("IFCWALL"), n("IFCDOOR"), n("IFCWINDOW"), n("IFCSLAB"), n("IFCSPACE")], [7, 4, 5, 5, 4]);
+        assert_eq!(f.matches(",.ROOF.);").count(), 4);
         assert_eq!([n("IFCOPENINGELEMENT"), n("IFCRELVOIDSELEMENT"), n("IFCRELFILLSELEMENT")], [9, 9, 9]);
         assert!(f.contains("'Kitchen'"), "rooms keep their names");
     }
@@ -2810,8 +2842,8 @@ mod tests {
             f.contains("IFCMATERIALLAYERSETUSAGE(") && f.contains(".AXIS2.,.NEGATIVE.,150.,$)") && f.contains(".AXIS2.,.NEGATIVE.,300.,$)")
         );
         assert!(f.contains("IFCMATERIALLAYER(#") && f.contains("'LoadBearing'") && f.contains("'Brick'"));
-        // The walls attached to the roof, and the roof, as closed shells; the others swept up.
-        assert_eq!(f.matches("'Body','Brep'").count(), 3);
+        // The walls attached to the roof, and the roof's two slopes, as closed shells; the others swept up.
+        assert_eq!(f.matches("'Body','Brep'").count(), 4);
         assert_eq!([n("IFCWALL"), n("IFCOPENINGELEMENT"), n("IFCWINDOW")], [4, 2, 1]);
         // Every hole, through a straight wall or a curved one, has a size.
         for line in f.lines().filter(|l| l.contains("=IFCRECTANGLEPROFILEDEF(")) {
@@ -3141,6 +3173,37 @@ mod tests {
         assert_eq!(typed_once(&f, "IFCROOF", "IFCROOFTYPE").len(), 1);
         let roof = type_object(&f, "IFCROOFTYPE", &type_name_of(&s, "roof"));
         assert_eq!((roof.len(), roof[9].as_str()), (10, ".NOTDEFINED."), "a roof sloping 30 degrees, the default");
+    }
+
+    #[test]
+    fn a_roof_is_written_as_its_pieces_slabs_of_type_roof_that_it_aggregates() {
+        use crate::graphics::testing::run;
+        let mut s = Session::new();
+        let layers = json!([
+            {"function": "finish", "material": "Roof tiles", "thickness": 50},
+            {"function": "structure", "material": "Timber", "thickness": 200}
+        ]);
+        run(&mut s, "type", json!({"category": "roof", "name": "Tiled roof", "layers": layers}));
+        let roof = json!({"boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]], "gable": true, "type": "Tiled roof"});
+        run(&mut s, "roof", roof);
+        for f in [export(&s.model), export_as(&s.model, Origin::Internal, Schema::Ifc2x3)] {
+            dangling(&f);
+            let line = |n: u64| f.lines().find(|l| l.starts_with(&format!("#{n}="))).unwrap().to_string();
+            // The roof has no body of its own: other programs read a roof from its pieces, and leave out one that has.
+            let roof = of_kind(&f, "IFCROOF");
+            assert_eq!(roof.len(), 1);
+            assert!(line(roof[0]).contains(",$,'"), "{}", line(roof[0]));
+            // Its two slopes are slabs of type ROOF, each with a body and the roof's layers, and the roof aggregates them.
+            let slabs = of_kind(&f, "IFCSLAB");
+            assert_eq!(slabs.len(), 2);
+            for slab in &slabs {
+                assert!(line(*slab).ends_with(",.ROOF.);"), "{}", line(*slab));
+                assert!(f.lines().any(|l| l.contains("=IFCRELASSOCIATESMATERIAL(") && l.contains(&format!("#{slab},"))
+                    || l.contains("=IFCRELASSOCIATESMATERIAL(") && l.contains(&format!("#{slab})"))));
+            }
+            let whole = format!("#{},(#{},#{}))", roof[0], slabs[0], slabs[1]);
+            assert!(f.lines().any(|l| l.contains("=IFCRELAGGREGATES(") && l.ends_with(&format!("{whole};"))), "{whole}");
+        }
     }
 
     #[test]
