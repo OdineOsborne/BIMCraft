@@ -325,7 +325,10 @@ other_files(
          points: where they are not, it is refused and both distances are said. Without `plan` and `drawn` nothing \
          changes and what the part stands at is reported: `along`, the degrees its face runs at in plan, and `out`, \
          how far the two distances differ. `at` is a list of points in the plan, and `drawn_at` is where the part \
-         draws each of them, which is how a reading is held against the drawing",
+         draws each of them, which is how a reading is held against the drawing. A plan part stands the same way under \
+         the plan of another floor drawn beside it on the sheet: `plan` two points as that plan draws them (a corner at \
+         each end of a wall both floors have), `drawn` the same two as this one does, as far apart in each; \
+         `trace_walls` and `cad_openings` then read it turned and moved onto them, so its walls stand under the floor above",
         cad_anchor,
     ),
     edit(
@@ -2342,6 +2345,8 @@ other_files(
         "{id | ids: [id,…], …fields} change fields as `elements` shows them, of one element or several; `level` and `top_level` may be names. \
          `join: false` on a wall or a run turns off its joins: its ends stay square and it neither stretches with its neighbours nor pulls \
          them (Revit's Disallow Join). \
+         A wall's base raised or lowered (`level`, `base_offset`) leaves its doors and windows where they stand, as Revit keeps \
+         them at their height over the level: their `sill`, measured from the wall's base, changes by as much. \
          A filled region's or a floor's model pattern is set by `pattern_origin` [x, y], plan mm, where its lines start, and \
          `pattern_angle`, degrees counter-clockwise (both shown by `elements`); to put a pattern line of one on a reference \
          line, Model::align_pattern gives the `pattern_origin` that does. A floor's, a ceiling's, a roof's or a shaft's \
@@ -4949,20 +4954,36 @@ fn part_told(c: &str, m: &Model, row: &Value) -> Result<crate::model::CadPart, S
     let phase = string(c, row, "phase")?;
     let anchor = match row.get("anchor") {
         v if absent(v) => None,
-        Some(Value::Object(_)) => Some(anchor_told(c, &row["anchor"])?),
+        Some(Value::Object(_)) => Some(anchor_told(c, &row["anchor"], kind)?),
         Some(v) => return Err(bad(c, format!("`anchor` is {{plan, drawn}}, each two points, not {v}"))),
         None => None,
     };
     Ok(crate::model::CadPart { name, kind, region, level, phase, anchor })
 }
 
-/// Where a part stands against its plan, read from what the user said of it.
-fn anchor_told(c: &str, row: &Value) -> Result<crate::model::Anchor, String> {
+/// Where a part stands against its plan, read from what the user said of it: a part of `kind`.
+fn anchor_told(c: &str, row: &Value, kind: crate::model::PartKind) -> Result<crate::model::Anchor, String> {
     let pair = |key: &str| match points(c, row, key)?.as_slice() {
         [a, b] => Ok([*a, *b]),
         _ => Err(bad(c, format!("an anchor's `{key}` is two points, [[x, y], [x, y]]"))),
     };
     let anchor = crate::model::Anchor { plan: pair("plan")?, drawn: pair("drawn")? };
+    // A plan stands under another floor's plan by two points both draw, which must be as far apart in each.
+    if kind == crate::model::PartKind::Plan {
+        let (across, drawn) = (anchor.plan[1].dist(anchor.plan[0]), anchor.drawn[1].dist(anchor.drawn[0]));
+        if across < 1.0 {
+            return Err(bad(c, "the two points of the plan are one point: pick two corners well apart"));
+        }
+        if anchor.out_flat() > crate::model::ANCHOR_AGREE {
+            return Err(bad(
+                c,
+                format!(
+                    "the plan has those two points {across:.0} mm apart and this plan draws them {drawn:.0} mm apart:                      pick the same two corners in both, of something both floors draw"
+                ),
+            ));
+        }
+        return Ok(anchor);
+    }
     // An elevation draws its face at the plan's own scale, so the two distances must come out the same. Where they
     // do not, the two points are not the same two points, or they do not both lie on the face it draws.
     if anchor.out() > crate::model::ANCHOR_AGREE {
@@ -4987,7 +5008,7 @@ fn cad_anchor(s: &mut Session, p: &Value) -> R {
         _ => points(c, p, "at")?,
     };
     let told = match (p.get("plan"), p.get("drawn")) {
-        (Some(_), Some(_)) => Some(anchor_told(c, p)?),
+        (Some(_), Some(_)) => Some(anchor_told(c, p, part_of(c, &u, &name)?.kind)?),
         (None, None) => None,
         _ => return Err(bad(c, "an anchor needs both `plan` and `drawn`, two points each")),
     };
@@ -5128,6 +5149,24 @@ fn cad_part(s: &mut Session, p: &Value) -> R {
 }
 
 /// The part of `u` that `name` names, or what it is made of instead.
+/// The drawing as a plan part has it read: where the part is the plan of another floor stood under a plan drawn beside
+/// it, the drawing carried with it (`Anchor::carry`), turned and moved, and the part's area with it; the drawing and
+/// its area as they are otherwise. So the walls traced from it stand under the floor above, not beside it.
+fn stood(u: &crate::model::Underlay, part: &crate::model::CadPart) -> (crate::model::Underlay, (P2, P2)) {
+    let area = (part.region[0], part.region[1]);
+    let Some(anchor) = part.anchor.filter(|_| part.kind == crate::model::PartKind::Plan) else { return (u.clone(), area) };
+    let (sin, cos) = anchor.turn().sin_cos();
+    let r = u.at - anchor.drawn[0];
+    let mut moved = u.clone();
+    moved.at = P2(anchor.plan[0].0 + r.0 * cos - r.1 * sin, anchor.plan[0].1 + r.0 * sin + r.1 * cos);
+    moved.angle = u.angle + anchor.turn().to_degrees();
+    let [sw, ne] = part.region;
+    let corners = [sw, P2(ne.0, sw.1), ne, P2(sw.0, ne.1)].map(|q| anchor.carry(q));
+    let lo = corners.iter().fold(P2(f64::INFINITY, f64::INFINITY), |a, q| P2(a.0.min(q.0), a.1.min(q.1)));
+    let hi = corners.iter().fold(P2(f64::NEG_INFINITY, f64::NEG_INFINITY), |a, q| P2(a.0.max(q.0), a.1.max(q.1)));
+    (moved, (lo, hi))
+}
+
 fn part_of(c: &str, u: &crate::model::Underlay, name: &str) -> Result<crate::model::CadPart, String> {
     match u.parts.iter().find(|part| part.name == name) {
         Some(part) => Ok(part.clone()),
@@ -5306,9 +5345,9 @@ fn cad_openings(s: &mut Session, p: &Value) -> R {
         skew: num(c, p, "skew")?.unwrap_or(was.skew),
         openings: true,
         alone: false,
-        within: Some((plan.region[0], plan.region[1])),
+        within: Some(stood(&u, &plan).1),
     };
-    let reading = crate::trace::read(&s.model, &u, &how).map_err(|e| bad(c, e))?;
+    let reading = crate::trace::read(&s.model, &stood(&u, &plan).0, &how).map_err(|e| bad(c, e))?;
     // What the elevation says of how high things are: the one number that turns a point of it into a height.
     let read = crate::underlay::heights(&s.model, &u, part.region);
     // Every line the elevation draws level, read once: the drawing is walked for them, not for each opening.
@@ -7080,9 +7119,14 @@ fn trace_walls(s: &mut Session, p: &Value) -> R {
                 [sw, ne] => Some((*sw, *ne)),
                 _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
             },
-            (_, Some(part)) => Some((part.region[0], part.region[1])),
+            (_, Some(part)) => Some(stood(&u, part).1),
             _ => None,
         },
+    };
+    // A plan part stood under the plan of another floor is read where it stands, not where the sheet draws it.
+    let u = match &told {
+        Some(part) if absent(p.get("region")) => stood(&u, part).0,
+        _ => u,
     };
     let rooms = match p.get("rooms") {
         v if absent(v) => false,
@@ -20052,6 +20096,8 @@ fn modify(s: &mut Session, p: &Value) -> R {
     let moving_footings: Vec<Id> =
         ids.iter().copied().filter(|id| m.elements.get(*id).is_some_and(|e| e.category() == "stripfooting")).collect();
     let mut following: Vec<(Id, Element)> = Vec::new();
+    // The doors and windows of a wall whose base goes up or down, and by how much: they stay where they are.
+    let mut lowered: Vec<(Id, f64)> = Vec::new();
     for &id in &ids {
         if m.is_pinned(id)
             && let Some(k) = fields.keys().find(|k| PLACED_BY.contains(&k.as_str()))
@@ -20148,6 +20194,22 @@ fn modify(s: &mut Session, p: &Value) -> R {
                 }
             }
         }
+        // A door's or a window's sill is measured from its wall's base, but where it stands is the building's, as Revit
+        // keeps it at its height over the level whatever the wall's base offset: a wall's base lowered to the pavement
+        // outside leaves its windows where they were, their sills that much higher over the new base. One the base is raised
+        // past stands on it, a sill of 0, as nothing of a door hangs under its wall.
+        if let (Element::Wall(old), Element::Wall(w)) = (e, &e2) {
+            let by = m.own_base(old) - m.own_base(w);
+            if by.abs() > 1e-9 {
+                for (oid, oe) in &m.elements {
+                    if let Element::Door(o) | Element::Window(o) = oe
+                        && m.same(o.host, id)
+                    {
+                        lowered.push((*oid, by));
+                    }
+                }
+            }
+        }
         // A wall put on another of its lines stays where it is: its line moves across it instead.
         if let (Element::Wall(old), Element::Wall(w)) = (e, &mut e2)
             && old.location != w.location
@@ -20175,6 +20237,15 @@ fn modify(s: &mut Session, p: &Value) -> R {
         edited.push((id, e2));
     }
     edited.extend(rescaled);
+    // Those doors and windows keep their height.
+    for (oid, by) in lowered {
+        let at = edited.iter().position(|(id, _)| *id == oid);
+        let Some(mut el) = at.map(|i| edited.remove(i).1).or_else(|| m.elements.get(oid).cloned()) else { continue };
+        if let Element::Door(o) | Element::Window(o) = &mut el {
+            o.sill = (o.sill + by).max(0.0);
+        }
+        edited.push((oid, el));
+    }
     // A footing under a wall raised or lowered goes with it, unless the command set the footing itself.
     for (fid, e) in following {
         if !ids.contains(&fid) {

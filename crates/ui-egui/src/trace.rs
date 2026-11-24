@@ -295,7 +295,7 @@ fn layers_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>) 
 
 /// The Parts tab: what each part of the drawing is of the building. A change is its own `cad_parts`, carrying the
 /// whole list, as the Layers tab's clicks are their own `cad_layers`.
-fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>, mark: &mut bool) {
+fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>, mark: &mut bool, align: &mut Option<String>) {
     let Some(u) = underlay_of(m, d.underlay) else { return };
     let said = t(
         "What each part of the drawing is of the building. A survey is often saved as a whole set of sheets side by side in one file, and this says which rectangle of it is which, so that each is read as what it is.",
@@ -342,9 +342,11 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>, m
     let level_options: Vec<String> = std::iter::once(none.clone()).chain(levels.iter().map(|(name, _)| name.clone())).collect();
     let phase_options: Vec<String> = std::iter::once(none.clone()).chain(m.phases.iter().cloned()).collect();
     let mut drop: Option<usize> = None;
+    // A plan is stood under another only where the drawing has another: the one plan of a drawing is the one in place.
+    let plans = parts.iter().filter(|part| part.kind == PartKind::Plan).count();
     ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
-        Grid::new("trace-parts").num_columns(6).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
-            for label in ["Name", "What it is", "Level", "Phase", "Heights"] {
+        Grid::new("trace-parts").num_columns(7).spacing([10.0, 4.0]).striped(true).show(ui, |ui| {
+            for label in ["Name", "What it is", "Level", "Phase", "Heights", bimcraft_i18n::msg!("Against the Plan")] {
                 ui.label(RichText::new(t(label)).color(pal().muted));
             }
             ui.label("");
@@ -388,6 +390,29 @@ fn parts_tab(ui: &mut Ui, d: &TraceDialog, m: &Model, run: &mut Option<Value>, m
                             false => pal().error,
                         };
                         ui.label(RichText::new(said).color(colour));
+                    }
+                }
+                // Where it stands against the plan: an elevation or a section by two corners of the face it shows, a plan
+                // of another floor under the one already in place by two corners both draw. The plan everything else is
+                // stood against needs none.
+                match (part.kind.is_view() || (part.kind == PartKind::Plan && plans > 1), part.anchor.is_some()) {
+                    (false, _) => {
+                        ui.label("");
+                    }
+                    (true, stood) => {
+                        let (said, tip) = match stood {
+                            true => (
+                                t("Aligned, again"),
+                                t("It stands against the plan. Click to pick its two corners again, on the plan and where it draws them."),
+                            ),
+                            false => (
+                                t("Align"),
+                                t("Click two corners of the building on the plan already in place, then the same two where this part draws them. A plan that is itself the one in place needs nothing."),
+                            ),
+                        };
+                        if ui.button(said).on_hover_text(tip).clicked() {
+                            *align = Some(part.name.clone());
+                        }
                     }
                 }
                 if ui.button(t("Remove")).clicked() {
@@ -1367,7 +1392,7 @@ impl BimApp {
         let Some(mut d) = self.trace_dialog.take() else { return };
         // Stepped aside while Mark Part draws round the sheets, so that none of them is under it: Esc or Done brings it
         // back as it was, on its Parts tab.
-        if matches!(self.tool, crate::Tool::MarkPart { .. }) {
+        if matches!(self.tool, crate::Tool::MarkPart { .. } | crate::Tool::AnchorPart { .. }) {
             self.trace_dialog = Some(d);
             return;
         }
@@ -1392,6 +1417,7 @@ impl BimApp {
         let (mut stairing, mut grounding) = (None::<Value>, None::<Value>);
         let mut open = true;
         let mut mark = false;
+        let mut align = None::<String>;
         egui::Window::new(t("Trace Walls"))
             .id(UiId::new("trace-walls"))
             .open(&mut open)
@@ -1424,7 +1450,7 @@ impl BimApp {
                 ui.separator();
                 match d.tab {
                     0 => layers_tab(ui, &d, &model, &mut layers),
-                    1 => parts_tab(ui, &d, &model, &mut parts, &mut mark),
+                    1 => parts_tab(ui, &d, &model, &mut parts, &mut mark, &mut align),
                     2 => walls_tab(ui, &mut d, &model, &mut find, &mut build, &mut stairing),
                     3 => heights_tab(ui, &mut d, &model, &mut read, &mut storey, &mut roofing, &mut slabbing),
                     _ => ground_tab(ui, &mut d, &model, &mut grounding),
@@ -1496,6 +1522,9 @@ impl BimApp {
         if mark {
             self.set_tool(crate::Tool::MarkPart { underlay: d.underlay, first: None });
         }
+        if let Some(part) = align {
+            self.set_tool(crate::Tool::AnchorPart { underlay: d.underlay, part, picked: Vec::new() });
+        }
         if open && !close {
             self.trace_dialog = Some(d);
         }
@@ -1532,11 +1561,50 @@ impl BimApp {
         }
     }
 
+    /// A click while Align picks a part's corners, snapped, at `at` in the plan's millimetres: two on the plan in place,
+    /// then the same two where the part draws them, which stands it there (`cad_anchor`). Refused, as where the two
+    /// distances do not agree, it says why and starts again from the first corner.
+    pub(crate) fn anchor_part_at(&mut self, at: P2) {
+        let crate::Tool::AnchorPart { underlay, part, mut picked } = self.tool.clone() else { return };
+        picked.push(at);
+        if picked.len() < 4 {
+            self.tool = crate::Tool::AnchorPart { underlay, part, picked };
+            return;
+        }
+        let xy = |q: P2| json!([q.0, q.1]);
+        let params = json!({
+            "underlay": underlay,
+            "part": part,
+            "plan": [xy(picked[0]), xy(picked[1])],
+            "drawn": [xy(picked[2]), xy(picked[3])],
+        });
+        match self.run("cad_anchor", params) {
+            Some(_) => {
+                self.set_tool(crate::Tool::Modify);
+                let across = picked[0].dist(picked[1]);
+                let text = tf("{} aligned: its two corners are {} mm apart, as on the plan.", &[&part, &format!("{across:.0}")]);
+                self.status = crate::Status { text, error: false };
+                if let Some(d) = self.trace_dialog.as_mut() {
+                    d.tab = 1;
+                }
+            }
+            // `run` has said why in the status line; the picking starts again, the part still to align.
+            None => self.tool = crate::Tool::AnchorPart { underlay, part, picked: Vec::new() },
+        }
+    }
+
+    /// Align's Start Again: the corners clicked so far forgotten, the same part still to align.
+    pub(crate) fn restart_anchor(&mut self) {
+        if let crate::Tool::AnchorPart { picked, .. } = &mut self.tool {
+            picked.clear();
+        }
+    }
+
     /// The parts of the drawing under the plan of `level`, each its rectangle and its name in a corner of it, while
     /// Trace Walls is open or Mark Part is drawing: what has been said of the sheets, over the sheets themselves.
     pub(crate) fn paint_parts(&self, p: &egui::Painter, view: &View, origin: Pos2, level: Id) {
         let underlay = match (&self.tool, &self.trace_dialog) {
-            (crate::Tool::MarkPart { underlay, .. }, _) => *underlay,
+            (crate::Tool::MarkPart { underlay, .. } | crate::Tool::AnchorPart { underlay, .. }, _) => *underlay,
             (_, Some(d)) => d.underlay,
             _ => return,
         };

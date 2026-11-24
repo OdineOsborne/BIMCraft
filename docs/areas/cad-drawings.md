@@ -619,6 +619,21 @@ know which of them is the outside of what, and the two differ by a wall's thickn
 none of which the drawing labels. Two clicks settle it, and the arithmetic says at once whether they were the right
 two.
 
+In the window this is **Align**, a button on each elevation's and section's row of Trace Walls' Parts tab
+(`Tool::AnchorPart`, `trace::anchor_part_at`): the window steps aside, and four clicks, each snapped to the drawing,
+are the two corners on the plan and the same two where the part draws them. A refusal says the two distances in the
+status line and the picking starts again; Start Again forgets the corners clicked, Esc or Cancel ends.
+
+**A plan stands under another the same way.** A survey draws its floors side by side on one sheet, the basement 24 m
+beside the ground floor on the permesso di costruire, and a wall traced from the basement's plan comes in where the
+sheet draws it, under nothing. So a plan part takes an anchor too: two corners the plan already in place draws (the
+ends of a wall that goes down through both floors), and the same two as this plan draws them. It may be turned as well
+as moved (`Anchor::turn`, `Anchor::carry`); the check is that the two pairs are as far apart, measured as they lie
+(`Anchor::out_flat`), since a plan is drawn square on from above and not along one face. `trace_walls` and
+`cad_openings` read an anchored plan part through a copy of the drawing turned and moved onto the plan
+(`commands::stood`), its area with it, so its walls stand under the floor above. The window offers Align on a plan's
+row only where the drawing has more than one plan: the one plan of a drawing is the one in place.
+
 ## The sills and the heads of the openings
 
 With the elevation stood against its plan, the two readings can be put together: the plan says where an opening is

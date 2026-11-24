@@ -2298,6 +2298,11 @@ impl BimApp {
             }
             Tool::ExportRegion(_) => self.export_region_at(v.mm(at)),
             Tool::MarkPart { .. } => self.mark_part_at(v.mm(at)),
+            // Each corner snapped to what the drawing draws: the two distances must agree to a few centimetres.
+            Tool::AnchorPart { .. } => {
+                let pt = self.snap_point(m, level, v, at, &[], false);
+                self.anchor_part_at(pt);
+            }
             Tool::SpecifyPoint => {
                 // Snapped as any point; its height by what it snapped to.
                 let f = self.snap(m, level, v, at, &[], false);
@@ -4508,6 +4513,30 @@ impl BimApp {
             }
             &Tool::ExportRegion(first) | &Tool::MarkPart { first, .. } => {
                 crate::export::region_band(p, first.map(|a| sc.screen(a)), cursor);
+                return;
+            }
+            Tool::AnchorPart { picked, .. } => {
+                // The corners clicked so far, numbered, each pair joined: the plan's two, then the part's.
+                let at = self.found(sc, q, &[], false);
+                let mark = |p: &Painter, q: P2, n: usize| {
+                    let c = sc.screen(q);
+                    p.circle_stroke(c, 6.0, stroke);
+                    p.line_segment([c - vec2(9.0, 0.0), c + vec2(9.0, 0.0)], thin);
+                    p.line_segment([c - vec2(0.0, 9.0), c + vec2(0.0, 9.0)], thin);
+                    label(c, n.to_string());
+                };
+                for (i, q) in picked.iter().enumerate() {
+                    mark(p, *q, i % 2 + 1);
+                }
+                for pair in picked.chunks(2) {
+                    if let [a, b] = pair {
+                        p.line_segment([sc.screen(*a), sc.screen(*b)], thin);
+                    }
+                }
+                if picked.len() % 2 == 1 {
+                    p.line_segment([sc.screen(picked[picked.len() - 1]), sc.screen(at)], thin);
+                }
+                mark(p, at, picked.len() % 2 + 1);
                 return;
             }
             Tool::SpecifyPoint => {

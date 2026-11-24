@@ -889,3 +889,47 @@ fn the_ground_tab_builds_the_land_the_survey_measured() {
     press(&mut h, "Build the Ground");
     assert_eq!(grounds_of(&h).len(), 1);
 }
+
+#[test]
+fn align_stands_an_elevation_against_the_plan_by_two_corners_clicked_on_each() {
+    // A room's plan and, 20 m east of it, the elevation of its south face: the face's two ends at 20 m and 28 m.
+    let mut lines = one_room("MURI");
+    lines.extend(rect("MURI", [20_000.0, 0.0, 28_000.0, 3000.0]));
+    let mut h = linked(&lines, None);
+    let parts = json!([
+        {"name": "PIANTA", "kind": "plan", "region": [[-2000, -2000], [10_000, 8000]]},
+        {"name": "PROSPETTO SUD", "kind": "elevation", "region": [[19_000, -2000], [29_000, 5000]]},
+    ]);
+    h.state_mut().session.execute("cad_parts", &json!({"parts": parts})).expect("it takes them");
+    h.run();
+    shortcut(&mut h, "ZF");
+    shortcut(&mut h, "TW");
+    press(&mut h, "Parts");
+    // The one plan of the drawing is the one in place: only the elevation has the button.
+    press(&mut h, "Align");
+    assert!(matches!(&h.state().tool, crate::Tool::AnchorPart { part, picked, .. } if part == "PROSPETTO SUD" && picked.is_empty()));
+    assert!(h.query_by_label("Against the Plan").is_none(), "the window is out of the way of the drawing");
+    let anchor = |h: &Harness<BimApp>| {
+        h.state().session.model.elements.values().find_map(|e| match e {
+            bimcraft_core::model::Element::Underlay(u) => u.parts.iter().find(|p| p.name == "PROSPETTO SUD").and_then(|p| p.anchor),
+            _ => None,
+        })
+    };
+    // Two corners on the plan, then two where the elevation draws them, but the second of these the wrong one: 3 m is
+    // not 8 m, so it is refused, says why, and the picking starts again.
+    for at in [P2(0.0, 0.0), P2(8000.0, 0.0), P2(20_000.0, 0.0), P2(20_000.0, 3000.0)] {
+        click(&mut h, at);
+    }
+    assert!(anchor(&h).is_none());
+    assert!(h.state().status.text.contains("8000 mm apart"), "{}", h.state().status.text);
+    assert!(matches!(&h.state().tool, crate::Tool::AnchorPart { picked, .. } if picked.is_empty()));
+    for at in [P2(0.0, 0.0), P2(8000.0, 0.0), P2(20_000.0, 0.0), P2(28_000.0, 0.0)] {
+        click(&mut h, at);
+    }
+    let stood = anchor(&h).expect("it stands");
+    assert_eq!((stood.plan, stood.drawn), ([P2(0.0, 0.0), P2(8000.0, 0.0)], [P2(20_000.0, 0.0), P2(28_000.0, 0.0)]));
+    // The window comes back on its Parts tab, the elevation's button saying it stands.
+    assert_eq!(h.state().tool, crate::Tool::Modify);
+    assert_eq!(h.state().trace_dialog.as_ref().map(|d| d.tab), Some(1));
+    assert!(h.query_by_label("Aligned, again").is_some());
+}

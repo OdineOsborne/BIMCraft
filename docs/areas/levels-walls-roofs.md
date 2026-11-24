@@ -138,6 +138,10 @@ With no requested level, or with the host's own level requested, placement keeps
 raised wall base offsets. A supplied level is validated even with an explicit `wall`. Existing host-fit checks and rollback
 still refuse a sill below the host base or at/above its top. This is a placement conversion, with no native format change;
 moving a level later does not rehost an existing opening.
+A wall's base raised or lowered by `modify` (its `level` or its `base_offset`) leaves its doors and windows where they stand,
+as Revit keeps them at their height over the level: their sills change by as much (`wall_base_openings_tests.rs`). A facade
+taken down to the pavement outside, 264 mm under the floor, keeps its windows at 840 over the floor, their sills now 1104
+over the wall's base; one the base is raised past stands on it, a sill of 0.
 A roof by footprint is the straight skeleton of its outline and its `courtyards` (`skeleton::faces`: the outline
 counter-clockwise, the courtyards clockwise, the roof to the left of every edge): each edge moves in at speed 1, a gable's at
 0, and its slope rises from it, reaching the roof's base `overhang` in from its eaves; a courtyard's edges number on after

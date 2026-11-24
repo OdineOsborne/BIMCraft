@@ -1720,7 +1720,8 @@ pub struct CadPart {
     /// its own, so a part says the phase of everything in it, whatever its layers say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// Where it stands against the plan it is a view of, for an elevation or a section: none until it is said.
+    /// Where it stands against the plan it is a view of, for an elevation or a section; for a plan, where it stands
+    /// under the plan of another floor drawn beside it on the same sheet: none until it is said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
 }
@@ -1729,6 +1730,11 @@ pub struct CadPart {
 /// same two as this part draws them. An elevation shows one face at the plan's own scale, so two points that both
 /// lie on that face fix the whole of it, which way it looks and where its left-hand edge is; and because the scale
 /// is the plan's, the two distances must come out the same, which is the check that they were the same two points.
+///
+/// A plan part stands the same way under another floor's plan: a survey draws its floors side by side on one sheet, and
+/// two points the two plans both draw (the corners of a wall that goes down through both) carry the one onto the
+/// other, turned and moved ([`Anchor::carry`]). The two distances must come out the same there too, measured as they
+/// lie ([`Anchor::out_flat`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
@@ -1756,6 +1762,27 @@ impl Anchor {
         let across = self.plan[1].dist(self.plan[0]);
         let drawn = (self.drawn[1].0 - self.drawn[0].0).abs();
         (across - drawn).abs()
+    }
+
+    /// How far the two distances differ where the part is the plan of another floor, drawn beside the plan it stands
+    /// under: a plan is drawn square on from above, so the two pairs are measured as they lie, not along one face.
+    pub fn out_flat(&self) -> f64 {
+        (self.plan[1].dist(self.plan[0]) - self.drawn[1].dist(self.drawn[0])).abs()
+    }
+
+    /// How far a plan part is turned to stand under the plan, radians: from the way its two points run to the way the
+    /// plan's two run.
+    pub fn turn(&self) -> f64 {
+        let (d, p) = (self.drawn[1] - self.drawn[0], self.plan[1] - self.plan[0]);
+        p.1.atan2(p.0) - d.1.atan2(d.0)
+    }
+
+    /// Where a point `q` a plan part draws stands in the project: turned about its first point and moved with it onto
+    /// the plan's first, so that its two points land on the plan's two.
+    pub fn carry(&self, q: P2) -> P2 {
+        let (sin, cos) = self.turn().sin_cos();
+        let r = q - self.drawn[0];
+        P2(self.plan[0].0 + r.0 * cos - r.1 * sin, self.plan[0].1 + r.0 * sin + r.1 * cos)
     }
 
     /// Where the part draws the plan's point `p`: how far along its own x. None where it is no anchor.
@@ -8824,7 +8851,8 @@ impl Model {
                         if anchor.along().is_none() {
                             return Err(format!("{what}: the two points in the plan are one point, and two are needed"));
                         }
-                        if (anchor.drawn[1].0 - anchor.drawn[0].0).abs() <= 1e-9 {
+                        // A plan's two points may run any way, as the plan of another floor is drawn turned or not.
+                        if part.kind.is_view() && (anchor.drawn[1].0 - anchor.drawn[0].0).abs() <= 1e-9 {
                             return Err(format!("{what}: the two points it draws stand one above the other, and a face runs sideways"));
                         }
                     }

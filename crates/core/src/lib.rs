@@ -165,6 +165,8 @@ pub mod pdf;
 pub mod pen;
 pub mod phasing;
 pub mod places;
+#[cfg(test)]
+mod plan_anchor_tests;
 pub mod plumbing;
 #[cfg(test)]
 mod price_tests;
@@ -248,6 +250,8 @@ pub mod underlay;
 mod underlay_tests;
 pub mod units;
 pub mod view3d;
+#[cfg(test)]
+mod wall_base_openings_tests;
 #[cfg(test)]
 mod wall_top_offset_tests;
 pub mod walls;

@@ -199,6 +199,14 @@ pub enum Tool {
         underlay: Id,
         first: Option<P2>,
     },
+    /// Align to the Plan: a part of the drawing under the plan (`underlay`) stood against the plan it is a view of, or,
+    /// for the plan of another floor, under it (`cad_anchor`): two points of the building clicked where the plan draws
+    /// them, then the same two where the part draws them, each snapped to the drawing. The points clicked so far.
+    AnchorPart {
+        underlay: Id,
+        part: String,
+        picked: Vec<P2>,
+    },
     /// Acquire Coordinates: the link or CAD drawing clicked gives the project its shared coordinates.
     Acquire,
     /// Mirror the selection across a line picked, or with `draw`, a line drawn from `start`.
@@ -1866,6 +1874,7 @@ impl BimApp {
             | Tool::SpecifyPoint
             | Tool::ExportRegion(_)
             | Tool::MarkPart { .. }
+            | Tool::AnchorPart { .. }
             | Tool::Acquire => None,
             Tool::Wall(_) => Some(msg!("Place Wall")),
             Tool::Paint => Some("Paint"),
@@ -5666,6 +5675,14 @@ impl BimApp {
                         self.set_tool(Tool::Modify);
                     }
                 }
+                Tool::AnchorPart { ref picked, .. } => {
+                    if !picked.is_empty() && ui.button(t("Start Again")).clicked() {
+                        self.restart_anchor();
+                    }
+                    if ui.button(t("Cancel")).clicked() {
+                        self.set_tool(Tool::Modify);
+                    }
+                }
                 Tool::Mirror { .. } => {
                     ui.checkbox(&mut self.mirror_copy, t("Copy"));
                 }
@@ -6015,6 +6032,14 @@ impl BimApp {
             Tool::MarkPart { first: Some(_), .. } => {
                 msg!("Click the sheet's opposite corner: its caption names it and says what it is. Esc ends.")
             }
+            Tool::AnchorPart { picked, .. } => match picked.len() {
+                0 => msg!(
+                    "Align: click a corner of the building on the plan already in place, one this part draws too (for an elevation, a corner at one end of the face it shows). Esc cancels."
+                ),
+                1 => msg!("Click a second corner on that plan, well apart from the first (the other end of the same face). Esc cancels."),
+                2 => msg!("Now click the first corner again, where this part draws it. Esc cancels."),
+                _ => msg!("Click the second corner, where this part draws it. Esc cancels."),
+            },
             Tool::SpecifyPoint => {
                 msg!(
                     "Click the point the shared coordinates typed are at: it snaps, and a wall's corner is its bottom, a slab's its top. Esc goes back."
