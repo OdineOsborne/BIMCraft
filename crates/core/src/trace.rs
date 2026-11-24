@@ -76,6 +76,10 @@
 //! because a corner is two axes both stopping short of it, taking the one to the other moves the mark the next is
 //! measured from, so it is done again until nothing moves.
 //!
+//! A stair's walking line is no face either, though it pairs as one with a wall or a landing's edge half the stair's
+//! width away: it ends in an arrowhead, which nothing else in a plan has, and it is taken out of the drawing with a
+//! pillar's sides before anything is paired ([`arrows`]).
+//!
 //! Then what is left is tidied of three things that pair as a wall does and are none ([`tidy`]). A block shorter than
 //! it is thick is no wall, because nothing is a wall across itself: a pier drawn as a box, a plinth, the two jambs of
 //! an opening taken for a pair of faces. Two walls cannot be in the same place, so where one axis runs inside
@@ -91,6 +95,7 @@
 use crate::geom::P2;
 use crate::model::{Model, Underlay};
 
+mod arrows;
 mod solids;
 pub use solids::{PILLAR, Pillar};
 
@@ -261,7 +266,11 @@ pub fn read(m: &Model, u: &Underlay, how: &How) -> Result<Reading, String> {
     let how = how.checked()?;
     let (faces, names, marks, mark_layers, longest) = faces_of(m, u, &how)?;
     // A pillar drawn as a box is no wall: its sides are taken out of the drawing before anything is paired.
-    let (mut columns, sides) = solids::pillars(&marks, &how);
+    let (mut columns, mut sides) = solids::pillars(&marks, &how);
+    // So is a stair's walking line, which ends in an arrowhead: it is taken out with them.
+    for (side, walk) in sides.iter_mut().zip(arrows::walking(&marks, &how)) {
+        *side |= walk;
+    }
     let side_runs: Vec<(P2, P2)> = marks.iter().zip(&sides).filter(|(_, side)| **side).map(|(run, _)| *run).collect();
     let is_side = |a: P2, b: P2| side_runs.iter().any(|(p, q)| (*p == a && *q == b) || (*p == b && *q == a));
     let faces: Vec<Face> = faces.into_iter().filter(|f| !is_side(f.at, f.end())).collect();
@@ -2123,6 +2132,74 @@ mod tests {
         let mut short = lines.clone();
         short.last_mut().unwrap().1 = [3000.0, 200.0, 3000.0, 700.0];
         assert!(reading(&short).holes.is_empty(), "{:?}", reading(&short).holes);
+    }
+
+    #[test]
+    fn a_stairs_walking_line_ends_in_an_arrowhead_and_makes_no_wall_with_the_landing() {
+        // The stair of the permesso di costruire this was written against, as it is drawn: a flight 1000 wide between
+        // a wall 100 thick and a wall 300 thick, its treads 280 apart, the winders fanning from the corner of the
+        // landing, and the walking line up the middle of the flight, turning onto the landing and ending in an
+        // arrowhead. Past the flight the walking line has the landing's edge 500 across from it and nothing nearer,
+        // and the two were a wall 500 thick across the landing, with a door 500 wide where the line turns off.
+        let mut walls: Vec<(&str, [f64; 4])> = vec![
+            ("W", [1498.0, 1173.0, 1498.0, 4380.0]),
+            ("W", [1498.0, 300.0, 1498.0, 423.0]),
+            ("W", [1498.0, 300.0, 0.0, 300.0]),
+            ("W", [1498.0, 0.0, 0.0, 0.0]),
+            ("W", [1798.0, 1173.0, 1798.0, 4730.0]),
+            ("W", [1798.0, 0.0, 1798.0, 423.0]),
+            ("W", [0.0, 4730.0, 1798.0, 4730.0]),
+            ("W", [0.0, 4380.0, 398.0, 4380.0]),
+            ("W", [398.0, 1400.0, 0.0, 1400.0]),
+            ("W", [398.0, 1400.0, 398.0, 4380.0]),
+            ("W", [498.0, 4380.0, 1498.0, 4380.0]),
+            ("W", [498.0, 1300.0, 0.0, 1300.0]),
+            ("W", [498.0, 1300.0, 498.0, 4380.0]),
+            ("R", [1498.0, 1173.0, 1498.0, 423.0]),
+            ("R", [1798.0, 1173.0, 1798.0, 423.0]),
+        ];
+        // The window in the outer wall beside the landing, and the stair itself.
+        walls.extend([
+            ("S", [1623.0, 1173.0, 1623.0, 423.0]),
+            ("S", [1673.0, 1173.0, 1673.0, 423.0]),
+            ("S", [1798.0, 1173.0, 1498.0, 1173.0]),
+            ("S", [1798.0, 423.0, 1498.0, 423.0]),
+            ("S", [1973.0, 798.0, 1373.0, 798.0]),
+        ]);
+        for y in (0..10).map(|k| 1580.0 + 280.0 * k as f64) {
+            walls.push(("S", [498.0, y, 1498.0, y]));
+        }
+        walls.extend([
+            ("S", [498.0, 1300.0, 1037.0, 300.0]),
+            ("S", [498.0, 1300.0, 1498.0, 1300.0]),
+            ("S", [498.0, 1300.0, 1498.0, 721.0]),
+            ("S", [498.0, 1300.0, 498.0, 300.0]),
+            ("S", [998.0, 4380.0, 998.0, 800.0]),
+            ("S", [498.0, 800.0, 998.0, 800.0]),
+        ]);
+        let arrow = [("S", [498.0, 800.0, 697.0, 952.0]), ("S", [498.0, 800.0, 697.0, 648.0])];
+        // Cut out of the plan, the walls hold on to less than they do in it, so the lone ones are asked for too.
+        let reading = |lines: &[(&str, [f64; 4])]| {
+            let (m, u) = with(lines);
+            read(&m, &u, &How { alone: true, ..How::default() }).expect("it reads")
+        };
+        let half = |r: &Reading| r.walls.iter().any(|w| (w.thickness - 500.0).abs() < 1.0);
+        let mut drawn = walls.clone();
+        drawn.extend(arrow);
+        let r = reading(&drawn);
+        assert!(!half(&r), "no wall of the walking line: {:?}", r.walls);
+        assert!(r.holes.iter().all(|h| h.width > 600.0), "and no door where it turns: {:?}", r.holes);
+        // What is taken out is the arrowhead, the arrow and the walking line it is drawn on from, and nothing else.
+        let runs =
+            |lines: &[(&str, [f64; 4])]| -> Vec<(P2, P2)> { lines.iter().map(|(_, [a, b, c, d])| (P2(*a, *b), P2(*c, *d))).collect() };
+        let walk = arrows::walking(&runs(&drawn), &How::default());
+        let taken: Vec<[f64; 4]> = drawn.iter().zip(&walk).filter(|(_, w)| **w).map(|(l, _)| l.1).collect();
+        assert_eq!(taken.len(), 4, "{taken:?}");
+        assert!(taken.contains(&[998.0, 4380.0, 998.0, 800.0]) && taken.contains(&[498.0, 800.0, 998.0, 800.0]));
+        // Two lines meeting its end that are not alike are a corner of something, and no arrowhead.
+        let mut corner = walls.clone();
+        corner.extend([("S", [498.0, 800.0, 697.0, 952.0]), ("S", [498.0, 800.0, 898.0, 500.0])]);
+        assert!(!arrows::walking(&runs(&corner), &How::default()).contains(&true));
     }
 
     #[test]

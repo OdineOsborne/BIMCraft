@@ -326,6 +326,14 @@ are drawn with the outside face carried across and the threshold's edge 50 insid
 camera 2's French window, drawn the same way, now comes in as a door too. Glass still decides where both faces are
 carried across or neither is.
 
+**A stair's walking line is no face** (`trace::arrows`). A survey draws the line up the middle of a flight and ends
+it in an arrowhead where the stair arrives; it runs alongside the stair's walls half the stair's width from them, so
+it pairs as a face does. On the PDC it paired with the landing's edge past the flight and made a wall 500 thick across
+the landing, with a door 500 wide where the line turns off. An arrowhead is what nothing else in a plan has: two short
+lines (at most 500) drawn back from one end of a line, alike in length and splayed at the same angle (10 to 60
+degrees) either side of it. That line, the barbs, and the lines it is drawn on from where only the two of them meet
+are taken out with a pillar's sides, before anything is paired. The flights are read from all the lines still.
+
 **A wall that stops short of the wall it runs into has a doorway at its end** (`trace::open_ends`). The piece of
 wall between a door and the corner is a few centimetres long, which is shorter than anything a draughtsman draws as a
 wall's face, so the drawing shows the wall ending at the door — and a building is a wall with a door in it, not a wall
